@@ -7,8 +7,8 @@ set -euo pipefail
 
 # ── Defaults ─────────────────────────────────────────────────────────────────
 
-PREFIX="$HOME/.local"
-AUTO_YES=false
+PREFIX="/usr/local"
+AUTO_YES=true
 WANT_GTK=auto
 WANT_QT=auto
 WANT_ALL=false
@@ -27,30 +27,33 @@ usage() {
 Usage: $0 [OPTIONS]
 
 Options:
-  --system      Install to /usr/local instead of ~/.local
+  --user        Install to ~/.local instead of /usr/local
   --prefix DIR  Install to a custom prefix
   --gtk         Build only the GTK frontend
   --qt          Build only the Qt frontend
   --all         Build both frontends
-  --yes, -y     Non-interactive: accept defaults, install deps automatically
+  --ask         Interactive mode: ask before each step (default is auto)
   --help, -h    Show this help
 
 Examples:
-  $0                # Interactive: detect toolkits, ask what to build
-  $0 --yes --all    # Non-interactive: install everything
+  $0                # Auto-detect toolkits, install deps, build & install
+  $0 --all          # Force build both frontends (install missing deps)
   $0 --gtk          # Build GTK frontend only
-  $0 --system       # Install system-wide to /usr/local/bin
+  $0 --user         # Install to ~/.local/bin instead of /usr/local/bin
+  $0 --ask          # Interactive mode: confirm each step
 EOF
     exit 0
 }
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --user)     PREFIX="$HOME/.local"; shift ;;
         --system)   PREFIX="/usr/local"; shift ;;
         --prefix)   PREFIX="$2"; shift 2 ;;
         --gtk)      WANT_GTK=yes; WANT_QT=no; shift ;;
         --qt)       WANT_QT=yes; WANT_GTK=no; shift ;;
         --all)      WANT_ALL=true; shift ;;
+        --ask)      AUTO_YES=false; shift ;;
         --yes|-y)   AUTO_YES=true; shift ;;
         --help|-h)  usage ;;
         *)          echo "Unknown option: $1"; usage ;;
@@ -287,32 +290,24 @@ main() {
     if [[ "$WANT_QT" == "yes" ]]; then build_qt=true; fi
 
     if [[ "$WANT_GTK" == "auto" && "$WANT_QT" == "auto" ]]; then
-        # Interactive selection
-        echo ""
         if $gtk_available && $qt_available; then
-            local choice
-            choice=$(pick_one "Both GTK and Qt are available. What would you like to build?" \
-                "Both frontends (recommended)" \
-                "GTK frontend only (GNOME / XFCE / Cinnamon / etc.)" \
-                "Qt frontend only (KDE Plasma / LXQt)")
-            case "$choice" in
-                1) build_gtk=true; build_qt=true ;;
-                2) build_gtk=true ;;
-                3) build_qt=true ;;
-            esac
-        elif $gtk_available; then
+            # Both available: build both automatically
             build_gtk=true
-            if confirm "GTK is available. Also install Qt dependencies and build the Qt frontend?"; then
-                build_qt=true
-            fi
-        elif $qt_available; then
             build_qt=true
-            if confirm "Qt is available. Also install GTK dependencies and build the GTK frontend?"; then
-                build_gtk=true
-            fi
+            info "Both toolkits detected, building both frontends"
+        elif $gtk_available; then
+            # Only GTK: build GTK automatically
+            build_gtk=true
+            info "GTK detected, building GTK frontend"
+        elif $qt_available; then
+            # Only Qt: build Qt automatically
+            build_qt=true
+            info "Qt detected, building Qt frontend"
         else
+            # Nothing found: ask the user what to install
+            warn "No toolkit detected."
             local choice
-            choice=$(pick_one "No toolkit found. What would you like to install?" \
+            choice=$(pick_one "Which frontend(s) should be installed?" \
                 "Both GTK and Qt (recommended)" \
                 "GTK only (GNOME / XFCE / Cinnamon / etc.)" \
                 "Qt only (KDE Plasma / LXQt)")
@@ -369,33 +364,20 @@ main() {
     fi
 
     if [[ ${#packages_to_install[@]} -gt 0 ]]; then
-        echo ""
-        info "The following packages need to be installed:"
-        echo "  ${packages_to_install[*]}"
-        echo ""
-        if confirm "Install these packages?"; then
-            install_packages "$distro" "${packages_to_install[@]}"
-            ok "System packages installed"
-        else
-            warn "Skipping package installation. Build may fail if deps are missing."
-        fi
+        info "Installing system packages: ${packages_to_install[*]}"
+        install_packages "$distro" "${packages_to_install[@]}"
+        ok "System packages installed"
     else
         ok "All system dependencies are already installed"
     fi
 
     # --- Ensure Rust is available ---
     if ! has_cmd cargo; then
-        warn "Rust/Cargo not found."
-        if confirm "Install Rust via rustup?"; then
-            info "Installing Rust..."
-            curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
-            # shellcheck source=/dev/null
-            source "$HOME/.cargo/env"
-            ok "Rust installed: $(rustc --version)"
-        else
-            err "Rust is required to build Traceless."
-            exit 1
-        fi
+        info "Rust/Cargo not found, installing via rustup..."
+        curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y
+        # shellcheck source=/dev/null
+        source "$HOME/.cargo/env"
+        ok "Rust installed: $(rustc --version)"
     else
         ok "Rust found: $(rustc --version)"
     fi
@@ -407,13 +389,9 @@ main() {
     rust_major=$(echo "$rust_version" | cut -d. -f1)
     rust_minor=$(echo "$rust_version" | cut -d. -f2)
     if (( rust_major < 1 || (rust_major == 1 && rust_minor < 92) )); then
-        warn "Rust 1.92+ is required (you have ${rust_version})."
-        if confirm "Update Rust via rustup?"; then
-            rustup update stable
-            ok "Rust updated: $(rustc --version)"
-        else
-            warn "Build may fail with an older Rust version."
-        fi
+        info "Rust 1.92+ is required (you have ${rust_version}), updating..."
+        rustup update stable
+        ok "Rust updated: $(rustc --version)"
     fi
 
     # --- Build ---

@@ -38,27 +38,32 @@ The easiest way to build and install Traceless is with the included script:
 
 The script will:
 1. Detect your Linux distribution
-2. Detect which toolkits (GTK4/Qt6) are available or can be installed
-3. Let you choose which frontend(s) to build
-4. Install required system packages (with your permission)
-5. Install Rust via rustup if needed
-6. Build and install the binaries to `~/.local/bin` (or `/usr/local/bin` with `--system`)
+2. Detect which toolkits (GTK4/Qt6) are available
+3. Automatically install missing system packages
+4. Install Rust via rustup if needed
+5. Build frontends for all detected toolkits
+6. Install binaries to `/usr/local/bin`
+
+If no toolkit is detected, it asks which to install.
 
 ```bash
-# Install to ~/.local/bin (default, no root needed for install step)
+# Auto-detect, build, and install to /usr/local/bin
 ./install.sh
 
-# Install system-wide to /usr/local/bin
-./install.sh --system
+# Install to ~/.local/bin instead
+./install.sh --user
 
-# Non-interactive: build both frontends, install deps automatically
-./install.sh --yes --all
+# Force build both frontends (installs missing toolkit deps)
+./install.sh --all
 
 # Build only the GTK frontend
 ./install.sh --gtk
 
 # Build only the Qt frontend
 ./install.sh --qt
+
+# Interactive mode: confirm each step
+./install.sh --ask
 ```
 
 ## Manual Build
