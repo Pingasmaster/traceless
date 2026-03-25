@@ -12,6 +12,7 @@ AUTO_YES=true
 WANT_GTK=auto
 WANT_QT=auto
 WANT_ALL=false
+WANT_FFMPEG=true
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -32,6 +33,7 @@ Options:
   --gtk         Build only the GTK frontend
   --qt          Build only the Qt frontend
   --all         Build both frontends
+  --no-ffmpeg   Skip ffmpeg installation (disables video metadata support)
   --ask         Interactive mode: ask before each step (default is auto)
   --help, -h    Show this help
 
@@ -53,6 +55,7 @@ while [[ $# -gt 0 ]]; do
         --gtk)      WANT_GTK=yes; WANT_QT=no; shift ;;
         --qt)       WANT_QT=yes; WANT_GTK=no; shift ;;
         --all)      WANT_ALL=true; shift ;;
+        --no-ffmpeg) WANT_FFMPEG=false; shift ;;
         --ask)      AUTO_YES=false; shift ;;
         --yes|-y)   AUTO_YES=true; shift ;;
         --help|-h)  usage ;;
@@ -355,12 +358,14 @@ main() {
     fi
 
     # ffmpeg (optional, for video metadata)
-    if ! has_cmd ffmpeg; then
+    if $WANT_FFMPEG && ! has_cmd ffmpeg; then
         local ffmpeg_pkg
         ffmpeg_pkg=$(ffmpeg_package "$distro")
         if [[ -n "$ffmpeg_pkg" ]]; then
             packages_to_install+=("$ffmpeg_pkg")
         fi
+    elif ! $WANT_FFMPEG; then
+        info "Skipping ffmpeg (video metadata support disabled)"
     fi
 
     if [[ ${#packages_to_install[@]} -gt 0 ]]; then
