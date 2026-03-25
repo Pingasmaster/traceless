@@ -1,0 +1,19 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128" viewBox="0 0 128 128">
+  <!-- Background circle -->
+  <circle cx="64" cy="64" r="60" fill="#813d9c"/>
+  <!-- Fingerprint icon (simplified) -->
+  <g transform="translate(64,58)" fill="none" stroke="white" stroke-width="3.5" stroke-linecap="round">
+    <!-- Fingerprint arcs -->
+    <path d="M-18,8 A22,22 0 0,1 -18,-14"/>
+    <path d="M-12,14 A18,18 0 0,1 -12,-18"/>
+    <path d="M-4,18 A14,14 0 0,0 -4,-20"/>
+    <path d="M4,16 A10,10 0 0,0 4,-18"/>
+    <path d="M12,12 A8,8 0 0,0 12,-14"/>
+    <path d="M18,6 A6,6 0 0,0 18,-8"/>
+  </g>
+  <!-- Eraser / strikethrough -->
+  <g transform="translate(64,64)">
+    <line x1="-28" y1="28" x2="28" y2="-28" stroke="#e5a50a" stroke-width="6" stroke-linecap="round"/>
+    <line x1="-24" y1="32" x2="32" y2="-24" stroke="#e5a50a" stroke-width="6" stroke-linecap="round" opacity="0.5"/>
+  </g>
+</svg>

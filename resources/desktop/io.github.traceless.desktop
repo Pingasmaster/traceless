@@ -1,0 +1,12 @@
+[Desktop Entry]
+Name=Traceless
+GenericName=Metadata Cleaner
+Comment=View and remove metadata from your files
+Exec=traceless
+Icon=io.github.traceless
+Terminal=false
+Type=Application
+Categories=Utility;GTK;Qt;
+Keywords=metadata;exif;cleaner;privacy;pdf;image;audio;
+StartupNotify=true
+MimeType=image/jpeg;image/png;image/webp;application/pdf;audio/mpeg;audio/flac;audio/ogg;video/mp4;application/vnd.oasis.opendocument.text;application/vnd.openxmlformats-officedocument.wordprocessingml.document;

@@ -416,33 +416,61 @@ main() {
     # --- Install ---
     echo ""
     info "Installing to ${BINDIR}/"
-    mkdir -p "$BINDIR"
+
+    local SUDO=""
+    if [[ "$PREFIX" == "/usr/local" || "$PREFIX" == "/usr" ]]; then
+        SUDO="sudo"
+    fi
+
+    $SUDO mkdir -p "$BINDIR"
 
     local installed=()
 
-    if [[ "$PREFIX" == "/usr/local" || "$PREFIX" == "/usr" ]]; then
-        sudo install -Dm755 target/release/traceless "$BINDIR/traceless"
-        installed+=("traceless")
+    $SUDO install -Dm755 target/release/traceless "$BINDIR/traceless"
+    installed+=("traceless")
 
-        if $build_gtk; then
-            sudo install -Dm755 target/release/traceless-gtk "$BINDIR/traceless-gtk"
-            installed+=("traceless-gtk")
+    if $build_gtk; then
+        $SUDO install -Dm755 target/release/traceless-gtk "$BINDIR/traceless-gtk"
+        installed+=("traceless-gtk")
+    fi
+    if $build_qt; then
+        $SUDO install -Dm755 target/release/traceless-qt "$BINDIR/traceless-qt"
+        installed+=("traceless-qt")
+    fi
+
+    # --- Install desktop entry and icon ---
+    local SCRIPT_DIR
+    SCRIPT_DIR="$(dirname "$(realpath "$0")")"
+
+    local DESKTOP_FILE="$SCRIPT_DIR/resources/desktop/io.github.traceless.desktop"
+    local ICON_FILE="$SCRIPT_DIR/resources/icons/io.github.traceless.svg"
+
+    if [[ -n "$SUDO" ]]; then
+        # System-wide: install to standard XDG locations
+        $SUDO install -Dm644 "$DESKTOP_FILE" /usr/share/applications/io.github.traceless.desktop
+        $SUDO install -Dm644 "$ICON_FILE"    /usr/share/icons/hicolor/scalable/apps/io.github.traceless.svg
+        ok "Desktop entry installed to /usr/share/applications/"
+        ok "App icon installed to /usr/share/icons/hicolor/scalable/apps/"
+        # Update icon cache if available
+        if has_cmd gtk-update-icon-cache; then
+            $SUDO gtk-update-icon-cache -f -t /usr/share/icons/hicolor/ 2>/dev/null || true
         fi
-        if $build_qt; then
-            sudo install -Dm755 target/release/traceless-qt "$BINDIR/traceless-qt"
-            installed+=("traceless-qt")
+        # Update desktop database if available
+        if has_cmd update-desktop-database; then
+            $SUDO update-desktop-database /usr/share/applications/ 2>/dev/null || true
         fi
     else
-        install -Dm755 target/release/traceless "$BINDIR/traceless"
-        installed+=("traceless")
-
-        if $build_gtk; then
-            install -Dm755 target/release/traceless-gtk "$BINDIR/traceless-gtk"
-            installed+=("traceless-gtk")
+        # User install: install to ~/.local/share
+        install -Dm644 "$DESKTOP_FILE" "$HOME/.local/share/applications/io.github.traceless.desktop"
+        install -Dm644 "$ICON_FILE"    "$HOME/.local/share/icons/hicolor/scalable/apps/io.github.traceless.svg"
+        ok "Desktop entry installed to ~/.local/share/applications/"
+        ok "App icon installed to ~/.local/share/icons/"
+        # Update user icon cache
+        if has_cmd gtk-update-icon-cache; then
+            gtk-update-icon-cache -f -t "$HOME/.local/share/icons/hicolor/" 2>/dev/null || true
         fi
-        if $build_qt; then
-            install -Dm755 target/release/traceless-qt "$BINDIR/traceless-qt"
-            installed+=("traceless-qt")
+        if has_cmd update-desktop-database; then
+            update-desktop-database "$HOME/.local/share/applications/" 2>/dev/null || true
         fi
     fi
 

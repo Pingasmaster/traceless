@@ -1,5 +1,7 @@
 # Traceless
 
+![GPLv3](gplv3.png)
+
 A fast, safe metadata cleaner for Linux desktops, written in Rust.
 
 Traceless lets you view and remove metadata from your files — EXIF data from photos, author info from documents, tags from audio files, and more. It provides native frontends for both GNOME (GTK4/libadwaita) and KDE Plasma (Qt6/QML), with automatic desktop environment detection at launch.
@@ -253,4 +255,4 @@ cargo test -p traceless-core
 
 ## License
 
-GPL-3.0-or-later
+This project is licensed under the [GNU General Public License v3.0](LICENSE) or later.
