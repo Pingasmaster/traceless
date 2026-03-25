@@ -1,0 +1,15 @@
+[package]
+name = "traceless"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Desktop environment auto-detecting launcher for Traceless metadata cleaner"
+
+[[bin]]
+name = "traceless"
+path = "src/main.rs"
+
+[dependencies]
+log.workspace = true
+env_logger.workspace = true

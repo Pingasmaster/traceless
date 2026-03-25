@@ -1,0 +1,22 @@
+[package]
+name = "traceless-qt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Qt6/QML frontend for Traceless metadata cleaner"
+
+[[bin]]
+name = "traceless-qt"
+path = "src/main.rs"
+
+[dependencies]
+traceless-core.workspace = true
+cxx = "1.0"
+cxx-qt = "0.8.1"
+cxx-qt-lib = { version = "0.8.1", features = ["qt_full"] }
+log.workspace = true
+env_logger.workspace = true
+
+[build-dependencies]
+cxx-qt-build = "0.8.1"

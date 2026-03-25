@@ -1,0 +1,24 @@
+[workspace]
+resolver = "3"
+members = [
+    "crates/core",
+    "crates/gtk-frontend",
+    "crates/qt-frontend",
+    "crates/launcher",
+]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2024"
+license = "GPL-3.0-or-later"
+rust-version = "1.92"
+
+[workspace.dependencies]
+traceless-core = { path = "crates/core" }
+log = "0.4"
+env_logger = "0.11"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true

@@ -1,0 +1,114 @@
+use std::env;
+use std::process::Command;
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
+
+enum DesktopEnvironment {
+    Gtk,
+    Qt,
+}
+
+fn detect_desktop_environment() -> DesktopEnvironment {
+    // Check for explicit override
+    if let Ok(forced) = env::var("TRACELESS_FRONTEND") {
+        match forced.to_lowercase().as_str() {
+            "gtk" | "gnome" => return DesktopEnvironment::Gtk,
+            "qt" | "kde" => return DesktopEnvironment::Qt,
+            _ => {}
+        }
+    }
+
+    // Check XDG_CURRENT_DESKTOP (colon-separated, e.g. "ubuntu:GNOME")
+    if let Ok(xdg) = env::var("XDG_CURRENT_DESKTOP") {
+        let upper = xdg.to_uppercase();
+        for de in upper.split(':') {
+            match de.trim() {
+                "KDE" | "PLASMA" | "LXQT" => return DesktopEnvironment::Qt,
+                "GNOME" | "UNITY" | "CINNAMON" | "MATE" | "XFCE" | "BUDGIE"
+                | "PANTHEON" | "COSMIC" | "DEEPIN" | "ENLIGHTENMENT" => {
+                    return DesktopEnvironment::Gtk;
+                }
+                _ => {}
+            }
+        }
+    }
+
+    // Fallback: check KDE-specific env vars
+    if env::var("KDE_SESSION_VERSION").is_ok() || env::var("KDE_FULL_SESSION").is_ok() {
+        return DesktopEnvironment::Qt;
+    }
+
+    // Fallback: check GNOME-specific env vars
+    if env::var("GNOME_DESKTOP_SESSION_ID").is_ok() {
+        return DesktopEnvironment::Gtk;
+    }
+
+    // Final fallback: GTK (most common on Linux)
+    DesktopEnvironment::Gtk
+}
+
+fn main() {
+    env_logger::init();
+
+    let frontend = detect_desktop_environment();
+
+    let binary_name = match frontend {
+        DesktopEnvironment::Gtk => "traceless-gtk",
+        DesktopEnvironment::Qt => "traceless-qt",
+    };
+
+    // Resolve binary path: same directory as the launcher
+    let current_exe = env::current_exe().expect("Failed to get current executable path");
+    let exe_dir = current_exe
+        .parent()
+        .expect("Failed to get executable directory");
+    let target_exe = exe_dir.join(binary_name);
+
+    if !target_exe.exists() {
+        // Try the other frontend as fallback
+        let fallback_name = match frontend {
+            DesktopEnvironment::Gtk => "traceless-qt",
+            DesktopEnvironment::Qt => "traceless-gtk",
+        };
+        let fallback_exe = exe_dir.join(fallback_name);
+
+        if fallback_exe.exists() {
+            log::warn!(
+                "{} not found, falling back to {}",
+                binary_name,
+                fallback_name
+            );
+            launch(&fallback_exe);
+        } else {
+            eprintln!(
+                "Error: Neither {binary_name} nor {fallback_name} found in {}",
+                exe_dir.display()
+            );
+            std::process::exit(1);
+        }
+    } else {
+        launch(&target_exe);
+    }
+}
+
+#[cfg(unix)]
+fn launch(exe: &std::path::Path) -> ! {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let err = Command::new(exe).args(&args).exec();
+    eprintln!("Failed to launch {}: {err}", exe.display());
+    std::process::exit(1);
+}
+
+#[cfg(not(unix))]
+fn launch(exe: &std::path::Path) {
+    let args: Vec<String> = env::args().skip(1).collect();
+    let status = Command::new(exe)
+        .args(&args)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("Failed to launch {}: {e}", exe.display());
+            std::process::exit(1);
+        });
+    std::process::exit(status.code().unwrap_or(1));
+}
