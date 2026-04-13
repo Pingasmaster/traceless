@@ -5,7 +5,6 @@
 #![allow(clippy::unnecessary_box_returns)]
 
 mod app_controller;
-mod bridge;
 mod file_model;
 mod metadata_model;
 

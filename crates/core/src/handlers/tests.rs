@@ -277,7 +277,7 @@ mod tests {
         fs::write(&path2, b"world").unwrap();
 
         let mut store = FileStore::new();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = async_channel::unbounded();
         store.add_files(vec![path1, path2], &tx);
 
         assert_eq!(store.len(), 2);
@@ -557,7 +557,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let mut store = FileStore::new();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = async_channel::unbounded();
         store.add_files(vec![path], &tx);
 
         let event = FileStoreEvent::FileStateChanged {
@@ -581,7 +581,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let mut store = FileStore::new();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = async_channel::unbounded();
         store.add_files(vec![path], &tx);
 
         let metadata = MetadataSet {
@@ -613,7 +613,7 @@ mod tests {
         fs::write(&path, b"hello").unwrap();
 
         let mut store = FileStore::new();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = async_channel::unbounded();
         store.add_files(vec![path], &tx);
 
         let event = FileStoreEvent::FileError {
@@ -643,7 +643,7 @@ mod tests {
         fs::write(sub.join("c.txt"), b"c").unwrap();
 
         let mut store = FileStore::new();
-        let (tx, _rx) = std::sync::mpsc::channel();
+        let (tx, _rx) = async_channel::unbounded();
 
         // Non-recursive: should find 2 files
         store.add_directory(dir.path(), false, &tx);

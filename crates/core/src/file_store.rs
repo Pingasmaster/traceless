@@ -1,7 +1,8 @@
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::mpsc;
 use std::thread;
+
+use async_channel::Sender;
 
 use crate::file::{FileEntry, FileState};
 use crate::format_support::{detect_mime, get_handler_for_mime};
@@ -75,7 +76,7 @@ impl FileStore {
 
     /// Add files and start background metadata checking.
     /// Returns the indices of the newly added files.
-    pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: &mpsc::Sender<FileStoreEvent>) -> Vec<usize> {
+    pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: &Sender<FileStoreEvent>) -> Vec<usize> {
         let start_index = self.files.len();
         let mut indices = Vec::new();
 
@@ -102,7 +103,7 @@ impl FileStore {
         &mut self,
         dir: &Path,
         recursive: bool,
-        tx: &mpsc::Sender<FileStoreEvent>,
+        tx: &Sender<FileStoreEvent>,
     ) -> Vec<usize> {
         let paths = collect_files_from_dir(dir, recursive);
         self.add_files(paths, tx)
@@ -121,7 +122,7 @@ impl FileStore {
     }
 
     /// Start cleaning all cleanable files in background threads.
-    pub fn clean_files(&mut self, tx: &mpsc::Sender<FileStoreEvent>) {
+    pub fn clean_files(&mut self, tx: &Sender<FileStoreEvent>) {
         let lightweight = self.lightweight_mode;
 
         for (index, entry) in self.files.iter_mut().enumerate() {
@@ -200,11 +201,11 @@ impl Default for FileStore {
     }
 }
 
-fn check_file_metadata(index: usize, path: &Path, tx: &mpsc::Sender<FileStoreEvent>) {
+fn check_file_metadata(index: usize, path: &Path, tx: &Sender<FileStoreEvent>) {
     let mime = detect_mime(path);
 
     let Some(handler) = get_handler_for_mime(&mime) else {
-        let _ = tx.send(FileStoreEvent::FileError {
+        let _ = tx.send_blocking(FileStoreEvent::FileError {
             index,
             state: FileState::Unsupported,
             message: format!("Unsupported format: {mime}"),
@@ -213,7 +214,7 @@ fn check_file_metadata(index: usize, path: &Path, tx: &mpsc::Sender<FileStoreEve
     };
 
     // Notify: supported, now checking
-    let _ = tx.send(FileStoreEvent::FileStateChanged {
+    let _ = tx.send_blocking(FileStoreEvent::FileStateChanged {
         index,
         state: FileState::CheckingMetadata,
         mime_type: Some(mime),
@@ -221,10 +222,10 @@ fn check_file_metadata(index: usize, path: &Path, tx: &mpsc::Sender<FileStoreEve
 
     match handler.read_metadata(path) {
         Ok(metadata) => {
-            let _ = tx.send(FileStoreEvent::MetadataReady { index, metadata });
+            let _ = tx.send_blocking(FileStoreEvent::MetadataReady { index, metadata });
         }
         Err(e) => {
-            let _ = tx.send(FileStoreEvent::FileError {
+            let _ = tx.send_blocking(FileStoreEvent::FileError {
                 index,
                 state: FileState::ErrorWhileCheckingMetadata,
                 message: e.to_string(),
@@ -237,9 +238,9 @@ fn clean_single_file(
     index: usize,
     path: &Path,
     lightweight: bool,
-    tx: &mpsc::Sender<FileStoreEvent>,
+    tx: &Sender<FileStoreEvent>,
 ) {
-    let _ = tx.send(FileStoreEvent::FileStateChanged {
+    let _ = tx.send_blocking(FileStoreEvent::FileStateChanged {
         index,
         state: FileState::RemovingMetadata,
         mime_type: None,
@@ -247,7 +248,7 @@ fn clean_single_file(
 
     let mime = detect_mime(path);
     let Some(handler) = get_handler_for_mime(&mime) else {
-        let _ = tx.send(FileStoreEvent::FileError {
+        let _ = tx.send_blocking(FileStoreEvent::FileError {
             index,
             state: FileState::ErrorWhileRemovingMetadata,
             message: format!("No handler for {mime}"),
@@ -262,14 +263,14 @@ fn clean_single_file(
         Ok(()) => {
             if let Err(e) = fs::rename(&temp_path, path) {
                 let _ = fs::remove_file(&temp_path);
-                let _ = tx.send(FileStoreEvent::FileError {
+                let _ = tx.send_blocking(FileStoreEvent::FileError {
                     index,
                     state: FileState::ErrorWhileRemovingMetadata,
                     message: format!("Failed to replace original file: {e}"),
                 });
                 return;
             }
-            let _ = tx.send(FileStoreEvent::FileStateChanged {
+            let _ = tx.send_blocking(FileStoreEvent::FileStateChanged {
                 index,
                 state: FileState::Cleaned,
                 mime_type: None,
@@ -277,7 +278,7 @@ fn clean_single_file(
         }
         Err(e) => {
             let _ = fs::remove_file(&temp_path);
-            let _ = tx.send(FileStoreEvent::FileError {
+            let _ = tx.send_blocking(FileStoreEvent::FileError {
                 index,
                 state: FileState::ErrorWhileRemovingMetadata,
                 message: e.to_string(),

@@ -23,15 +23,15 @@ Item {
             ListView {
                 id: fileList
                 clip: true
-                model: filesView.model.file_count
+                model: filesView.model
 
                 delegate: FileDelegate {
                     width: fileList.width
                     fileIndex: index
-                    fileName: filesView.model.get_filename(index)
-                    fileDirectory: filesView.model.get_directory(index)
-                    simpleState: filesView.model.get_simple_state(index)
-                    metadataCount: filesView.model.get_metadata_count(index)
+                    fileName: filename
+                    fileDirectory: directory
+                    simpleState: model.simpleState
+                    metadataCount: model.metadataCount
                     onClicked: filesView.fileClicked(index)
                     onRemoveRequested: filesView.removeClicked(index)
                 }

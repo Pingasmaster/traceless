@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::rc::Rc;
-use std::sync::mpsc;
 
 use adw::prelude::*;
+use async_channel::Sender;
 
 use crate::bridge;
 use crate::details_view::DetailsView;
@@ -29,14 +29,11 @@ impl Window {
 
         // Shared state
         let store = Rc::new(RefCell::new(FileStore::new()));
-        let tx: Rc<RefCell<Option<mpsc::Sender<FileStoreEvent>>>> =
+        let tx: Rc<RefCell<Option<Sender<FileStoreEvent>>>> =
             Rc::new(RefCell::new(None));
         let show_warning = Rc::new(RefCell::new(true));
 
         // --- Layout ---
-
-        // Main content box
-        let main_box = gtk::Box::new(gtk::Orientation::Vertical, 0);
 
         // Header bar
         let header = adw::HeaderBar::new();
@@ -68,8 +65,6 @@ impl Window {
         menu_btn.set_menu_model(Some(&menu));
         header.pack_end(&menu_btn);
 
-        main_box.append(&header);
-
         // View stack: empty vs files
         let view_stack = gtk::Stack::new();
         view_stack.set_vexpand(true);
@@ -82,110 +77,116 @@ impl Window {
         view_stack.add_named(&files_view.widget, Some("files"));
 
         view_stack.set_visible_child_name("empty");
-        main_box.append(&view_stack);
 
-        // Details side panel (Flap-like using a Box + Revealer)
-        let content_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        content_box.append(&main_box);
+        // Header + content wrapped in a ToolbarView (libadwaita 1.4+).
+        let toolbar_view = adw::ToolbarView::new();
+        toolbar_view.add_top_bar(&header);
+        toolbar_view.set_content(Some(&view_stack));
+        toolbar_view.set_top_bar_style(adw::ToolbarStyle::Raised);
 
-        let details_revealer = gtk::Revealer::new();
-        details_revealer.set_transition_type(gtk::RevealerTransitionType::SlideLeft);
-        details_revealer.set_reveal_child(false);
+        // Details panel as the trailing side of an OverlaySplitView
+        // (the libadwaita 1.4+ replacement for the deprecated AdwFlap).
+        let split = adw::OverlaySplitView::new();
+        split.set_sidebar_position(gtk::PackType::End);
+        split.set_content(Some(&toolbar_view));
+        split.set_show_sidebar(false);
+        split.set_max_sidebar_width(360.0);
+        split.set_min_sidebar_width(320.0);
 
-        let sep = gtk::Separator::new(gtk::Orientation::Vertical);
-        let details_box = gtk::Box::new(gtk::Orientation::Horizontal, 0);
-        details_box.append(&sep);
-
-        let details_revealer_clone = details_revealer.clone();
+        let split_for_back = split.clone();
         let details_view = Rc::new(DetailsView::new(move || {
-            details_revealer_clone.set_reveal_child(false);
+            split_for_back.set_show_sidebar(false);
         }));
-        details_view.widget.set_width_request(350);
-        details_box.append(&details_view.widget);
+        split.set_sidebar(Some(&details_view.widget));
 
-        details_revealer.set_child(Some(&details_box));
-        content_box.append(&details_revealer);
+        window.set_content(Some(&split));
 
-        window.set_content(Some(&content_box));
+        // Collapse the split on narrow windows (responsive).
+        let breakpoint =
+            adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+                adw::BreakpointConditionLengthType::MaxWidth,
+                600.0,
+                adw::LengthUnit::Sp,
+            ));
+        breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
+        window.add_breakpoint(breakpoint);
 
         // --- Event handling setup ---
-        let (event_tx, event_rx) = mpsc::channel::<FileStoreEvent>();
+        let (event_tx, event_rx) = async_channel::unbounded::<FileStoreEvent>();
         *tx.borrow_mut() = Some(event_tx);
+
+        // Wire up the row click callbacks once; the callbacks get the *current*
+        // row index at click-time from the enclosing ListBoxRow.
+        {
+            let on_remove = {
+                let store = store.clone();
+                let files_view = files_view.clone();
+                let view_stack = view_stack.clone();
+                let split = split.clone();
+                move |idx: usize| {
+                    store.borrow_mut().remove_file(idx);
+                    let s = store.borrow();
+                    files_view.remove_row(&s, idx);
+                    if s.is_empty() {
+                        view_stack.set_visible_child_name("empty");
+                        split.set_show_sidebar(false);
+                    }
+                }
+            };
+            let on_details = {
+                let store = store.clone();
+                let dv = details_view;
+                let split = split.clone();
+                move |idx: usize| {
+                    let s = store.borrow();
+                    if let Some(entry) = s.get(idx) {
+                        dv.show_file(entry);
+                        split.set_show_sidebar(true);
+                    }
+                }
+            };
+            files_view.bind_callbacks(on_remove, on_details);
+        }
 
         // Install event pump from worker threads -> GTK main loop
         {
             let store = store.clone();
             let files_view = files_view.clone();
-            let view_stack = view_stack.clone();
-            let details_revealer = details_revealer.clone();
-
-            let rebuild = {
-                let store = store.clone();
-                Rc::new(move || {
-                    let s = store.borrow();
-                    let dr = details_revealer.clone();
-                    let store2 = store.clone();
-                    files_view.rebuild_list(
-                        &s,
-                        {
-                            let store3 = store2.clone();
-                            let files_view2 = files_view.clone();
-                            let vs = view_stack.clone();
-                            let dr2 = dr.clone();
-                            move |idx| {
-                                store3.borrow_mut().remove_file(idx);
-                                let s = store3.borrow();
-                                if s.is_empty() {
-                                    vs.set_visible_child_name("empty");
-                                    dr2.set_reveal_child(false);
-                                }
-                                files_view2.rebuild_list(
-                                    &s,
-                                    move |_| {},
-                                    move |_| {},
-                                );
-                            }
-                        },
-                        {
-                            let store3 = store2;
-                            let dv = details_view.clone();
-                            let dr2 = dr;
-                            move |idx| {
-                                let s = store3.borrow();
-                                if let Some(entry) = s.get(idx) {
-                                    dv.show_file(entry);
-                                    dr2.set_reveal_child(true);
-                                }
-                            }
-                        },
-                    );
-
-                    // Update status
-                    let cleaned = s.cleaned_count();
-                    let total = s.len();
-                    if !s.has_working() && cleaned > 0 {
-                        files_view
-                            .status
-                            .set_done(&format!("{cleaned} file{} cleaned.", if cleaned == 1 { "" } else { "s" }));
-                    } else if s.has_working() {
-                        let done = s.files().iter().filter(|f| !f.state.is_working()).count();
-                        let frac = if total > 0 {
-                            let done_f = f64::from(u32::try_from(done).unwrap_or(u32::MAX));
-                            let total_f = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
-                            done_f / total_f
-                        } else {
-                            0.0
-                        };
-                        files_view.status.set_working(frac);
-                    } else {
-                        files_view.status.set_idle();
-                    }
-                })
-            };
 
             bridge::install_event_pump(event_rx, move |event| {
+                let affected: Option<usize> = match &event {
+                    FileStoreEvent::FileStateChanged { index, .. }
+                    | FileStoreEvent::MetadataReady { index, .. }
+                    | FileStoreEvent::FileError { index, .. } => Some(*index),
+                    FileStoreEvent::AllDone => None,
+                };
                 store.borrow_mut().apply_event(&event);
-                rebuild();
+                let s = store.borrow();
+                if let Some(idx) = affected {
+                    files_view.update_row(&s, idx);
+                }
+
+                // Status bar update
+                let cleaned = s.cleaned_count();
+                let total = s.len();
+                if !s.has_working() && cleaned > 0 {
+                    files_view.status.set_done(&format!(
+                        "{cleaned} file{} cleaned.",
+                        if cleaned == 1 { "" } else { "s" }
+                    ));
+                } else if s.has_working() {
+                    let done = s.files().iter().filter(|f| !f.state.is_working()).count();
+                    let frac = if total > 0 {
+                        let done_f = f64::from(u32::try_from(done).unwrap_or(u32::MAX));
+                        let total_f = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+                        done_f / total_f
+                    } else {
+                        0.0
+                    };
+                    files_view.status.set_working(frac);
+                } else {
+                    files_view.status.set_idle();
+                }
             });
         }
 
@@ -206,15 +207,19 @@ impl Window {
             let store = store.clone();
             let tx = tx.clone();
             let view_stack = view_stack.clone();
+            let files_view = files_view.clone();
             add_files_btn.connect_clicked(move |_| {
                 let store = store.clone();
                 let tx = tx.clone();
                 let vs = view_stack.clone();
+                let fv = files_view.clone();
                 dialogs::show_file_chooser(&window_clone, move |paths| {
                     if !paths.is_empty()
                         && let Some(sender) = tx.borrow().as_ref()
                     {
+                        let start = store.borrow().len();
                         store.borrow_mut().add_files(paths, sender);
+                        fv.append_new(&store.borrow(), start);
                         vs.set_visible_child_name("files");
                     }
                 });
@@ -227,15 +232,17 @@ impl Window {
             let store = store.clone();
             let tx = tx.clone();
             let view_stack = view_stack.clone();
+            let files_view = files_view.clone();
             add_folders_btn.connect_clicked(move |_| {
                 let store = store.clone();
                 let tx = tx.clone();
                 let vs = view_stack.clone();
+                let fv = files_view.clone();
                 dialogs::show_folder_chooser(&window_clone, move |path| {
                     if let Some(sender) = tx.borrow().as_ref() {
-                        store
-                            .borrow_mut()
-                            .add_directory(&path, true, sender);
+                        let start = store.borrow().len();
+                        store.borrow_mut().add_directory(&path, true, sender);
+                        fv.append_new(&store.borrow(), start);
                         vs.set_visible_child_name("files");
                     }
                 });
@@ -272,8 +279,9 @@ impl Window {
         {
             clear_action.connect_activate(move |_, _| {
                 store.borrow_mut().clear();
+                files_view.clear_rows();
                 view_stack.set_visible_child_name("empty");
-                details_revealer.set_reveal_child(false);
+                split.set_show_sidebar(false);
             });
         }
         window.add_action(&clear_action);

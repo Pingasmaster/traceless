@@ -58,9 +58,9 @@ pub fn error_badge() -> gtk::Widget {
 
 /// Create a spinner badge for "working" state.
 pub fn spinner_badge() -> gtk::Widget {
-    let spinner = gtk::Spinner::new();
-    spinner.set_spinning(true);
+    let spinner = adw::Spinner::new();
     spinner.set_halign(gtk::Align::Center);
     spinner.set_valign(gtk::Align::Center);
+    spinner.set_size_request(22, 22);
     spinner.upcast()
 }

@@ -3,18 +3,18 @@ const CSS: &str = r"
 @define-color accent_bg_color @accent_color;
 @define-color accent_fg_color #fff;
 
-window.main {
-    background: linear-gradient(180deg, @accent_bg_color 0px, @accent_bg_color 20px, @theme_bg_color 20px);
-}
-
 window.main headerbar {
     background-color: @accent_bg_color;
     color: @accent_fg_color;
 }
 
+window.main headerbar button {
+    color: @accent_fg_color;
+}
+
 listview.files > row {
     padding: 0;
-    border-bottom: 1px solid @borders;
+    border-bottom: 1px solid alpha(currentColor, 0.15);
 }
 
 listview.files .remove,
@@ -57,15 +57,15 @@ listview.files > row:hover separator {
 }
 
 .badge.warning {
-    background-color: @warning_color;
+    background-color: @warning_bg_color;
 }
 
 .badge.error {
-    background-color: @error_color;
+    background-color: @error_bg_color;
 }
 
 .badge.success {
-    background-color: @success_color;
+    background-color: @success_bg_color;
 }
 
 .toolbar.details {

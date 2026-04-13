@@ -16,14 +16,6 @@ ApplicationWindow {
     MetadataModel { id: metadataModel }
     AppController { id: appController }
 
-    // Poll events from Rust worker threads
-    Timer {
-        interval: 16
-        running: true
-        repeat: true
-        onTriggered: fileModel.poll_events()
-    }
-
     FileDialog {
         id: fileDialog
         title: "Add Files"

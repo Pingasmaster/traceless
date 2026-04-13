@@ -19,7 +19,5 @@ pub fn run() {
         window.present();
     });
 
-    // Run the application
-    let empty: Vec<String> = vec![];
-    app.run_with_args(&empty);
+    app.run();
 }
