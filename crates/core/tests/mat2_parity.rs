@@ -145,13 +145,11 @@ fn jpeg_round_trip_strips_exif() {
     // Clean
     handler.clean_metadata(&dirty, &cleaned).unwrap();
 
-    // Re-read: must be empty per little_exif
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&cleaned) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "cleaned JPEG must have no EXIF"
-        );
-    }
+    // Re-read: must be empty per little_exif. If little_exif reports an
+    // Err (which it does when a JPEG has zero EXIF at all), the cleaned
+    // file must still be a structurally valid JPEG so a silent corruption
+    // can't masquerade as a successful clean.
+    assert_no_exif_or_valid_jpeg(&cleaned, "cleaned JPEG must have no EXIF");
 }
 
 #[test]
@@ -448,12 +446,7 @@ fn docx_round_trip_strips_every_fingerprint() {
     let inner = read_zip_entry(&cleaned, "word/media/image1.jpeg").unwrap();
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner).unwrap();
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&probe) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "embedded JPEG must be stripped of EXIF"
-        );
-    }
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG must be stripped of EXIF");
 
     // 9. ZIP-level normalization
     assert_zip_is_normalized(&cleaned);
@@ -847,9 +840,7 @@ fn unicode_filename_round_trip() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     assert!(cleaned.exists());
 
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&cleaned) {
-        assert!(m.into_iter().next().is_none());
-    }
+    assert_no_exif_or_valid_jpeg(&cleaned, "cleaned unicode-filename JPEG must have no EXIF");
 }
 
 #[test]
@@ -1156,12 +1147,10 @@ fn zip_archive_normalizes_members_and_cleans_contents() {
     let inner = read_zip_entry(&dst, "image.jpg").unwrap();
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner).unwrap();
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&probe) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "embedded JPEG inside plain ZIP must be stripped"
-        );
-    }
+    assert_no_exif_or_valid_jpeg(
+        &probe,
+        "embedded JPEG inside plain ZIP must be stripped",
+    );
 }
 
 #[test]
@@ -1264,12 +1253,10 @@ fn tar_gz_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&probe) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "embedded JPEG inside .tar.gz must be stripped"
-        );
-    }
+    assert_no_exif_or_valid_jpeg(
+        &probe,
+        "embedded JPEG inside .tar.gz must be stripped",
+    );
 }
 
 #[test]
@@ -1339,11 +1326,15 @@ fn tiff_round_trip_strips_exif() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
 
     // Post: no EXIF
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&cleaned) {
-        assert!(
+    // TIFF parses through a different path so we use the raw iterator
+    // here: a successful clean always lets little_exif re-open the file
+    // because the TIFF IFD is still present, just emptied of tags.
+    match little_exif::metadata::Metadata::new_from_path(&cleaned) {
+        Ok(m) => assert!(
             m.into_iter().next().is_none(),
             "cleaned TIFF must have no EXIF"
-        );
+        ),
+        Err(e) => panic!("cleaned TIFF must remain parseable by little_exif: {e}"),
     }
 }
 
@@ -1381,13 +1372,30 @@ fn jxl_round_trip_strips_exif() {
     }
 
     let handler = get_handler_for_mime("image/jxl").unwrap();
-    // Pre-condition — the fixture carries EXIF.
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&dirty) {
-        assert!(m.into_iter().next().is_some(), "JXL fixture missing EXIF");
-    }
+    // Pre-condition: the fixture must carry EXIF. Skip cleanly if
+    // little_exif cannot read the ffmpeg-generated JXL at all (different
+    // libjxl versions disagree on metadata-box emission).
+    let Ok(dirty_meta) = little_exif::metadata::Metadata::new_from_path(&dirty) else {
+        eprintln!("[SKIP] little_exif cannot read the ffmpeg-generated JXL fixture");
+        return;
+    };
+    assert!(
+        dirty_meta.into_iter().next().is_some(),
+        "JXL fixture missing EXIF"
+    );
 
     handler.clean_metadata(&dirty, &cleaned).unwrap();
+    assert!(cleaned.exists(), "cleaned JXL must be written");
+    assert!(
+        fs::metadata(&cleaned).unwrap().len() > 0,
+        "cleaned JXL must not be empty"
+    );
 
+    // little_exif's JXL reader cannot round-trip every structurally
+    // valid JXL, so we cannot require Ok here. If it does parse, the
+    // iterator must still be empty. If it reports Err we fall back to
+    // "file exists and is non-empty", which is the same guarantee mat2
+    // offers for this format.
     if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&cleaned) {
         assert!(
             m.into_iter().next().is_none(),
@@ -1995,12 +2003,10 @@ fn tar_bz2_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&probe) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "embedded JPEG inside .tar.bz2 must be stripped"
-        );
-    }
+    assert_no_exif_or_valid_jpeg(
+        &probe,
+        "embedded JPEG inside .tar.bz2 must be stripped",
+    );
 }
 
 #[test]
@@ -2047,12 +2053,10 @@ fn tar_xz_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&probe) {
-        assert!(
-            m.into_iter().next().is_none(),
-            "embedded JPEG inside .tar.xz must be stripped"
-        );
-    }
+    assert_no_exif_or_valid_jpeg(
+        &probe,
+        "embedded JPEG inside .tar.xz must be stripped",
+    );
 }
 
 #[test]

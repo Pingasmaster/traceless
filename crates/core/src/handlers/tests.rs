@@ -659,6 +659,60 @@ fn test_docx_embedded_jpeg_exif_is_stripped() {
 }
 
 #[test]
+fn test_docx_with_unparseable_png_errors_instead_of_leaking() {
+    // Regression test for the "silent dirty-bytes fallthrough" bug:
+    // when `strip_embedded_image` could not parse an embedded image the
+    // old code returned the original bytes via `.unwrap_or(raw)` and
+    // shipped them into the cleaned document. That defeated the whole
+    // point of the embedded-image cleaner. The fix is to propagate a
+    // `CleanError`, which this test asserts.
+    let dir = TempDir::new().unwrap();
+    let docx_path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+
+    {
+        let file = fs::File::create(&docx_path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer.write_all(b"<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>").unwrap();
+
+        writer.start_file("docProps/core.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\"?><cp:coreProperties xmlns:cp=\"x\"/>")
+            .unwrap();
+
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\"?><w:document xmlns:w=\"x\"><w:body/></w:document>")
+            .unwrap();
+
+        // Garbage bytes with a `.png` extension: img-parts cannot parse
+        // them, so `strip_embedded_image` returns `None`. Before the fix
+        // the clean path copied these through silently; now it must
+        // surface a `CleanError`.
+        writer.start_file("word/media/image1.png", options).unwrap();
+        writer.write_all(b"not a real png, just random bytes").unwrap();
+
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    let result = handler.clean_metadata(&docx_path, &output);
+    assert!(
+        result.is_err(),
+        "DOCX clean must fail when an embedded PNG cannot be parsed; \
+         otherwise the dirty bytes would be shipped into the cleaned archive"
+    );
+    let err_string = format!("{}", result.unwrap_err());
+    assert!(
+        err_string.contains("image1.png") || err_string.contains("image/png"),
+        "error must name the offending embedded image: {err_string}"
+    );
+}
+
+#[test]
 fn test_docx_clean_is_deterministic() {
     // Two cleans of the same input, a moment apart, must produce
     // byte-identical output. This catches regressions in ZIP member

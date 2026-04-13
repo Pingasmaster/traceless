@@ -192,11 +192,24 @@ impl FormatHandler for ImageHandler {
                     })?;
 
                 // Format-specific post-pass: strip leftover metadata
-                // chunks that img-parts doesn't expose a setter for.
+                // chunks that img-parts doesn't expose a setter for. If
+                // the post-pass fails (our own img-parts output did not
+                // re-parse cleanly), fail rather than ship bytes that
+                // may still carry XMP / IPTC / COM / text chunks.
                 let final_data = if mime == "image/jpeg" {
-                    strip_jpeg_extra_segments(&buf).unwrap_or(buf)
+                    strip_jpeg_extra_segments(&buf).ok_or_else(|| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail:
+                            "JPEG post-strip failed; refusing to ship partially-stripped image"
+                                .to_string(),
+                    })?
                 } else if mime == "image/png" {
-                    strip_png_text_chunks(&buf).unwrap_or(buf)
+                    strip_png_text_chunks(&buf).ok_or_else(|| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail:
+                            "PNG post-strip failed; refusing to ship partially-stripped image"
+                                .to_string(),
+                    })?
                 } else {
                     buf
                 };

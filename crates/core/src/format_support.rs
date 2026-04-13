@@ -50,6 +50,12 @@ pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
         "text/css" => Some(Box::new(CssHandler)),
         "text/html" | "application/xhtml+xml" => Some(Box::new(HtmlHandler)),
         "application/x-bittorrent" => Some(Box::new(TorrentHandler)),
+        // NB: `mime_guess` maps `.tar.gz` / `.tar.bz2` / `.tar.xz` to
+        // `application/gzip` / `application/x-bzip2` / `application/x-xz`
+        // respectively, so those MIME types *are* the entry point for real
+        // tar-bundled archives. A plain compressed file (e.g. `foo.txt.gz`)
+        // reaches the same handler, where `ArchiveFormat::detect` rejects it
+        // with a specific "plain compressed" error.
         "application/zip"
         | "application/x-tar"
         | "application/gzip"
@@ -91,9 +97,11 @@ pub const fn supported_extensions() -> &'static [&'static str] {
         "svg", "css", "html", "htm", "xhtml",
         // P2P
         "torrent",
-        // Generic archives. `.tgz`, `.tbz2`, `.txz` etc. also work at
-        // runtime via ArchiveFormat::detect but mime_guess does not
-        // recognize them, so we omit them from the enumerated set.
-        "zip", "tar", "gz", "bz2", "xz",
+        // Generic archives. `.tgz` / `.tbz2` / `.txz` and their expanded
+        // siblings (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are matched inside
+        // `ArchiveFormat::detect` via the full filename rather than the
+        // final extension, so listing `tar` and `zip` here is enough for
+        // the file picker.
+        "zip", "tar",
     ]
 }

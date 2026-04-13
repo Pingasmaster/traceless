@@ -894,6 +894,55 @@ fn inject_audio_tag(path: &Path, artist: &str) -> std::io::Result<()> {
     Ok(())
 }
 
+// ---------- Image assertion helpers ----------
+
+/// Assert that a cleaned JPEG has no EXIF metadata.
+///
+/// `little_exif::Metadata::new_from_path` can either return `Ok(empty)`
+/// (JPEG with no EXIF block) *or* `Err` (JPEG without a recognisable
+/// APP1/EXIF segment at all) for a successfully cleaned file. The old
+/// `if let Ok(m) = ...` pattern treated `Err` as a silent pass, which
+/// meant a cleaner that corrupted the JPEG would still make the test
+/// green.
+///
+/// This helper handles both shapes safely:
+/// - `Ok`: the iterator must be empty.
+/// - `Err`: the file must still be a structurally valid JPEG as far as
+///   `img_parts::Jpeg::from_bytes` is concerned, and it must not
+///   contain any APP1 segment starting with `Exif\0\0`. Any other case
+///   fails the test.
+pub fn assert_no_exif_or_valid_jpeg(path: &Path, message: &str) {
+    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(path) {
+        assert!(
+            m.into_iter().next().is_none(),
+            "{message}: little_exif still reports EXIF tags at {}",
+            path.display()
+        );
+        return;
+    }
+
+    // little_exif reported an error; fall back to img_parts so we
+    // verify the file is still a structurally valid JPEG and confirm
+    // there is no raw EXIF APP1 segment left behind.
+    let bytes = std::fs::read(path)
+        .unwrap_or_else(|e| panic!("{message}: {} unreadable: {e}", path.display()));
+    let jpeg = img_parts::jpeg::Jpeg::from_bytes(bytes.into()).unwrap_or_else(|e| {
+        panic!(
+            "{message}: {} is not a structurally valid JPEG: {e}",
+            path.display()
+        )
+    });
+    let has_exif_segment = jpeg
+        .segments()
+        .iter()
+        .any(|segment| segment.marker() == 0xE1 && segment.contents().starts_with(b"Exif\0\0"));
+    assert!(
+        !has_exif_segment,
+        "{message}: {} still contains an EXIF APP1 segment",
+        path.display()
+    );
+}
+
 // ---------- Zip assertion helpers ----------
 
 /// Read every member of a cleaned zip-based archive and assert that

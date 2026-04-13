@@ -331,8 +331,27 @@ impl ffi::FileListModel {
             return;
         }
 
-        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
-        let end = start + i32::try_from(expanded.len()).unwrap_or(0) - 1;
+        // Qt's model protocol passes `first` / `last` as `i32`, so both the
+        // current row count and the delta must fit inside `i32` and their
+        // sum (minus one) must not overflow. A silent wrap here would
+        // feed `begin_insert_rows` a nonsense range, corrupting the model
+        // cursor. Bail out cleanly on any of the failure modes instead.
+        let store_len = self.rust().store.len();
+        let Ok(start) = i32::try_from(store_len) else {
+            log::error!("file model row count exceeds i32::MAX; refusing insert");
+            self.as_mut().update_aux_properties();
+            return;
+        };
+        let Ok(delta) = i32::try_from(expanded.len()) else {
+            log::error!("drop size exceeds i32::MAX rows; refusing insert");
+            self.as_mut().update_aux_properties();
+            return;
+        };
+        let Some(end) = start.checked_add(delta).and_then(|e| e.checked_sub(1)) else {
+            log::error!("row arithmetic would overflow i32; refusing insert");
+            self.as_mut().update_aux_properties();
+            return;
+        };
 
         unsafe {
             self.as_mut()

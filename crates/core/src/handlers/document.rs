@@ -200,7 +200,7 @@ impl FormatHandler for DocumentHandler {
                     continue;
                 }
                 let compression = e.compression();
-                let mut buf = Vec::with_capacity(e.size() as usize);
+                let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(e.size()));
                 e.read_to_end(&mut buf).map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("Failed to read entry {entry_name}: {e}"),
@@ -208,7 +208,12 @@ impl FormatHandler for DocumentHandler {
                 (buf, compression)
             };
 
-            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes);
+            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes).map_err(|e| {
+                CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("Failed to clean entry {entry_name}: {e}"),
+                }
+            })?;
 
             let options = zip_util::normalized_options(compression);
             writer
@@ -302,25 +307,47 @@ fn should_omit(kind: ArchiveKind, name: &str) -> bool {
     }
 }
 
+/// Reason an embedded archive member could not be cleaned. Kept as a
+/// plain struct with a `Display` impl so the calling `CleanError` gets a
+/// specific message instead of a generic "clean failed".
+#[derive(Debug)]
+pub struct CleanEntryError(String);
+
+impl std::fmt::Display for CleanEntryError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
 /// Clean a single archive member. Dispatches on file extension and
 /// archive kind to decide whether to replace the bytes entirely, deep-
 /// clean the XML, strip EXIF from an embedded image, or leave as-is.
-fn clean_entry(kind: ArchiveKind, entry_name: &str, raw: Vec<u8>) -> Vec<u8> {
-    // 1. Embedded raster images — strip EXIF/XMP/ICC unconditionally,
-    //    regardless of archive family. This is the single largest silent
-    //    leak in the previous implementation.
+fn clean_entry(
+    kind: ArchiveKind,
+    entry_name: &str,
+    raw: Vec<u8>,
+) -> Result<Vec<u8>, CleanEntryError> {
+    // 1. Embedded raster images: strip EXIF/XMP/ICC unconditionally,
+    //    regardless of archive family. If the image can't be parsed we
+    //    must *fail* rather than copy the dirty bytes through, otherwise
+    //    the cleaned document silently ships the original metadata.
     if let Some(mime) = zip_util::is_cleanable_media(entry_name) {
-        return strip_embedded_image(&raw, mime).unwrap_or(raw);
+        return strip_embedded_image(&raw, mime).ok_or_else(|| {
+            CleanEntryError(format!(
+                "embedded {mime} '{entry_name}' could not be parsed; \
+                 refusing to ship dirty bytes into the cleaned archive"
+            ))
+        });
     }
 
-    // 2. Binary entries — nothing to do.
+    // 2. Binary entries: nothing to do.
     if !is_xml_like(entry_name) {
-        return raw;
+        return Ok(raw);
     }
 
-    // 3. XML entries — decode once, dispatch, re-encode.
+    // 3. XML entries: decode once, dispatch, re-encode.
     let Ok(xml) = std::str::from_utf8(&raw) else {
-        return raw;
+        return Ok(raw);
     };
 
     let cleaned: String = match kind {
@@ -344,7 +371,7 @@ fn clean_entry(kind: ArchiveKind, entry_name: &str, raw: Vec<u8>) -> Vec<u8> {
         ArchiveKind::Generic => xml.to_string(),
     };
 
-    cleaned.into_bytes()
+    Ok(cleaned.into_bytes())
 }
 
 fn is_xml_like(name: &str) -> bool {
@@ -373,9 +400,13 @@ fn strip_embedded_image(data: &[u8], mime: &str) -> Option<Vec<u8>> {
     img.encoder().write_to(&mut cursor).ok()?;
 
     // Format-specific post-pass to remove what img-parts doesn't expose.
+    // If the post-pass parser fails (our own img-parts output did not
+    // re-parse cleanly), return None so `clean_entry` propagates a
+    // specific error rather than silently shipping partially-stripped
+    // bytes that may still carry XMP / IPTC / COM / text chunks.
     match mime {
-        "image/jpeg" => strip_jpeg_extra_segments(&buf).or(Some(buf)),
-        "image/png" => strip_png_text_chunks(&buf).or(Some(buf)),
+        "image/jpeg" => strip_jpeg_extra_segments(&buf),
+        "image/png" => strip_png_text_chunks(&buf),
         _ => Some(buf),
     }
 }

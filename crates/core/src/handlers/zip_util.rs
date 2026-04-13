@@ -9,6 +9,27 @@
 
 use zip::{CompressionMethod, DateTime, write::SimpleFileOptions};
 
+/// Upper bound on eager ZIP member allocations.
+///
+/// ZIP local file headers carry an attacker-controlled size field.
+/// `Vec::with_capacity` takes that value at face value and eagerly
+/// allocates, so a crafted header claiming e.g. 10 TiB would panic with
+/// `capacity overflow`. The real member body is still read in full;
+/// this constant only bounds the *hint* passed to `with_capacity`.
+const MAX_ALLOC_HINT: usize = 16 * 1024 * 1024;
+
+/// Return a safe `Vec::with_capacity` hint for a member whose header
+/// claims `reported_size` bytes.
+///
+/// The value is clamped to [`MAX_ALLOC_HINT`] so an attacker cannot drive
+/// a multi-GiB eager allocation via a crafted header.
+#[must_use]
+pub fn safe_capacity_hint(reported_size: u64) -> usize {
+    usize::try_from(reported_size)
+        .unwrap_or(MAX_ALLOC_HINT)
+        .min(MAX_ALLOC_HINT)
+}
+
 /// The canonical ZIP date/time for every cleaned archive member. January
 /// 1st 1980 is the earliest representable value in MS-DOS date format
 /// (which is what `.zip` uses internally). Using it means that two cleans

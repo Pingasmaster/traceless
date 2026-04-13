@@ -39,33 +39,84 @@ enum ArchiveFormat {
     TarXz,
 }
 
+/// Result of probing an archive filename for a supported format.
+enum FormatProbe {
+    /// Filename matched one of the archive forms the handler can decode.
+    Matched(ArchiveFormat),
+    /// Filename ends in a compression suffix (`.gz` / `.bz2` / `.xz`) but
+    /// the body is not a tar archive. The handler intentionally does not
+    /// decompress-clean-recompress plain compressed blobs, so the caller
+    /// must return a clear error instead of the generic
+    /// "unknown extension" fallthrough.
+    PlainCompressed(&'static str),
+    /// Filename has no recognised archive extension at all.
+    Unknown,
+}
+
 impl ArchiveFormat {
-    fn detect(path: &Path) -> Option<Self> {
-        let name = path.file_name()?.to_string_lossy().to_ascii_lowercase();
-        if name.ends_with(".tar.gz") || name.ends_with(".tgz") {
-            return Some(Self::TarGz);
+    fn probe(path: &Path) -> FormatProbe {
+        // Table-driven so clippy's `case_sensitive_file_extension_comparisons`
+        // lint (which only flags literal `.ends_with("...")`) stays quiet,
+        // and extending the table with a new archive type is a one-line
+        // change. Order matters: longer suffixes must come before their
+        // shorter siblings so `.tar.gz` wins over `.gz`.
+        const MATCHED_SUFFIXES: &[(&str, ArchiveFormat)] = &[
+            (".tar.gz", ArchiveFormat::TarGz),
+            (".tgz", ArchiveFormat::TarGz),
+            (".tar.bz2", ArchiveFormat::TarBz2),
+            (".tbz2", ArchiveFormat::TarBz2),
+            (".tbz", ArchiveFormat::TarBz2),
+            (".tar.xz", ArchiveFormat::TarXz),
+            (".txz", ArchiveFormat::TarXz),
+            (".tar", ArchiveFormat::Tar),
+            (".zip", ArchiveFormat::Zip),
+        ];
+        const PLAIN_SUFFIXES: &[(&str, &str)] = &[
+            (".gz", "gzip"),
+            (".bz2", "bzip2"),
+            (".xz", "xz"),
+        ];
+
+        let Some(name) = path.file_name() else {
+            return FormatProbe::Unknown;
+        };
+        let name = name.to_string_lossy().to_ascii_lowercase();
+
+        for (suffix, fmt) in MATCHED_SUFFIXES {
+            if name.ends_with(suffix) {
+                return FormatProbe::Matched(*fmt);
+            }
         }
-        if name.ends_with(".tar.bz2") || name.ends_with(".tbz2") || name.ends_with(".tbz") {
-            return Some(Self::TarBz2);
+        for (suffix, kind) in PLAIN_SUFFIXES {
+            if name.ends_with(suffix) {
+                return FormatProbe::PlainCompressed(kind);
+            }
         }
-        if name.ends_with(".tar.xz") || name.ends_with(".txz") {
-            return Some(Self::TarXz);
+        FormatProbe::Unknown
+    }
+
+    /// Resolve a filename into an `ArchiveFormat`, or build a specific
+    /// `CoreError` that distinguishes "no archive extension at all" from
+    /// "plain compressed stream, which we deliberately do not support".
+    fn resolve(path: &Path) -> Result<Self, CoreError> {
+        match Self::probe(path) {
+            FormatProbe::Matched(fmt) => Ok(fmt),
+            FormatProbe::PlainCompressed(kind) => Err(CoreError::UnsupportedFormat {
+                mime_type: format!(
+                    "plain {kind}-compressed files are not supported; \
+                     only tar-bundled variants (.tar.{kind}) and .zip / .tar are handled"
+                ),
+            }),
+            FormatProbe::Unknown => Err(CoreError::UnsupportedFormat {
+                mime_type: "archive: unknown extension".to_string(),
+            }),
         }
-        if name.ends_with(".tar") {
-            return Some(Self::Tar);
-        }
-        if name.ends_with(".zip") {
-            return Some(Self::Zip);
-        }
-        None
     }
 }
 
 impl FormatHandler for ArchiveHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
-        let fmt = ArchiveFormat::detect(path).ok_or_else(|| CoreError::UnsupportedFormat {
-            mime_type: "archive: unknown extension".to_string(),
-        })?;
+        let fmt = ArchiveFormat::resolve(path)?;
 
         let filename = path
             .file_name()
@@ -124,9 +175,7 @@ impl FormatHandler for ArchiveHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
-        let fmt = ArchiveFormat::detect(path).ok_or_else(|| CoreError::UnsupportedFormat {
-            mime_type: "archive: unknown extension".to_string(),
-        })?;
+        let fmt = ArchiveFormat::resolve(path)?;
         match fmt {
             ArchiveFormat::Zip => clean_zip(path, output_path),
             _ => clean_tar(path, output_path, fmt),
@@ -211,9 +260,17 @@ fn recurse_read_zip(
         }
         let safe_name = name.replace(['/', '\\'], "_");
         let probe_path = tmpdir.path().join(safe_name);
-        let mut buf = Vec::with_capacity(entry.size() as usize);
-        entry.read_to_end(&mut buf).ok();
-        std::fs::write(&probe_path, &buf).ok();
+        let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(entry.size()));
+        entry
+            .read_to_end(&mut buf)
+            .map_err(|e| CoreError::ParseError {
+                path: PathBuf::new(),
+                detail: format!("read zip entry {name}: {e}"),
+            })?;
+        std::fs::write(&probe_path, &buf).map_err(|e| CoreError::ParseError {
+            path: PathBuf::new(),
+            detail: format!("stage zip entry {name} for probe: {e}"),
+        })?;
 
         let mime = crate::format_support::detect_mime(&probe_path);
         if let Some(handler) = crate::format_support::get_handler_for_mime(&mime) {
@@ -288,7 +345,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
                 continue;
             }
             let compression = entry.compression();
-            let mut buf = Vec::with_capacity(entry.size() as usize);
+            let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(entry.size()));
             entry
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
@@ -471,10 +528,32 @@ fn check_tar_safety<R: Read>(
     Ok(())
 }
 
+/// An entry ready to be written into the cleaned tar. Distinguishing
+/// regular files from symlinks here is load-bearing: before the split
+/// every member was written as `EntryType::Regular` with an empty body,
+/// which silently transmuted symlinks into empty files.
+enum CleanedTarEntry {
+    Regular { name: String, data: Vec<u8> },
+    Symlink { name: String, target: PathBuf },
+}
+
+impl CleanedTarEntry {
+    fn name(&self) -> &str {
+        match self {
+            Self::Regular { name, .. } | Self::Symlink { name, .. } => name,
+        }
+    }
+}
+
+// F1 preserves symlinks as their own enum variant; the writer loop has to
+// branch on regular-vs-symlink to emit the correct `EntryType`, which pushes
+// the top-level body past clippy's 100-line ceiling. Splitting it further
+// just fragments one linear pipeline across four helpers for no real gain.
+#[allow(clippy::too_many_lines)]
 fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), CoreError> {
     // 1. Decompress into memory. Real-world .tar archives are usually
-    //    tens of MiB at most — if we ever need to support 10+ GiB
-    //    archives this should become a streaming pipeline.
+    //    tens of MiB at most; if we ever need to support 10+ GiB archives
+    //    this should become a streaming pipeline.
     let mut decompressed = Vec::new();
     open_tar(path, fmt)?.read_to_end(&mut decompressed).map_err(|e| {
         CoreError::ReadError {
@@ -489,7 +568,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
         detail: format!("tempdir: {e}"),
     })?;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut cleaned_members: Vec<(String, Vec<u8>)> = Vec::new();
+    let mut cleaned_members: Vec<CleanedTarEntry> = Vec::new();
 
     {
         let mut archive = TarArchive::new(&decompressed[..]);
@@ -511,10 +590,22 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 continue;
             }
             if ty == EntryType::Symlink {
-                // Symlinks must already have been validated by
-                // check_tar_safety above. Keep them as-is by stuffing
-                // an empty body with a marker we'll expand later.
-                cleaned_members.push((name, Vec::new()));
+                // `check_tar_safety` has already rejected absolute /
+                // traversing targets. Carry the link target through so
+                // the writer can emit a real symlink entry.
+                let target = entry
+                    .header()
+                    .link_name()
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("read symlink target for {name}: {e}"),
+                    })?
+                    .map(std::borrow::Cow::into_owned)
+                    .ok_or_else(|| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("symlink {name} has no target"),
+                    })?;
+                cleaned_members.push(CleanedTarEntry::Symlink { name, target });
                 continue;
             }
             let mut buf = Vec::new();
@@ -524,14 +615,16 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
             })?;
             let action = dispatch_member(&name, buf, tmpdir.path(), path)?;
             match action {
-                ArchiveAction::Write(cleaned) => cleaned_members.push((name, cleaned)),
+                ArchiveAction::Write(cleaned) => {
+                    cleaned_members.push(CleanedTarEntry::Regular { name, data: cleaned });
+                }
                 ArchiveAction::Drop => {}
             }
         }
     }
 
     // 3. Build the output tar. Sort by name for determinism.
-    cleaned_members.sort_by(|a, b| a.0.cmp(&b.0));
+    cleaned_members.sort_by(|a, b| a.name().cmp(b.name()));
 
     let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
         path: path.to_path_buf(),
@@ -549,27 +642,59 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     };
 
     let mut builder = TarBuilder::new(writer);
-    for (name, data) in cleaned_members {
-        let mut header = TarHeader::new_gnu();
-        header.set_path(&name).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: format!("set_path {name}: {e}"),
-        })?;
-        header.set_size(data.len() as u64);
-        header.set_mode(0o644);
-        header.set_uid(0);
-        header.set_gid(0);
-        header.set_mtime(0);
-        header.set_entry_type(EntryType::Regular);
-        header.set_username("").ok();
-        header.set_groupname("").ok();
-        header.set_cksum();
-        builder
-            .append(&header, Cursor::new(&data))
-            .map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("append {name}: {e}"),
-            })?;
+    for entry in cleaned_members {
+        match entry {
+            CleanedTarEntry::Regular { name, data } => {
+                let mut header = TarHeader::new_gnu();
+                header.set_path(&name).map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("set_path {name}: {e}"),
+                })?;
+                header.set_size(data.len() as u64);
+                header.set_mode(0o644);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_entry_type(EntryType::Regular);
+                header.set_username("").ok();
+                header.set_groupname("").ok();
+                header.set_cksum();
+                builder
+                    .append(&header, Cursor::new(&data))
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("append {name}: {e}"),
+                    })?;
+            }
+            CleanedTarEntry::Symlink { name, target } => {
+                let mut header = TarHeader::new_gnu();
+                header.set_path(&name).map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("set_path {name}: {e}"),
+                })?;
+                header.set_size(0);
+                header.set_mode(0o777);
+                header.set_uid(0);
+                header.set_gid(0);
+                header.set_mtime(0);
+                header.set_entry_type(EntryType::Symlink);
+                header
+                    .set_link_name(&target)
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("set_link_name {name}: {e}"),
+                    })?;
+                header.set_username("").ok();
+                header.set_groupname("").ok();
+                header.set_cksum();
+                builder
+                    .append(&header, std::io::empty())
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("append symlink {name}: {e}"),
+                    })?;
+            }
+        }
     }
     builder.into_inner().map_err(|e| CoreError::CleanError {
         path: path.to_path_buf(),
@@ -803,6 +928,83 @@ mod tests {
             count += 1;
         }
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn tar_preserves_symlink_entry() {
+        // Regression test: before this was fixed, every entry in
+        // `cleaned_members` was written as `EntryType::Regular` with a
+        // zero-length body, which silently transmuted symlinks into
+        // empty files. The output tar must still carry a symlink entry
+        // whose link target matches the input.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("dirty.tar");
+        let dst = dir.path().join("clean.tar");
+
+        {
+            let file = File::create(&src).unwrap();
+            let mut builder = TarBuilder::new(BufWriter::new(file));
+
+            // Regular payload the symlink will point at.
+            let mut reg = TarHeader::new_gnu();
+            reg.set_path("target.txt").unwrap();
+            reg.set_size(5);
+            reg.set_mode(0o644);
+            reg.set_mtime(1_700_000_000);
+            reg.set_entry_type(EntryType::Regular);
+            reg.set_cksum();
+            builder.append(&reg, &b"hello"[..]).unwrap();
+
+            // The symlink itself.
+            let mut sym = TarHeader::new_gnu();
+            sym.set_path("link.txt").unwrap();
+            sym.set_size(0);
+            sym.set_mode(0o777);
+            sym.set_mtime(1_700_000_000);
+            sym.set_entry_type(EntryType::Symlink);
+            sym.set_link_name("target.txt").unwrap();
+            sym.set_cksum();
+            builder.append(&sym, std::io::empty()).unwrap();
+
+            builder.into_inner().unwrap();
+        }
+
+        let h = ArchiveHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+
+        let f = File::open(&dst).unwrap();
+        let mut archive = TarArchive::new(BufReader::new(f));
+        let mut saw_symlink = false;
+        let mut saw_regular = false;
+        for entry in archive.entries().unwrap() {
+            let entry = entry.unwrap();
+            let header = entry.header();
+            let name = entry
+                .path()
+                .unwrap()
+                .to_string_lossy()
+                .into_owned();
+            match header.entry_type() {
+                EntryType::Symlink => {
+                    assert_eq!(name, "link.txt");
+                    let target = header
+                        .link_name()
+                        .unwrap()
+                        .expect("symlink must carry a target")
+                        .to_string_lossy()
+                        .into_owned();
+                    assert_eq!(target, "target.txt");
+                    saw_symlink = true;
+                }
+                EntryType::Regular => {
+                    assert_eq!(name, "target.txt");
+                    saw_regular = true;
+                }
+                other => panic!("unexpected entry type {other:?} in cleaned tar"),
+            }
+        }
+        assert!(saw_symlink, "cleaned tar must still contain the symlink entry");
+        assert!(saw_regular, "cleaned tar must still contain the regular entry");
     }
 
     #[test]
