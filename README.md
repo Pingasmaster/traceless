@@ -188,9 +188,6 @@ cargo build -p traceless-gtk --release
 
 # Build only Qt frontend
 cargo build -p traceless-qt --release
-
-# Enable GNOME 50 features (requires GTK >= 4.22, libadwaita >= 1.9)
-cargo build -p traceless-gtk --release --features gnome_50
 ```
 
 ### Install manually

@@ -10,14 +10,9 @@ description = "GTK4/libadwaita frontend for Traceless metadata cleaner"
 name = "traceless-gtk"
 path = "src/main.rs"
 
-[features]
-default = []
-# Enable GNOME 50 features (requires GTK >= 4.22, libadwaita >= 1.9)
-gnome_50 = ["gtk/v4_22", "adw/v1_9"]
-
 [dependencies]
 traceless-core.workspace = true
-gtk = { version = "0.11.1", package = "gtk4", features = ["gnome_49"] }
-adw = { version = "0.9.1", package = "libadwaita", features = ["v1_8"] }
+gtk = { version = "= 0.11.2", package = "gtk4", features = ["gnome_50"] }
+adw = { version = "= 0.9.1", package = "libadwaita", features = ["v1_9"] }
 log.workspace = true
 env_logger.workspace = true
