@@ -11,6 +11,9 @@ categories.workspace = true
 description = "GTK4/libadwaita frontend for Traceless metadata cleaner"
 
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "traceless-gtk"
 path = "src/main.rs"

@@ -27,3 +27,32 @@ async-channel = "= 2.5.0"
 lto = "thin"
 codegen-units = 1
 strip = true
+
+# Strict clippy profile, inherited by every workspace crate.
+#
+# The philosophy: enable the full pedantic lint set as a hard deny (so
+# CI fails on regressions) but explicitly allow the lints that are
+# subjective style preferences or produce false positives. Everything
+# still enabled has been reviewed and is worth enforcing as a quality
+# gate.
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+
+# --- noisy / subjective ---
+doc_markdown = "allow"             # flags acronyms and filenames in prose
+missing_errors_doc = "allow"       # internal library; errors are obvious from types
+missing_panics_doc = "allow"       # same
+must_use_candidate = "allow"       # gets annoying on every getter
+module_name_repetitions = "allow"  # `handlers::audio::AudioHandler` is fine
+too_many_lines = "allow"           # arbitrary 100-line limit
+items_after_statements = "allow"   # style preference
+similar_names = "allow"            # `tag_type`/`tag_label` is fine
+
+# --- false positives on already-lowercased strings ---
+case_sensitive_file_extension_comparisons = "allow"
+
+# --- byte counting is the whole point of several helpers ---
+cast_possible_truncation = "allow"
+cast_sign_loss = "allow"
+cast_possible_wrap = "allow"
+cast_lossless = "allow"

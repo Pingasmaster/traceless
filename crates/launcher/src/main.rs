@@ -3,6 +3,7 @@
 #![allow(clippy::multiple_crate_versions)]
 
 use std::env;
+use std::ffi::OsString;
 use std::process::Command;
 
 #[cfg(unix)]
@@ -94,7 +95,10 @@ fn main() {
 
 #[cfg(unix)]
 fn launch(exe: &std::path::Path) -> ! {
-    let args: Vec<String> = env::args().skip(1).collect();
+    // `env::args_os()` preserves non-UTF-8 bytes; `env::args()` would
+    // panic on any argv component that isn't valid UTF-8, which is legal
+    // on POSIX filesystems.
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let err = Command::new(exe).args(&args).exec();
     eprintln!("Failed to launch {}: {err}", exe.display());
     std::process::exit(1);
@@ -102,7 +106,7 @@ fn launch(exe: &std::path::Path) -> ! {
 
 #[cfg(not(unix))]
 fn launch(exe: &std::path::Path) {
-    let args: Vec<String> = env::args().skip(1).collect();
+    let args: Vec<OsString> = env::args_os().skip(1).collect();
     let status = Command::new(exe)
         .args(&args)
         .status()

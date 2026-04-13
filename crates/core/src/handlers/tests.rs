@@ -99,6 +99,7 @@ fn test_handler_for_video() {
 #[test]
 fn test_handler_for_documents() {
     assert!(get_handler_for_mime("application/vnd.oasis.opendocument.text").is_some());
+    assert!(get_handler_for_mime("application/vnd.oasis.opendocument.graphics").is_some());
     assert!(get_handler_for_mime(
         "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ).is_some());
@@ -107,7 +108,15 @@ fn test_handler_for_documents() {
 #[test]
 fn test_handler_for_unsupported() {
     assert!(get_handler_for_mime("application/octet-stream").is_none());
-    assert!(get_handler_for_mime("text/plain").is_none());
+    // text/plain is now handled by HarmlessHandler (harmless copy).
+    assert!(get_handler_for_mime("application/x-unknown-gibberish").is_none());
+}
+
+#[test]
+fn test_handler_for_harmless() {
+    assert!(get_handler_for_mime("text/plain").is_some());
+    assert!(get_handler_for_mime("image/bmp").is_some());
+    assert!(get_handler_for_mime("image/x-portable-pixmap").is_some());
 }
 
 #[test]
@@ -510,6 +519,268 @@ fn test_document_handler_supported_types() {
     assert!(types.contains(
         &"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
     ));
+}
+
+// ===== Deep-clean coverage tests (mat2 parity) =====
+//
+// These verify the P0 silent-leak fixes: recursive media cleaning, rsid/
+// tracked-change / comment-ref stripping, junk-file omission, ODF
+// thumbnail removal, EPUB UUID regeneration, and deterministic ZIP
+// output.
+
+/// Build an OOXML-like DOCX with embedded rsid fingerprints, tracked
+/// changes, comment anchors, a thumbnail, and an embedded dirty JPEG.
+fn build_fake_docx(path: &std::path::Path, jpeg_bytes: &[u8]) {
+    let file = fs::File::create(path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+
+    writer.start_file("[Content_Types].xml", options).unwrap();
+    writer.write_all(b"<?xml version=\"1.0\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>").unwrap();
+
+    writer.start_file("docProps/core.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                   xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:creator>Secret Author</dc:creator>
+  <cp:lastModifiedBy>Alice</cp:lastModifiedBy>
+</cp:coreProperties>"#).unwrap();
+
+    writer.start_file("word/document.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main" mc:Ignorable="w14">
+  <w:body>
+    <w:p w:rsidR="00112233" w:rsidRDefault="00AABBCC">
+      <w:commentRangeStart w:id="1"/>
+      <w:r><w:t>visible</w:t></w:r>
+      <w:commentRangeEnd w:id="1"/>
+      <w:commentReference w:id="1"/>
+    </w:p>
+    <w:p>
+      <w:del w:id="2" w:author="bob"><w:r><w:t>removed-secret</w:t></w:r></w:del>
+      <w:ins w:id="3" w:author="alice"><w:r><w:t>inserted-ok</w:t></w:r></w:ins>
+    </w:p>
+  </w:body>
+</w:document>"#).unwrap();
+
+    writer.start_file("customXml/item1.xml", options).unwrap();
+    writer.write_all(b"<junk>should be dropped</junk>").unwrap();
+
+    writer.start_file("word/comments.xml", options).unwrap();
+    writer.write_all(b"<junk>should also be dropped</junk>").unwrap();
+
+    writer.start_file("word/media/image1.jpeg", options).unwrap();
+    writer.write_all(jpeg_bytes).unwrap();
+
+    writer.finish().unwrap();
+}
+
+/// Read an entry from a cleaned zip archive, returning None if absent.
+fn read_entry(zip_path: &std::path::Path, entry: &str) -> Option<Vec<u8>> {
+    let file = fs::File::open(zip_path).ok()?;
+    let mut archive = zip::ZipArchive::new(BufReader::new(file)).ok()?;
+    let mut e = archive.by_name(entry).ok()?;
+    let mut buf = Vec::new();
+    e.read_to_end(&mut buf).ok()?;
+    Some(buf)
+}
+
+use std::io::BufReader;
+use std::io::Read as _;
+
+#[test]
+fn test_docx_deep_clean_strips_rsid_revisions_and_junk() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+
+    // Use a minimal valid JPEG (no EXIF) for this particular test; the
+    // EXIF-recursion check has its own test below.
+    build_fake_docx(&path, TEST_JPEG);
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    // core.xml must be empty-stubbed
+    let core = String::from_utf8(read_entry(&output, "docProps/core.xml").unwrap()).unwrap();
+    assert!(!core.contains("Secret Author"), "creator must be gone: {core}");
+    assert!(!core.contains("Alice"), "lastModifiedBy must be gone");
+
+    // document.xml must have rsid / tracked changes / comment refs gone
+    let doc = String::from_utf8(read_entry(&output, "word/document.xml").unwrap()).unwrap();
+    assert!(!doc.contains("rsidR"), "rsid attribute leaked: {doc}");
+    assert!(!doc.contains("rsidRDefault"), "rsid attribute leaked");
+    assert!(!doc.contains("removed-secret"), "w:del content leaked: {doc}");
+    assert!(!doc.contains("w:del"), "w:del wrapper leaked");
+    assert!(doc.contains("inserted-ok"), "w:ins children must survive: {doc}");
+    assert!(!doc.contains("commentRangeStart"), "comment range leaked");
+    assert!(!doc.contains("commentReference"), "comment ref leaked");
+    assert!(!doc.contains("mc:Ignorable"), "mc:Ignorable leaked: {doc}");
+    assert!(doc.contains("visible"), "regular text must survive: {doc}");
+
+    // junk files must be gone
+    assert!(
+        read_entry(&output, "customXml/item1.xml").is_none(),
+        "customXml/item1.xml must be omitted"
+    );
+    assert!(
+        read_entry(&output, "word/comments.xml").is_none(),
+        "word/comments.xml must be omitted"
+    );
+}
+
+#[test]
+fn test_docx_embedded_jpeg_exif_is_stripped() {
+    // Create a dirty JPEG on disk, embed it, clean the DOCX, verify the
+    // EXIF is gone from the inner copy. This is the P0 §1.1 fix — the
+    // previous implementation copied embedded images verbatim.
+    let dir = TempDir::new().unwrap();
+    let jpeg_path = dir.path().join("dirty.jpg");
+    make_jpeg_with_exif(&jpeg_path);
+    let dirty_bytes = fs::read(&jpeg_path).unwrap();
+
+    let docx_path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+    build_fake_docx(&docx_path, &dirty_bytes);
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&docx_path, &output).unwrap();
+
+    let cleaned_jpeg = read_entry(&output, "word/media/image1.jpeg").unwrap();
+    // Write to a temp file so little_exif can parse it; then assert empty.
+    let temp_jpeg = dir.path().join("probe.jpg");
+    fs::write(&temp_jpeg, &cleaned_jpeg).unwrap();
+    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&temp_jpeg) {
+        assert!(
+            m.into_iter().next().is_none(),
+            "embedded JPEG must be stripped of EXIF"
+        );
+    }
+}
+
+#[test]
+fn test_docx_clean_is_deterministic() {
+    // Two cleans of the same input, a moment apart, must produce
+    // byte-identical output. This catches regressions in ZIP member
+    // time/uid/creator normalization.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.docx");
+    build_fake_docx(&path, TEST_JPEG);
+
+    let a = dir.path().join("a.docx");
+    let b = dir.path().join("b.docx");
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &a).unwrap();
+    handler.clean_metadata(&path, &b).unwrap();
+
+    let ba = fs::read(&a).unwrap();
+    let bb = fs::read(&b).unwrap();
+    assert_eq!(
+        ba, bb,
+        "cleaned DOCX output must be deterministic across runs"
+    );
+}
+
+#[test]
+fn test_odf_drops_thumbnails_and_tracked_changes() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.odt");
+    let output = dir.path().join("cleaned.odt");
+
+    let file = fs::File::create(&path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+
+    writer.start_file("mimetype", options).unwrap();
+    writer.write_all(b"application/vnd.oasis.opendocument.text").unwrap();
+
+    writer.start_file("meta.xml", options).unwrap();
+    writer.write_all(br#"<office:document-meta xmlns:office="o"><dc:creator xmlns:dc="d">Secret</dc:creator></office:document-meta>"#).unwrap();
+
+    writer.start_file("content.xml", options).unwrap();
+    writer.write_all(br#"<office:document-content xmlns:office="o" xmlns:text="t">
+        <office:body><office:text>
+            <text:tracked-changes><text:p>deleted</text:p></text:tracked-changes>
+            <text:p>kept</text:p>
+        </office:text></office:body>
+    </office:document-content>"#).unwrap();
+
+    writer.start_file("Thumbnails/thumbnail.png", options).unwrap();
+    writer.write_all(b"fake thumbnail").unwrap();
+
+    writer.start_file("Configurations2/accelerator/current.xml", options).unwrap();
+    writer.write_all(b"<junk/>").unwrap();
+
+    writer.finish().unwrap();
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    assert!(read_entry(&output, "meta.xml").is_none(), "meta.xml must be dropped");
+    assert!(
+        read_entry(&output, "Thumbnails/thumbnail.png").is_none(),
+        "Thumbnails/ must be dropped"
+    );
+    assert!(
+        read_entry(&output, "Configurations2/accelerator/current.xml").is_none(),
+        "Configurations2/ must be dropped"
+    );
+
+    let content = String::from_utf8(read_entry(&output, "content.xml").unwrap()).unwrap();
+    assert!(!content.contains("tracked-changes"), "tracked-changes must be gone: {content}");
+    assert!(!content.contains("deleted"), "deleted text must be gone");
+    assert!(content.contains("kept"), "kept text must survive");
+}
+
+#[test]
+fn test_epub_regenerates_uuid_and_rejects_encryption() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("book.epub");
+    let output = dir.path().join("cleaned.epub");
+
+    let file = fs::File::create(&path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+
+    writer.start_file("mimetype", options).unwrap();
+    writer.write_all(b"application/epub+zip").unwrap();
+    writer.start_file("META-INF/container.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#).unwrap();
+    writer.start_file("content.opf", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?>
+<package xmlns="http://www.idpf.org/2007/opf">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:title>Secret Book</dc:title>
+    <dc:creator>Jane Doe</dc:creator>
+    <dc:identifier>old-id-leaking-info</dc:identifier>
+  </metadata>
+  <manifest/>
+</package>"#).unwrap();
+    writer.finish().unwrap();
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    let opf = String::from_utf8(read_entry(&output, "content.opf").unwrap()).unwrap();
+    assert!(!opf.contains("Jane Doe"), "author must be removed: {opf}");
+    assert!(!opf.contains("Secret Book"), "title must be removed");
+    assert!(!opf.contains("old-id-leaking-info"), "old identifier must be gone");
+    assert!(opf.contains("urn:uuid:"), "fresh UUID must be present: {opf}");
+
+    // Second EPUB: encrypted — must fail
+    let enc_path = dir.path().join("enc.epub");
+    let enc_output = dir.path().join("enc-cleaned.epub");
+    let file = fs::File::create(&enc_path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    writer.start_file("mimetype", options).unwrap();
+    writer.write_all(b"application/epub+zip").unwrap();
+    writer.start_file("META-INF/encryption.xml", options).unwrap();
+    writer.write_all(b"<encryption/>").unwrap();
+    writer.finish().unwrap();
+
+    let result = handler.clean_metadata(&enc_path, &enc_output);
+    assert!(result.is_err(), "encrypted EPUB must be rejected");
 }
 
 // ===== Video Handler Tests =====

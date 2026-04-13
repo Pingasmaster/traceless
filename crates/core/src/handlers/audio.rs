@@ -1,8 +1,7 @@
 use std::path::Path;
 
 use lofty::file::TaggedFileExt;
-use lofty::prelude::*;
-use lofty::tag::ItemKey;
+use lofty::tag::{ItemKey, TagType};
 
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
@@ -26,26 +25,56 @@ impl FormatHandler for AudioHandler {
         let mut items = Vec::new();
 
         for tag in tagged_file.tags() {
-            let tag_type = format!("{:?}", tag.tag_type());
+            let tag_type = tag.tag_type();
+            let tag_label = format!("{tag_type:?}");
+
+            // Vorbis-based formats (OGG/FLAC/Opus) carry a mandatory
+            // vendor string in the comment header. Lofty exposes it as
+            // a synthetic `EncoderSoftware` item on the generic Tag,
+            // so every file ends up "having" an Encoder metadata entry
+            // even after a clean. This matches a quirk of lofty's
+            // conversion layer, not a real metadata leak — mat2 (via
+            // mutagen) intentionally hides it from its reader output.
+            // We do the same here.
+            let skip_encoder_software = tag_type == TagType::VorbisComments;
+
             for item in tag.items() {
+                if skip_encoder_software && item.key() == ItemKey::EncoderSoftware {
+                    continue;
+                }
                 let key = item_key_to_string(item.key());
                 let value = item.value().text().unwrap_or("(binary data)").to_string();
                 items.push(MetadataItem {
-                    key: format!("[{tag_type}] {key}"),
+                    key: format!("[{tag_label}] {key}"),
                     value,
                 });
             }
 
-            // Also capture pictures
+            // Also capture pictures, including any metadata leaks
+            // inside them (an embedded JPEG can carry EXIF/GPS). mat2
+            // does this in libmat2/audio.py::FLACParser.get_meta.
             for (i, pic) in tag.pictures().iter().enumerate() {
                 items.push(MetadataItem {
-                    key: format!("[{tag_type}] Picture #{}", i + 1),
+                    key: format!("[{tag_label}] Picture #{}", i + 1),
                     value: format!(
                         "{:?}, {} bytes",
                         pic.pic_type(),
                         pic.data().len()
                     ),
                 });
+                // Recursively scan the cover art for its own metadata.
+                if let Some(inner) = probe_picture_metadata(pic.mime_type(), pic.data()) {
+                    for item in inner {
+                        items.push(MetadataItem {
+                            key: format!(
+                                "[{tag_label}] Picture #{} → {}",
+                                i + 1,
+                                item.key
+                            ),
+                            value: item.value,
+                        });
+                    }
+                }
             }
         }
 
@@ -71,20 +100,49 @@ impl FormatHandler for AudioHandler {
             detail: format!("Failed to copy file: {e}"),
         })?;
 
-        let mut tagged_file =
-            lofty::read_from_path(output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to read audio file: {e}"),
-            })?;
+        // Enumerate every tag type present in the file, then delete
+        // each via `TagType::remove_from_path`. Calling
+        // `TaggedFile::clear()` + `save_to_path` does NOT work:
+        // `save_to_path` iterates `self.tags` and returns early on an
+        // empty vec, leaving the on-disk tags intact. See lofty 0.24
+        // `TaggedFile::save_to` in tagged_file.rs line 440.
+        let tag_types: Vec<lofty::tag::TagType> = {
+            let tagged_file =
+                lofty::read_from_path(output_path).map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("Failed to read audio file: {e}"),
+                })?;
+            tagged_file.tags().iter().map(lofty::tag::Tag::tag_type).collect()
+        };
 
-        tagged_file.clear();
+        for tag_type in tag_types {
+            tag_type
+                .remove_from_path(output_path)
+                .map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("Failed to remove {tag_type:?} tag: {e}"),
+                })?;
+        }
 
-        tagged_file
-            .save_to_path(output_path, lofty::config::WriteOptions::default())
-            .map_err(|e| CoreError::CleanError {
+        // For FLAC we also try to blank the VorbisComments vendor
+        // string, which lofty lets us rewrite on FLAC because the
+        // VorbisComments block is a standalone metadata block inside
+        // the FLAC container. For OGG/Vorbis/Opus lofty refuses to
+        // overwrite the vendor (see lofty/src/ogg/write.rs lines 117-
+        // 134 — the existing vendor is force-copied from disk), so the
+        // best we can do there is hide the synthetic reader-side
+        // EncoderSoftware item.
+        if matches!(
+            mime_guess::from_path(output_path)
+                .first_or_octet_stream()
+                .as_ref(),
+            "audio/flac" | "audio/x-flac"
+        ) {
+            blank_flac_vendor(output_path).map_err(|e| CoreError::CleanError {
                 path: path.to_path_buf(),
-                detail: format!("Failed to save cleaned audio: {e}"),
+                detail: format!("Failed to blank FLAC vendor: {e}"),
             })?;
+        }
 
         Ok(())
     }
@@ -96,14 +154,68 @@ impl FormatHandler for AudioHandler {
             "audio/ogg",
             "audio/vorbis",
             "audio/mp4",
+            "audio/m4a",
             "audio/x-wav",
             "audio/wav",
             "audio/aac",
             "audio/x-aiff",
             "audio/x-flac",
             "audio/x-m4a",
+            "audio/aiff",
+            "audio/opus",
         ]
     }
+}
+
+/// Take a picture's MIME type and raw bytes and, if we have a matching
+/// handler, return its metadata. Returns None on any parse error so
+/// the caller can silently skip it.
+fn probe_picture_metadata(
+    mime: Option<&lofty::picture::MimeType>,
+    data: &[u8],
+) -> Option<Vec<MetadataItem>> {
+    let (mime_str, ext) = match mime? {
+        lofty::picture::MimeType::Jpeg => ("image/jpeg", "jpg"),
+        lofty::picture::MimeType::Png => ("image/png", "png"),
+        lofty::picture::MimeType::Tiff => ("image/tiff", "tiff"),
+        lofty::picture::MimeType::Bmp => ("image/bmp", "bmp"),
+        lofty::picture::MimeType::Gif => ("image/gif", "gif"),
+        _ => return None,
+    };
+
+    // Handlers use the on-disk path to detect MIME, so write to a temp
+    // file with the correct extension.
+    let tmp = tempfile::Builder::new()
+        .prefix("traceless-flac-pic-")
+        .suffix(&format!(".{ext}"))
+        .tempfile()
+        .ok()?;
+    std::fs::write(tmp.path(), data).ok()?;
+
+    let handler = crate::format_support::get_handler_for_mime(mime_str)?;
+    let set = handler.read_metadata(tmp.path()).ok()?;
+    let mut out = Vec::new();
+    for group in set.groups {
+        for item in group.items {
+            out.push(item);
+        }
+    }
+    if out.is_empty() { None } else { Some(out) }
+}
+
+/// Rewrite a FLAC file's VorbisComments block with an empty vendor
+/// string. FLAC stores VorbisComments as a standalone metadata block
+/// inside the FLAC container, so lofty will honor our vendor value on
+/// save (unlike for native OGG where the vendor is force-preserved).
+fn blank_flac_vendor(path: &Path) -> Result<(), String> {
+    use lofty::ogg::VorbisComments;
+    use lofty::tag::TagExt;
+
+    let mut vc = VorbisComments::default();
+    vc.set_vendor(String::new());
+    vc.save_to_path(path, lofty::config::WriteOptions::default())
+        .map_err(|e| e.to_string())?;
+    Ok(())
 }
 
 fn item_key_to_string(key: ItemKey) -> String {

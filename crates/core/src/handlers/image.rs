@@ -64,19 +64,37 @@ impl FormatHandler for ImageHandler {
                     for segment in jpeg.segments() {
                         let marker = segment.marker();
                         let seg_data = segment.contents();
+                        // APP1 with Adobe XMP namespace marker
                         if marker == 0xE1
                             && seg_data.starts_with(b"http://ns.adobe.com/xap/1.0/\0")
                         {
-                            items.push(MetadataItem {
-                                key: "XMP data".to_string(),
-                                value: "present".to_string(),
-                            });
+                            // Strip the 29-byte namespace header.
+                            let xmp_body = &seg_data[29..];
+                            let parsed = super::xmp::parse_xmp_fields(xmp_body);
+                            if parsed.is_empty() {
+                                items.push(MetadataItem {
+                                    key: "XMP data".to_string(),
+                                    value: "present".to_string(),
+                                });
+                            } else {
+                                items.extend(parsed);
+                            }
                         }
-                        if marker == 0xED {
-                            items.push(MetadataItem {
-                                key: "IPTC/Photoshop data".to_string(),
-                                value: "present".to_string(),
-                            });
+                        // APP13 with Photoshop 3.0 marker (IPTC 8BIM block)
+                        if marker == 0xED
+                            && seg_data.starts_with(b"Photoshop 3.0\0")
+                        {
+                            // Skip the 14-byte "Photoshop 3.0\0" marker
+                            let body = &seg_data[14..];
+                            let parsed = super::xmp::parse_iptc_8bim(body);
+                            if parsed.is_empty() {
+                                items.push(MetadataItem {
+                                    key: "IPTC/Photoshop data".to_string(),
+                                    value: "present".to_string(),
+                                });
+                            } else {
+                                items.extend(parsed);
+                            }
                         }
                         if !saw_icc
                             && marker == 0xE2
@@ -129,6 +147,29 @@ impl FormatHandler for ImageHandler {
         path: &Path,
         output_path: &Path,
     ) -> Result<(), CoreError> {
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+
+        // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.
+        // little_exif has a dedicated code path for each format that
+        // clears the EXIF IFD (TIFF/HEIF) or the exif box (JXL) in
+        // place without re-encoding the pixel data.
+        if matches!(
+            mime.as_ref(),
+            "image/tiff" | "image/heic" | "image/heif" | "image/jxl"
+        ) {
+            fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!("Failed to copy file: {e}"),
+            })?;
+            ExifMetadata::file_clear_metadata(output_path).map_err(|e| {
+                CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("Failed to clear metadata: {e}"),
+                }
+            })?;
+            return Ok(());
+        }
+
         // Strip all metadata segments via img-parts, then run format-
         // specific post-passes for the bits img-parts doesn't expose.
         let data = fs::read(path).map_err(|e| CoreError::ReadError {
@@ -152,7 +193,6 @@ impl FormatHandler for ImageHandler {
 
                 // Format-specific post-pass: strip leftover metadata
                 // chunks that img-parts doesn't expose a setter for.
-                let mime = mime_guess::from_path(path).first_or_octet_stream();
                 let final_data = if mime == "image/jpeg" {
                     strip_jpeg_extra_segments(&buf).unwrap_or(buf)
                 } else if mime == "image/png" {
@@ -184,7 +224,15 @@ impl FormatHandler for ImageHandler {
     }
 
     fn supported_mime_types(&self) -> &[&str] {
-        &["image/jpeg", "image/png", "image/webp"]
+        &[
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
+            "image/jxl",
+        ]
     }
 }
 

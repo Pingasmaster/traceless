@@ -1,10 +1,24 @@
+pub mod archive;
 pub mod audio;
+pub mod css;
 pub mod document;
+pub mod epub;
+pub mod gif;
+pub mod harmless;
+pub mod html;
 pub mod image;
+pub mod odf;
+pub mod ooxml;
 pub mod pdf;
+pub mod sandbox;
+pub mod svg;
+pub mod torrent;
+pub mod xmp;
 #[cfg(test)]
 mod tests;
 pub mod video;
+pub mod xml_util;
+pub mod zip_util;
 
 use std::path::Path;
 

@@ -11,6 +11,9 @@ categories.workspace = true
 description = "Qt6/QML frontend for Traceless metadata cleaner"
 
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "traceless-qt"
 path = "src/main.rs"

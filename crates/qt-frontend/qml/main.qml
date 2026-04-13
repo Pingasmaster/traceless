@@ -15,6 +15,20 @@ ApplicationWindow {
     FileListModel { id: fileModel }
     AppController { id: appController }
 
+    // Convert a QML url (file://…) to a decoded local filesystem path.
+    // Returns an empty string for non-file URIs so the caller can filter.
+    //
+    // Plain `.toString().replace("file://", "")` is wrong in two ways:
+    //   1. It leaves percent-encoded sequences (%20 for space, etc.),
+    //      producing paths that don't exist on disk.
+    //   2. It silently passes through non-`file://` URIs (e.g. http links
+    //      dragged from a browser) as if they were local paths.
+    function urlToLocalFile(url) {
+        var s = url.toString()
+        if (!s.startsWith("file://")) return ""
+        return decodeURIComponent(s.substring(7))
+    }
+
     FileDialog {
         id: fileDialog
         title: "Add Files"
@@ -22,10 +36,13 @@ ApplicationWindow {
         onAccepted: {
             var paths = []
             for (var i = 0; i < selectedFiles.length; i++) {
-                var path = selectedFiles[i].toString().replace("file://", "")
-                paths.push(path)
+                var p = urlToLocalFile(selectedFiles[i])
+                if (p.length > 0) paths.push(p)
             }
-            fileModel.add_files(paths.join("\n"))
+            // NUL-delimited: NUL is the only byte that cannot appear in a
+            // filename on POSIX, so it is the only safe delimiter for a
+            // list that may contain paths with newlines, tabs, etc.
+            if (paths.length > 0) fileModel.add_files(paths.join("\0"))
         }
     }
 
@@ -33,8 +50,8 @@ ApplicationWindow {
         id: folderDialog
         title: "Add Folder"
         onAccepted: {
-            var path = selectedFolder.toString().replace("file://", "")
-            fileModel.add_folder(path)
+            var p = urlToLocalFile(selectedFolder)
+            if (p.length > 0) fileModel.add_folder(p)
         }
     }
 
@@ -67,10 +84,11 @@ ApplicationWindow {
             if (!drop.hasUrls) return
             var paths = []
             for (var i = 0; i < drop.urls.length; i++) {
-                paths.push(drop.urls[i].toString().replace(/^file:\/\//, ""))
+                var p = urlToLocalFile(drop.urls[i])
+                if (p.length > 0) paths.push(p)
             }
             if (paths.length > 0) {
-                fileModel.add_files(paths.join("\n"))
+                fileModel.add_files(paths.join("\0"))
             }
             drop.accept(Qt.CopyAction)
         }

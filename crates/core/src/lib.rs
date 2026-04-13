@@ -4,6 +4,7 @@
 // align from this repo. See CLAUDE.md for the waiver rationale.
 #![allow(clippy::multiple_crate_versions)]
 
+pub mod config;
 pub mod error;
 pub mod file;
 pub mod file_store;
@@ -11,6 +12,9 @@ pub mod format_support;
 pub mod handlers;
 pub mod metadata;
 
+pub use config::{
+    archive_unknown_policy, set_archive_unknown_policy, PolicyGuard, UnknownMemberPolicy,
+};
 pub use error::CoreError;
 pub use file::{FileEntry, FileId, FileState};
 pub use file_store::{collect_paths, FileStore, FileStoreEvent};

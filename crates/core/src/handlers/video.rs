@@ -4,6 +4,7 @@ use std::process::Command;
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+use super::sandbox;
 use super::FormatHandler;
 
 pub struct VideoHandler;
@@ -12,19 +13,20 @@ impl FormatHandler for VideoHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         check_tool_available("ffprobe")?;
 
-        let output = Command::new("ffprobe")
-            .args([
-                "-v", "quiet",
-                "-print_format", "json",
-                "-show_format",
-                "-show_streams",
-            ])
-            .arg(path)
-            .output()
-            .map_err(|e| CoreError::ToolFailed {
-                tool: "ffprobe".to_string(),
-                detail: format!("Failed to run ffprobe: {e}"),
-            })?;
+        let mut cmd = sandbox::sandboxed_probe_command("ffprobe", path);
+        cmd.args([
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(path);
+        let output = cmd.output().map_err(|e| CoreError::ToolFailed {
+            tool: "ffprobe".to_string(),
+            detail: format!("Failed to run ffprobe: {e}"),
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -60,26 +62,41 @@ impl FormatHandler for VideoHandler {
         check_tool_available("ffmpeg")?;
 
         // Full strip: copy streams, discard all metadata and chapters.
-        let args = [
-            "-y".to_string(),
-            "-i".to_string(),
-            path.to_string_lossy().into_owned(),
-            "-map_metadata".to_string(),
-            "-1".to_string(),
-            "-c".to_string(),
-            "copy".to_string(),
-            "-map_chapters".to_string(),
-            "-1".to_string(),
-            output_path.to_string_lossy().into_owned(),
-        ];
-
-        let output = Command::new("ffmpeg")
-            .args(&args)
-            .output()
-            .map_err(|e| CoreError::ToolFailed {
-                tool: "ffmpeg".to_string(),
-                detail: format!("Failed to run ffmpeg: {e}"),
-            })?;
+        // `+bitexact` on the container + each stream prevents ffmpeg from
+        // re-stamping `encoder=Lavf...` back into the output; `-disposition 0`
+        // drops the per-stream disposition flags mat2 also clears.
+        //
+        // Pass `path` and `output_path` as `&OsStr` rather than going through
+        // `to_string_lossy`: Linux filenames are byte sequences, not required
+        // to be UTF-8, and lossy conversion silently corrupts non-UTF-8 names.
+        let mut cmd = sandbox::sandboxed_command("ffmpeg", path, output_path);
+        cmd.arg("-y")
+            .arg("-i")
+            .arg(path)
+            .arg("-map")
+            .arg("0")
+            .arg("-c")
+            .arg("copy")
+            .arg("-map_metadata")
+            .arg("-1")
+            .arg("-map_chapters")
+            .arg("-1")
+            .arg("-disposition")
+            .arg("0")
+            .arg("-fflags")
+            .arg("+bitexact")
+            .arg("-flags:v")
+            .arg("+bitexact")
+            .arg("-flags:a")
+            .arg("+bitexact")
+            .arg("-loglevel")
+            .arg("error")
+            .arg("-hide_banner")
+            .arg(output_path);
+        let output = cmd.output().map_err(|e| CoreError::ToolFailed {
+            tool: "ffmpeg".to_string(),
+            detail: format!("Failed to run ffmpeg: {e}"),
+        })?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
@@ -100,6 +117,9 @@ impl FormatHandler for VideoHandler {
             "video/x-msvideo",
             "video/avi",
             "video/quicktime",
+            "video/x-ms-wmv",
+            "video/x-flv",
+            "video/ogg",
         ]
     }
 }

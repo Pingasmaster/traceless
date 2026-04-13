@@ -12,19 +12,66 @@ This project is inspired by [Metadata Cleaner](https://gitlab.com/rmnvgr/metadat
 
 ## Supported Formats
 
-| Format | Extensions | Engine |
-|--------|-----------|--------|
-| Images | `.jpg`, `.jpeg`, `.png`, `.webp` | little_exif + img-parts |
-| PDF | `.pdf` | lopdf |
-| Audio | `.mp3`, `.flac`, `.ogg`, `.wav`, `.m4a`, `.aac`, `.aiff` | lofty |
-| Documents | `.odt`, `.ods`, `.odp`, `.docx`, `.xlsx`, `.pptx`, `.epub` | zip + quick-xml |
-| Video | `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov` | ffmpeg (CLI) |
+| Category | Extensions | Engine |
+|---|---|---|
+| Raster images | `.jpg`, `.jpeg`, `.png`, `.webp`, `.tiff`, `.tif`, `.heic`, `.heif`, `.jxl` | little_exif + img-parts |
+| Animated / special | `.gif` | custom byte-level walker |
+| Vector / markup | `.svg`, `.html`, `.htm`, `.xhtml`, `.css` | quick-xml + custom parsers |
+| Harmless (no-op or trivial) | `.bmp`, `.ppm`, `.pgm`, `.pbm`, `.pnm`, `.txt` | built-in |
+| PDF | `.pdf` | lopdf (object-graph strip) |
+| Audio | `.mp3`, `.flac`, `.ogg`, `.opus`, `.wav`, `.m4a`, `.aac`, `.aiff` | lofty |
+| Office documents | `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, `.odp`, `.odg`, `.epub` | zip + quick-xml (deep-clean) |
+| Video | `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.wmv`, `.flv` | ffmpeg (CLI, bitexact) |
+| P2P | `.torrent` | custom bencode parser |
+| Archives | `.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` | tar + flate2 + bzip2 + xz2 |
 
 ## Features
 
-- View all metadata in files before cleaning
-- Full metadata stripping (removes all metadata)
-- Lightweight cleaning mode (preserves data integrity, removes author/tool info)
+### Metadata removal
+- **Read** every recognized field before cleaning, including XMP/IPTC inside JPEGs
+  and the XMP packet in PDF `/Metadata` streams.
+- **Remove** all metadata by default. There is no separate "lightweight"
+  mode — cleaning is always thorough.
+- **Deep-clean office documents**: DOCX/XLSX/PPTX have `w:rsid*` / `w:nsid`
+  fingerprints removed, tracked changes promoted or dropped, comment ranges
+  unanchored, `[Content_Types].xml` and `document.xml.rels` rewritten, and
+  junk files (`customXml/`, printer settings, theme, `viewProps`, `presProps`,
+  comments, `docProps/custom.xml`, …) omitted entirely. ODT/ODS/ODP drop
+  `Thumbnails/`, `Configurations2/`, and `layout-cache`, and strip
+  `<text:tracked-changes>`. EPUB metadata blocks are regenerated with a fresh
+  v4 UUID; `iTunesMetadata.plist` and `META-INF/calibre_bookmarks.txt` are
+  dropped; archives containing `META-INF/encryption.xml` are refused.
+- **Recursive archive cleaning**: every known-format member inside a ZIP, TAR,
+  or office archive is itself cleaned — an embedded JPEG inside a `.docx`
+  no longer leaks camera EXIF / GPS.
+- **Deterministic output**: ZIP member timestamps are pinned to 1980-01-01,
+  comments cleared, and entries sorted lexicographically (with `mimetype`
+  first for ODF/EPUB). TAR members have uid/gid/mtime/uname/gname zeroed.
+  Two cleanings of the same input produce byte-identical output.
+- **PDF object-graph strip**: `/Info`, `/Metadata`, `/OpenAction`, `/AA`,
+  `/Names/EmbeddedFiles`, `/Names/JavaScript`, `/AcroForm`, `/StructTreeRoot`,
+  `/MarkInfo`, `/PieceInfo`, `/PageLabels`, `/Outlines`, `/Perms`, per-page
+  `/Annots`, per-page `/Metadata`, and the trailer `/ID` are all removed.
+  Image XObject metadata streams are stripped too.
+- **Video bitexact mode**: ffmpeg is invoked with `-fflags +bitexact
+  -flags:v +bitexact -flags:a +bitexact -disposition 0` so the output
+  container has no `encoder=Lavf…` fingerprint.
+
+### Safety
+- **TAR safety checks**: setuid / setgid, absolute paths, `..` path
+  traversal, symlinks escaping the archive, hardlinks, device files, and
+  duplicate member names are all refused up front.
+- **Optional sandboxing**: when [bubblewrap](https://github.com/containers/bubblewrap)
+  is installed, ffmpeg / ffprobe are executed inside a fresh namespace
+  with `--unshare-all --die-with-parent --clearenv`, a read-only `/usr`
+  bind, a tmpfs `/tmp`, and tight RO/RW binds for just the input and
+  output paths. Falls back to unsandboxed exec when bwrap is absent.
+- **Unknown-member policy** (`UnknownMemberPolicy::{Keep, Omit, Abort}`):
+  library consumers can choose whether unrecognized members of an
+  archive are kept verbatim (default), silently dropped, or rejected
+  outright with an error.
+
+### UI
 - Drag-and-drop file adding
 - Recursive folder scanning
 - Concurrent file processing
@@ -76,6 +123,9 @@ If no toolkit is detected, it asks which to install.
 - **GTK frontend**: GTK 4 and libadwaita development libraries
 - **Qt frontend**: Qt 6 Base, Declarative, and QuickControls2 development libraries, plus CMake
 - **Video support** (optional): `ffmpeg` at runtime
+- **Sandboxing** (optional, recommended): `bubblewrap` at runtime — when
+  present, ffmpeg / ffprobe invocations are executed under a namespace
+  sandbox with no filesystem access beyond the input and output paths.
 
 ### Install dependencies by distro
 
@@ -91,6 +141,9 @@ sudo pacman -S qt6-base qt6-declarative qt6-quickcontrols2 cmake
 
 # Video support (optional)
 sudo pacman -S ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo pacman -S bubblewrap
 ```
 </details>
 
@@ -106,6 +159,9 @@ sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel cmake
 
 # Video support (optional)
 sudo dnf install ffmpeg-free  # or ffmpeg from RPM Fusion
+
+# Sandboxing (optional, recommended)
+sudo dnf install bubblewrap
 ```
 </details>
 
@@ -121,6 +177,9 @@ sudo apt install qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls c
 
 # Video support (optional)
 sudo apt install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo apt install bubblewrap
 ```
 </details>
 
@@ -136,6 +195,9 @@ sudo zypper install qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-deve
 
 # Video support (optional)
 sudo zypper install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo zypper install bubblewrap
 ```
 </details>
 
@@ -151,6 +213,9 @@ sudo xbps-install qt6-base-devel qt6-declarative-devel cmake
 
 # Video support (optional)
 sudo xbps-install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo xbps-install bubblewrap
 ```
 </details>
 
@@ -166,6 +231,9 @@ sudo apk add qt6-qtbase-dev qt6-qtdeclarative-dev cmake
 
 # Video support (optional)
 sudo apk add ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo apk add bubblewrap
 ```
 </details>
 
@@ -173,7 +241,7 @@ sudo apk add ffmpeg
 <summary><b>NixOS / Nix</b></summary>
 
 ```bash
-nix-shell -p gtk4 libadwaita pkg-config cmake qt6.qtbase qt6.qtdeclarative rustup ffmpeg
+nix-shell -p gtk4 libadwaita pkg-config cmake qt6.qtbase qt6.qtdeclarative rustup ffmpeg bubblewrap
 ```
 </details>
 
@@ -237,6 +305,26 @@ If only one frontend is installed, the launcher will use whichever is available 
 traceless/
 ├── crates/
 │   ├── core/           # Shared metadata reading/cleaning logic (no UI deps)
+│   │   └── src/handlers/
+│   │       ├── image.rs       # JPEG, PNG, WebP, TIFF, HEIC/HEIF, JXL
+│   │       ├── gif.rs         # GIF comment / application-ext walker
+│   │       ├── svg.rs         # quick-xml RDF / Inkscape / sodipodi strip
+│   │       ├── pdf.rs         # lopdf object-graph strip
+│   │       ├── audio.rs       # lofty tag removal + FLAC picture recursion
+│   │       ├── video.rs       # ffmpeg -bitexact bridge
+│   │       ├── document.rs    # OOXML / ODF / EPUB dispatcher
+│   │       ├── ooxml.rs       # DOCX / XLSX / PPTX deep clean
+│   │       ├── odf.rs         # ODT / ODS / ODP deep clean
+│   │       ├── epub.rs        # EPUB metadata regen + DRM refusal
+│   │       ├── archive.rs     # Plain ZIP / TAR (+ gz/bz2/xz)
+│   │       ├── harmless.rs    # text/plain, BMP, PPM copy
+│   │       ├── html.rs        # Tag-level meta / title stripper
+│   │       ├── css.rs         # /* */ comment stripper
+│   │       ├── torrent.rs     # Bencode allowlist
+│   │       ├── xmp.rs         # XMP + IPTC IIM field parsers
+│   │       ├── sandbox.rs     # bubblewrap wrapper for external tools
+│   │       ├── xml_util.rs    # Shared XML attribute-sort helper
+│   │       └── zip_util.rs    # Shared ZIP member normalization
 │   ├── gtk-frontend/   # GTK4/libadwaita GNOME-native UI
 │   ├── qt-frontend/    # Qt6/QML KDE-native UI
 │   └── launcher/       # DE auto-detection + exec()
@@ -246,9 +334,30 @@ The core library is shared between both frontends. Each frontend is a separate b
 
 ## Testing
 
+The core library ships with an extensive test suite that mirrors mat2's
+upstream tests format-for-format. Run it with:
+
 ```bash
 cargo test -p traceless-core
 ```
+
+At the time of writing: **114 unit tests + 84 integration tests**, all
+passing. The integration tests build synthetic "dirty" fixtures on the
+fly (via the crates the cleaner already depends on, and optionally
+ffmpeg for audio/video), and assert round-trip cleanliness, determinism,
+and idempotence for every supported format.
+
+### Strict lint gate
+
+The workspace is configured to deny `clippy::pedantic` across every
+crate. The full lint gate is:
+
+```bash
+cargo clippy --workspace --all-targets -- \
+    -D clippy::all -D clippy::pedantic -D clippy::nursery -D clippy::cargo
+```
+
+New code must pass this cleanly before being committed.
 
 ## License
 

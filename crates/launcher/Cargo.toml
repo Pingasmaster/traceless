@@ -11,6 +11,9 @@ categories.workspace = true
 description = "Desktop environment auto-detecting launcher for Traceless metadata cleaner"
 
 
+[lints]
+workspace = true
+
 [[bin]]
 name = "traceless"
 path = "src/main.rs"

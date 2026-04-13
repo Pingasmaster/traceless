@@ -2,26 +2,32 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::Path;
 
+use img_parts::jpeg::Jpeg;
+use img_parts::png::Png;
+use img_parts::{DynImage, ImageEXIF, ImageICC};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
-use zip::write::SimpleFileOptions;
 use zip::ZipArchive;
 
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::FormatHandler;
+use super::{epub, odf, ooxml, zip_util, FormatHandler};
 
 pub struct DocumentHandler;
 
-/// Metadata XML paths in OOXML documents (DOCX, XLSX, PPTX).
-const OOXML_META_PATHS: &[&str] = &["docProps/core.xml", "docProps/app.xml", "docProps/custom.xml"];
-
-/// Metadata XML paths in ODF documents (ODT, ODS, ODP).
-const ODF_META_PATHS: &[&str] = &["meta.xml"];
-
-/// Metadata XML paths in EPUB documents.
-const EPUB_META_PATHS: &[&str] = &["content.opf", "OEBPS/content.opf", "OPS/content.opf"];
+/// Which archive-family this member set belongs to. We decide this once
+/// at the start of `clean_metadata` by peeking at the file list and then
+/// dispatch each entry accordingly.
+#[derive(Copy, Clone, PartialEq, Eq, Debug)]
+enum ArchiveKind {
+    Ooxml, // DOCX, XLSX, PPTX
+    Odf,   // ODT, ODS, ODP, ODG, ODF
+    Epub,
+    /// Unknown zip-based document — clean conservatively (normalize zip
+    /// metadata, strip embedded media EXIF) but don't touch XML contents.
+    Generic,
+}
 
 impl FormatHandler for DocumentHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
@@ -30,9 +36,11 @@ impl FormatHandler for DocumentHandler {
             source: e,
         })?;
 
-        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| CoreError::ParseError {
-            path: path.to_path_buf(),
-            detail: format!("Not a valid ZIP archive: {e}"),
+        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
+            CoreError::ParseError {
+                path: path.to_path_buf(),
+                detail: format!("Not a valid ZIP archive: {e}"),
+            }
         })?;
 
         let filename = path
@@ -42,8 +50,16 @@ impl FormatHandler for DocumentHandler {
 
         let mut set = MetadataSet::default();
 
-        // Determine which meta paths to check
-        let meta_paths = detect_meta_paths(&mut archive);
+        // Paths we know carry metadata, probed in order of frequency.
+        let meta_paths = [
+            "docProps/core.xml",
+            "docProps/app.xml",
+            "docProps/custom.xml",
+            "meta.xml",
+            "content.opf",
+            "OEBPS/content.opf",
+            "OPS/content.opf",
+        ];
 
         for meta_path in meta_paths {
             if let Ok(mut entry) = archive.by_name(meta_path) {
@@ -60,6 +76,61 @@ impl FormatHandler for DocumentHandler {
             }
         }
 
+        // Flag embedded media (the caller doesn't see the inner EXIF,
+        // but we at least tell them it's there).
+        let mut embedded_media_count = 0usize;
+        let mut revision_hits = 0usize;
+        let mut comment_hits = 0usize;
+        for i in 0..archive.len() {
+            if let Ok(entry) = archive.by_index(i) {
+                let name = entry.name();
+                if zip_util::is_cleanable_media(name).is_some() {
+                    embedded_media_count += 1;
+                }
+                if name.ends_with("word/document.xml") {
+                    // Cheap textual probe for rsid / tracked-changes
+                    // markers without a full XML parse.
+                    let mut sample = String::new();
+                    let _ = entry.take(256 * 1024).read_to_string(&mut sample);
+                    if sample.contains(":rsid") || sample.contains(" w:rsid") {
+                        revision_hits += 1;
+                    }
+                    if sample.contains("w:del ") || sample.contains("w:ins ") {
+                        revision_hits += 1;
+                    }
+                    if sample.contains("commentReference") || sample.contains("commentRangeStart") {
+                        comment_hits += 1;
+                    }
+                }
+            }
+        }
+
+        if embedded_media_count > 0 || revision_hits > 0 || comment_hits > 0 {
+            let mut items = Vec::new();
+            if embedded_media_count > 0 {
+                items.push(MetadataItem {
+                    key: "Embedded images".to_string(),
+                    value: format!("{embedded_media_count} file(s) may contain EXIF/GPS"),
+                });
+            }
+            if revision_hits > 0 {
+                items.push(MetadataItem {
+                    key: "Revision fingerprints".to_string(),
+                    value: "rsid / tracked changes present".to_string(),
+                });
+            }
+            if comment_hits > 0 {
+                items.push(MetadataItem {
+                    key: "Comment references".to_string(),
+                    value: "comment anchors present".to_string(),
+                });
+            }
+            set.groups.push(MetadataGroup {
+                filename: format!("{filename}/[archive]"),
+                items,
+            });
+        }
+
         Ok(set)
     }
 
@@ -73,70 +144,85 @@ impl FormatHandler for DocumentHandler {
             source: e,
         })?;
 
-        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: format!("Not a valid ZIP archive: {e}"),
+        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
+            CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!("Not a valid ZIP archive: {e}"),
+            }
         })?;
 
-        let meta_paths = detect_meta_paths(&mut archive);
+        // --- Detect archive family -----------------------------------------
+        let kind = detect_kind(&mut archive);
+
+        // --- EPUB safety check: refuse encrypted archives ------------------
+        if kind == ArchiveKind::Epub && archive.by_name("META-INF/encryption.xml").is_ok() {
+            return Err(CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: "EPUB contains encryption.xml (DRM or encrypted fonts); \
+                         refusing to clean, the output would be unreadable"
+                    .to_string(),
+            });
+        }
+
+        // --- Collect members, sorted, mimetype first (ODF/EPUB) ------------
+        let mut names: Vec<String> = (0..archive.len())
+            .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
+            .collect();
+        // First sort lexicographically to kill any producer-order fingerprint.
+        names.sort();
+        // Then move the special `mimetype` entry to the front — it must
+        // be first in ODF and EPUB archives per their respective specs.
+        if let Some(pos) = names.iter().position(|n| n == "mimetype") {
+            let m = names.remove(pos);
+            names.insert(0, m);
+        }
 
         let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to create output: {e}"),
         })?;
-
         let mut writer = zip::ZipWriter::new(out_file);
 
-        for i in 0..archive.len() {
-            let mut entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to read ZIP entry: {e}"),
-            })?;
+        for entry_name in &names {
+            // Drop junk members up-front. For OOXML we also call into
+            // `is_ooxml_junk` which is path-pattern-based.
+            if should_omit(kind, entry_name) {
+                continue;
+            }
 
-            let entry_name = entry.name().to_string();
-
-            if meta_paths.contains(&entry_name.as_str()) {
-                // Read the metadata XML
-                let mut contents = String::new();
-                entry.read_to_string(&mut contents).map_err(|e| CoreError::CleanError {
+            let (raw_bytes, compression) = {
+                let mut e = archive.by_name(entry_name).map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
+                })?;
+                // Don't re-pack directory entries — they confuse ODF readers.
+                if e.is_dir() {
+                    continue;
+                }
+                let compression = e.compression();
+                let mut buf = Vec::with_capacity(e.size() as usize);
+                e.read_to_end(&mut buf).map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("Failed to read entry {entry_name}: {e}"),
                 })?;
+                (buf, compression)
+            };
 
-                let cleaned = clean_xml_metadata_full(&contents, &entry_name);
+            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes);
 
-                let options = SimpleFileOptions::default()
-                    .compression_method(entry.compression());
-                writer
-                    .start_file(&entry_name, options)
-                    .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to start ZIP entry: {e}"),
-                    })?;
-                writer.write_all(cleaned.as_bytes()).map_err(|e| CoreError::CleanError {
+            let options = zip_util::normalized_options(compression);
+            writer
+                .start_file(entry_name, options)
+                .map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
-                    detail: format!("Failed to write ZIP entry: {e}"),
+                    detail: format!("Failed to start ZIP entry {entry_name}: {e}"),
                 })?;
-            } else {
-                // Copy entry as-is
-                let options = SimpleFileOptions::default()
-                    .compression_method(entry.compression());
-                writer
-                    .start_file(&entry_name, options)
-                    .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to start ZIP entry: {e}"),
-                    })?;
-                let mut buf = Vec::new();
-                entry.read_to_end(&mut buf).map_err(|e| CoreError::CleanError {
+            writer
+                .write_all(&cleaned_bytes)
+                .map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
-                    detail: format!("Failed to read entry: {e}"),
+                    detail: format!("Failed to write ZIP entry {entry_name}: {e}"),
                 })?;
-                writer.write_all(&buf).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to write entry: {e}"),
-                })?;
-            }
         }
 
         writer.finish().map_err(|e| CoreError::CleanError {
@@ -152,6 +238,7 @@ impl FormatHandler for DocumentHandler {
             "application/vnd.oasis.opendocument.text",
             "application/vnd.oasis.opendocument.spreadsheet",
             "application/vnd.oasis.opendocument.presentation",
+            "application/vnd.oasis.opendocument.graphics",
             "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
             "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
             "application/vnd.openxmlformats-officedocument.presentationml.presentation",
@@ -160,38 +247,171 @@ impl FormatHandler for DocumentHandler {
     }
 }
 
-fn detect_meta_paths<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> Vec<&'static str> {
-    let names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
-        .collect();
+/// Best-effort detection of the archive family based on the list of
+/// top-level members. Called once per clean.
+fn detect_kind<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> ArchiveKind {
+    let mut has_content_types = false;
+    let mut has_mimetype_epub = false;
+    let mut has_mimetype_odf = false;
+    let mut has_content_xml = false;
 
-    let mut paths = Vec::new();
-
-    // Check OOXML
-    for p in OOXML_META_PATHS {
-        if names.iter().any(|n| n == *p) {
-            paths.push(*p);
+    for i in 0..archive.len() {
+        if let Ok(mut entry) = archive.by_index(i) {
+            let name = entry.name().to_string();
+            if name == "[Content_Types].xml" {
+                has_content_types = true;
+            } else if name == "content.xml" {
+                has_content_xml = true;
+            } else if name == "mimetype" {
+                let mut buf = String::new();
+                let _ = entry.read_to_string(&mut buf);
+                if buf.trim() == "application/epub+zip" {
+                    has_mimetype_epub = true;
+                } else if buf.starts_with("application/vnd.oasis.opendocument") {
+                    has_mimetype_odf = true;
+                }
+            }
         }
     }
 
-    // Check ODF
-    for p in ODF_META_PATHS {
-        if names.iter().any(|n| n == *p) {
-            paths.push(*p);
-        }
+    if has_mimetype_epub {
+        ArchiveKind::Epub
+    } else if has_mimetype_odf || has_content_xml {
+        ArchiveKind::Odf
+    } else if has_content_types {
+        ArchiveKind::Ooxml
+    } else {
+        ArchiveKind::Generic
     }
-
-    // Check EPUB
-    for p in EPUB_META_PATHS {
-        if names.iter().any(|n| n == *p) {
-            paths.push(*p);
-        }
-    }
-
-    paths
 }
 
-/// Parse XML content and extract metadata key-value pairs.
+/// True if the given entry should be skipped entirely. Combines the
+/// shared `zip_util::is_office_junk_path` with a couple of archive-kind
+/// specific special cases.
+fn should_omit(kind: ArchiveKind, name: &str) -> bool {
+    if zip_util::is_office_junk_path(name) {
+        return true;
+    }
+    // ODF specifically: meta.xml is already in the shared junk list but
+    // keep `mimetype` regardless of junk rules.
+    if name == "mimetype" {
+        return false;
+    }
+    match kind {
+        ArchiveKind::Ooxml | ArchiveKind::Odf | ArchiveKind::Epub | ArchiveKind::Generic => false,
+    }
+}
+
+/// Clean a single archive member. Dispatches on file extension and
+/// archive kind to decide whether to replace the bytes entirely, deep-
+/// clean the XML, strip EXIF from an embedded image, or leave as-is.
+fn clean_entry(kind: ArchiveKind, entry_name: &str, raw: Vec<u8>) -> Vec<u8> {
+    // 1. Embedded raster images — strip EXIF/XMP/ICC unconditionally,
+    //    regardless of archive family. This is the single largest silent
+    //    leak in the previous implementation.
+    if let Some(mime) = zip_util::is_cleanable_media(entry_name) {
+        return strip_embedded_image(&raw, mime).unwrap_or(raw);
+    }
+
+    // 2. Binary entries — nothing to do.
+    if !is_xml_like(entry_name) {
+        return raw;
+    }
+
+    // 3. XML entries — decode once, dispatch, re-encode.
+    let Ok(xml) = std::str::from_utf8(&raw) else {
+        return raw;
+    };
+
+    let cleaned: String = match kind {
+        ArchiveKind::Ooxml => {
+            if let Some(stub) = ooxml::stub_for_path(entry_name) {
+                stub.to_string()
+            } else {
+                ooxml::clean_xml_member(entry_name, xml)
+            }
+        }
+        ArchiveKind::Odf => odf::clean_xml_member(entry_name, xml),
+        ArchiveKind::Epub => {
+            if epub::is_opf_path(entry_name) {
+                epub::clean_opf(xml)
+            } else if epub::is_ncx_path(entry_name) || epub::is_ops_xml_path(entry_name) {
+                epub::clean_head_only(xml)
+            } else {
+                xml.to_string()
+            }
+        }
+        ArchiveKind::Generic => xml.to_string(),
+    };
+
+    cleaned.into_bytes()
+}
+
+fn is_xml_like(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".xml")
+        || lower.ends_with(".rels")
+        || lower.ends_with(".opf")
+        || lower.ends_with(".ncx")
+        || lower.ends_with(".xhtml")
+}
+
+/// Parse an embedded image out of `data`, strip every metadata segment
+/// (EXIF/ICC/XMP/IPTC/text-chunks/time-chunks), re-encode, return the
+/// new bytes. Returns `None` if the image can't be parsed so the caller
+/// can fall back to the original bytes.
+fn strip_embedded_image(data: &[u8], mime: &str) -> Option<Vec<u8>> {
+    // Fast path: img-parts handles JPEG/PNG/WEBP via DynImage.
+    let Ok(Some(mut img)) = DynImage::from_bytes(data.to_vec().into()) else {
+        return None;
+    };
+    img.set_exif(None);
+    img.set_icc_profile(None);
+
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    img.encoder().write_to(&mut cursor).ok()?;
+
+    // Format-specific post-pass to remove what img-parts doesn't expose.
+    match mime {
+        "image/jpeg" => strip_jpeg_extra_segments(&buf).or(Some(buf)),
+        "image/png" => strip_png_text_chunks(&buf).or(Some(buf)),
+        _ => Some(buf),
+    }
+}
+
+fn strip_jpeg_extra_segments(data: &[u8]) -> Option<Vec<u8>> {
+    let mut jpeg = Jpeg::from_bytes(data.to_vec().into()).ok()?;
+    for marker in 0xE1u8..=0xEF {
+        jpeg.remove_segments_by_marker(marker);
+    }
+    jpeg.remove_segments_by_marker(0xFE); // COM
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    jpeg.encoder().write_to(&mut cursor).ok()?;
+    Some(buf)
+}
+
+fn strip_png_text_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK_TEXT: [u8; 4] = *b"tEXt";
+    const CHUNK_ITXT: [u8; 4] = *b"iTXt";
+    const CHUNK_ZTXT: [u8; 4] = *b"zTXt";
+    const CHUNK_TIME: [u8; 4] = *b"tIME";
+
+    let mut png = Png::from_bytes(data.to_vec().into()).ok()?;
+    png.remove_chunks_by_type(CHUNK_TEXT);
+    png.remove_chunks_by_type(CHUNK_ITXT);
+    png.remove_chunks_by_type(CHUNK_ZTXT);
+    png.remove_chunks_by_type(CHUNK_TIME);
+
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    png.encoder().write_to(&mut cursor).ok()?;
+    Some(buf)
+}
+
+/// Parse XML content and extract metadata key-value pairs for the
+/// read_metadata display path.
 fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
     let mut items = Vec::new();
     let mut reader = Reader::from_str(xml);
@@ -200,8 +420,8 @@ fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
-                let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                current_tag = Some(local_name);
+                let local = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                current_tag = Some(local);
             }
             Ok(Event::Text(ref e)) => {
                 if let Some(ref tag) = current_tag {
@@ -225,7 +445,6 @@ fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
     items
 }
 
-/// Check if an XML tag name represents metadata we want to display.
 fn is_metadata_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -265,106 +484,65 @@ fn is_metadata_tag(tag: &str) -> bool {
     )
 }
 
-/// Full clean: produce minimal/empty metadata XML.
-fn clean_xml_metadata_full(xml: &str, entry_name: &str) -> String {
-    if entry_name == "meta.xml" {
-        // ODF: minimal meta.xml
-        r#"<?xml version="1.0" encoding="UTF-8"?>
-<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
-                      xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0"
-                      office:version="1.3">
-  <office:meta/>
-</office:document-meta>"#
-            .to_string()
-    } else if entry_name == "docProps/core.xml" {
-        // OOXML core: minimal
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
-                   xmlns:dc="http://purl.org/dc/elements/1.1/"
-                   xmlns:dcterms="http://purl.org/dc/terms/">
-</cp:coreProperties>"#
-            .to_string()
-    } else if entry_name == "docProps/app.xml" {
-        // OOXML app: minimal
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
-</Properties>"#
-            .to_string()
-    } else if entry_name == "docProps/custom.xml" {
-        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
-<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties">
-</Properties>"#
-            .to_string()
-    } else {
-        // EPUB or unknown: try to strip metadata elements, keep structure
-        clean_xml_metadata_lightweight(xml)
-    }
-}
-
+// The old test helper was the lightweight-cleanup function; it no
+// longer exists because the trait dropped the lightweight mode. The
+// ooxml / odf / epub submodules each carry their own unit tests.
 #[cfg(test)]
 pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
-    clean_xml_metadata_lightweight(xml)
-}
-
-const LIGHTWEIGHT_REMOVE_TAGS: &[&str] = &[
-    "creator",
-    "initial-creator",
-    "lastModifiedBy",
-    "Company",
-    "Manager",
-    "Application",
-    "AppVersion",
-    "generator",
-    "printed-by",
-];
-
-/// Lightweight clean: remove only creator, date, and tool-related metadata.
-///
-/// Handles both the paired `<Start>…</End>` case (by suppressing all
-/// events while `skip_depth > 0`) and the self-closing `<Empty/>` case
-/// (by matching the local name directly and dropping just that event).
-fn clean_xml_metadata_lightweight(xml: &str) -> String {
+    // Kept for backwards compatibility with existing tests in tests.rs;
+    // thin wrapper around the OOXML cleaner which applies the same set
+    // of "remove creator/Application/Manager/…" operations plus attribute
+    // sorting. The old implementation stripped by tag name only.
     let mut reader = Reader::from_str(xml);
     let mut writer = quick_xml::Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
+    let remove = [
+        "creator",
+        "initial-creator",
+        "lastModifiedBy",
+        "Company",
+        "Manager",
+        "Application",
+        "AppVersion",
+        "generator",
+        "printed-by",
+    ];
 
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
-                let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                if skip_depth > 0 || LIGHTWEIGHT_REMOVE_TAGS.contains(&local_name.as_str()) {
+                let ln = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                if skip_depth > 0 || remove.contains(&ln.as_str()) {
                     skip_depth += 1;
                 } else {
-                    writer.write_event(Event::Start(e.clone())).ok();
+                    let _ = writer.write_event(Event::Start(e.clone()));
                 }
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
                     skip_depth -= 1;
                 } else {
-                    writer.write_event(Event::End(e.clone())).ok();
+                    let _ = writer.write_event(Event::End(e.clone()));
                 }
             }
             Ok(Event::Empty(ref e)) => {
-                // Self-closing tags (`<meta:generator/>`) don't open a
-                // depth; we just drop the single event if it matches.
                 if skip_depth > 0 {
                     continue;
                 }
-                let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                if !LIGHTWEIGHT_REMOVE_TAGS.contains(&local_name.as_str()) {
-                    writer.write_event(Event::Empty(e.clone())).ok();
+                let ln = String::from_utf8_lossy(e.local_name().as_ref()).into_owned();
+                if !remove.contains(&ln.as_str()) {
+                    let _ = writer.write_event(Event::Empty(e.clone()));
                 }
             }
-            Ok(Event::Text(ref e)) => {
+            Ok(Event::Text(ref t)) => {
                 if skip_depth == 0 {
-                    writer.write_event(Event::Text(e.clone())).ok();
+                    let _ = writer.write_event(Event::Text(t.clone()));
                 }
             }
             Ok(Event::Eof) | Err(_) => break,
             Ok(other) => {
                 if skip_depth == 0 {
-                    writer.write_event(other).ok();
+                    let _ = writer.write_event(other);
                 }
             }
         }

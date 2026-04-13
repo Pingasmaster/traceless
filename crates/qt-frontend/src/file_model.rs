@@ -272,8 +272,12 @@ impl ffi::FileListModel {
     fn add_files(mut self: Pin<&mut Self>, paths: &QString) {
         self.as_mut().ensure_channel();
         let path_str = paths.to_string();
+        // The QML bridge joins paths with a NUL byte. NUL is not a legal
+        // filename byte on POSIX and is reserved on Windows, so it's the
+        // only delimiter we can pick that cannot clash with real filenames
+        // (newline, tab, etc. are all legal on Linux).
         let path_list: Vec<PathBuf> = path_str
-            .split('\n')
+            .split('\0')
             .filter(|s| !s.is_empty())
             .map(PathBuf::from)
             .collect();
