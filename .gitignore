@@ -1,4 +1,18 @@
+# Rust build artifacts
 /target
 **/*.rs.bk
 *.pdb
 Cargo.lock
+
+# Claude Code workspace state
+.claude/
+
+# Editor / IDE
+.vscode/
+.idea/
+*.swp
+*~
+
+# OS noise
+.DS_Store
+Thumbs.db
