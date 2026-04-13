@@ -14,6 +14,10 @@ use traceless_core::{FileStore, FileStoreEvent};
 pub struct Window;
 
 impl Window {
+    // GTK application window builder: linear widget construction + signal wiring.
+    // Splitting this into helpers would scatter tightly-coupled Rc<RefCell<_>> state
+    // across functions without creating any real abstraction, so the length is intrinsic.
+    #[allow(clippy::too_many_lines)]
     pub fn build(app: &adw::Application) -> adw::ApplicationWindow {
         let window = adw::ApplicationWindow::builder()
             .application(app)
@@ -106,7 +110,7 @@ impl Window {
 
         // --- Event handling setup ---
         let (event_tx, event_rx) = mpsc::channel::<FileStoreEvent>();
-        *tx.borrow_mut() = Some(event_tx.clone());
+        *tx.borrow_mut() = Some(event_tx);
 
         // Install event pump from worker threads -> GTK main loop
         {
@@ -117,8 +121,6 @@ impl Window {
 
             let rebuild = {
                 let store = store.clone();
-                let files_view = files_view.clone();
-                let details_revealer = details_revealer.clone();
                 Rc::new(move || {
                     let s = store.borrow();
                     let dr = details_revealer.clone();
@@ -145,9 +147,9 @@ impl Window {
                             }
                         },
                         {
-                            let store3 = store2.clone();
+                            let store3 = store2;
                             let dv = details_view.clone();
-                            let dr2 = dr.clone();
+                            let dr2 = dr;
                             move |idx| {
                                 let s = store3.borrow();
                                 if let Some(entry) = s.get(idx) {
@@ -167,7 +169,13 @@ impl Window {
                             .set_done(&format!("{cleaned} file{} cleaned.", if cleaned == 1 { "" } else { "s" }));
                     } else if s.has_working() {
                         let done = s.files().iter().filter(|f| !f.state.is_working()).count();
-                        let frac = if total > 0 { done as f64 / total as f64 } else { 0.0 };
+                        let frac = if total > 0 {
+                            let done_f = f64::from(u32::try_from(done).unwrap_or(u32::MAX));
+                            let total_f = f64::from(u32::try_from(total).unwrap_or(u32::MAX));
+                            done_f / total_f
+                        } else {
+                            0.0
+                        };
                         files_view.status.set_working(frac);
                     } else {
                         files_view.status.set_idle();
@@ -206,7 +214,7 @@ impl Window {
                     if !paths.is_empty()
                         && let Some(sender) = tx.borrow().as_ref()
                     {
-                        store.borrow_mut().add_files(paths, sender.clone());
+                        store.borrow_mut().add_files(paths, sender);
                         vs.set_visible_child_name("files");
                     }
                 });
@@ -227,7 +235,7 @@ impl Window {
                     if let Some(sender) = tx.borrow().as_ref() {
                         store
                             .borrow_mut()
-                            .add_directory(&path, true, sender.clone());
+                            .add_directory(&path, true, sender);
                         vs.set_visible_child_name("files");
                     }
                 });
@@ -238,25 +246,23 @@ impl Window {
         {
             let window_clone = window.clone();
             let store = store.clone();
-            let tx = tx.clone();
-            let show_warning = show_warning.clone();
             files_view.clean_button.connect_clicked(move |_| {
                 let store = store.clone();
                 let tx = tx.clone();
                 let sw = show_warning.clone();
 
                 if *sw.borrow() {
-                    let store2 = store.clone();
-                    let tx2 = tx.clone();
+                    let store2 = store;
+                    let tx2 = tx;
                     dialogs::show_cleaning_warning(&window_clone, move |confirmed| {
                         if confirmed
                             && let Some(sender) = tx2.borrow().as_ref()
                         {
-                            store2.borrow_mut().clean_files(sender.clone());
+                            store2.borrow_mut().clean_files(sender);
                         }
                     });
                 } else if let Some(sender) = tx.borrow().as_ref() {
-                    store.borrow_mut().clean_files(sender.clone());
+                    store.borrow_mut().clean_files(sender);
                 }
             });
         }
@@ -264,9 +270,6 @@ impl Window {
         // Window actions
         let clear_action = gtk::gio::SimpleAction::new("clear-files", None);
         {
-            let store = store.clone();
-            let view_stack = view_stack.clone();
-            let details_revealer = details_revealer.clone();
             clear_action.connect_activate(move |_, _| {
                 store.borrow_mut().clear();
                 view_stack.set_visible_child_name("empty");

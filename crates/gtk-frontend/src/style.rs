@@ -1,4 +1,4 @@
-const CSS: &str = r#"
+const CSS: &str = r"
 @define-color accent_color #813d9c;
 @define-color accent_bg_color @accent_color;
 @define-color accent_fg_color #fff;
@@ -85,7 +85,7 @@ row.metadata > box {
     margin: 6px;
     border-spacing: 12px;
 }
-"#;
+";
 
 pub fn load_css() {
     let provider = gtk::CssProvider::new();

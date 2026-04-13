@@ -54,7 +54,7 @@ impl FormatHandler for PdfHandler {
                 }
             }
             // Also grab any non-standard keys
-            for (k, v) in dict.iter() {
+            for (k, v) in dict {
                 let key_str = String::from_utf8_lossy(k).to_string();
                 if !INFO_KEYS.contains(&key_str.as_str()) {
                     let value_str = pdf_object_to_string(v);

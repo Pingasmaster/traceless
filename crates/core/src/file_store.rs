@@ -37,13 +37,15 @@ pub struct FileStore {
 }
 
 impl FileStore {
-    pub fn new() -> Self {
+    #[must_use]
+    pub const fn new() -> Self {
         Self {
             files: Vec::new(),
             lightweight_mode: false,
         }
     }
 
+    #[must_use]
     pub fn files(&self) -> &[FileEntry] {
         &self.files
     }
@@ -52,14 +54,17 @@ impl FileStore {
         &mut self.files
     }
 
-    pub fn len(&self) -> usize {
+    #[must_use]
+    pub const fn len(&self) -> usize {
         self.files.len()
     }
 
-    pub fn is_empty(&self) -> bool {
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
         self.files.is_empty()
     }
 
+    #[must_use]
     pub fn get(&self, index: usize) -> Option<&FileEntry> {
         self.files.get(index)
     }
@@ -70,7 +75,7 @@ impl FileStore {
 
     /// Add files and start background metadata checking.
     /// Returns the indices of the newly added files.
-    pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: mpsc::Sender<FileStoreEvent>) -> Vec<usize> {
+    pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: &mpsc::Sender<FileStoreEvent>) -> Vec<usize> {
         let start_index = self.files.len();
         let mut indices = Vec::new();
 
@@ -97,7 +102,7 @@ impl FileStore {
         &mut self,
         dir: &Path,
         recursive: bool,
-        tx: mpsc::Sender<FileStoreEvent>,
+        tx: &mpsc::Sender<FileStoreEvent>,
     ) -> Vec<usize> {
         let paths = collect_files_from_dir(dir, recursive);
         self.add_files(paths, tx)
@@ -116,7 +121,7 @@ impl FileStore {
     }
 
     /// Start cleaning all cleanable files in background threads.
-    pub fn clean_files(&mut self, tx: mpsc::Sender<FileStoreEvent>) {
+    pub fn clean_files(&mut self, tx: &mpsc::Sender<FileStoreEvent>) {
         let lightweight = self.lightweight_mode;
 
         for (index, entry) in self.files.iter_mut().enumerate() {
@@ -131,10 +136,12 @@ impl FileStore {
         }
     }
 
+    #[must_use]
     pub fn cleanable_count(&self) -> usize {
         self.files.iter().filter(|f| f.state.is_cleanable()).count()
     }
 
+    #[must_use]
     pub fn cleaned_count(&self) -> usize {
         self.files
             .iter()
@@ -142,11 +149,12 @@ impl FileStore {
             .count()
     }
 
+    #[must_use]
     pub fn has_working(&self) -> bool {
         self.files.iter().any(|f| f.state.is_working())
     }
 
-    /// Apply a FileStoreEvent to update internal state.
+    /// Apply a `FileStoreEvent` to update internal state.
     pub fn apply_event(&mut self, event: &FileStoreEvent) {
         match event {
             FileStoreEvent::FileStateChanged {
@@ -157,7 +165,7 @@ impl FileStore {
                 if let Some(entry) = self.files.get_mut(*index) {
                     entry.state = *state;
                     if let Some(mime) = mime_type {
-                        entry.mime_type = mime.clone();
+                        entry.mime_type.clone_from(mime);
                     }
                 }
             }
@@ -195,16 +203,13 @@ impl Default for FileStore {
 fn check_file_metadata(index: usize, path: &Path, tx: &mpsc::Sender<FileStoreEvent>) {
     let mime = detect_mime(path);
 
-    let handler = match get_handler_for_mime(&mime) {
-        Some(h) => h,
-        None => {
-            let _ = tx.send(FileStoreEvent::FileError {
-                index,
-                state: FileState::Unsupported,
-                message: format!("Unsupported format: {mime}"),
-            });
-            return;
-        }
+    let Some(handler) = get_handler_for_mime(&mime) else {
+        let _ = tx.send(FileStoreEvent::FileError {
+            index,
+            state: FileState::Unsupported,
+            message: format!("Unsupported format: {mime}"),
+        });
+        return;
     };
 
     // Notify: supported, now checking
@@ -241,16 +246,13 @@ fn clean_single_file(
     });
 
     let mime = detect_mime(path);
-    let handler = match get_handler_for_mime(&mime) {
-        Some(h) => h,
-        None => {
-            let _ = tx.send(FileStoreEvent::FileError {
-                index,
-                state: FileState::ErrorWhileRemovingMetadata,
-                message: format!("No handler for {mime}"),
-            });
-            return;
-        }
+    let Some(handler) = get_handler_for_mime(&mime) else {
+        let _ = tx.send(FileStoreEvent::FileError {
+            index,
+            state: FileState::ErrorWhileRemovingMetadata,
+            message: format!("No handler for {mime}"),
+        });
+        return;
     };
 
     // Write cleaned file to a temp path, then atomically replace the original
@@ -286,9 +288,8 @@ fn clean_single_file(
 
 fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     let mut result = Vec::new();
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return result,
+    let Ok(entries) = fs::read_dir(dir) else {
+        return result;
     };
 
     for entry in entries.flatten() {

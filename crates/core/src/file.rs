@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use crate::error::CoreError;
 use crate::metadata::MetadataSet;
 
 /// States that a file entry can be in during its lifecycle.
@@ -21,7 +20,8 @@ pub enum FileState {
 
 impl FileState {
     /// Map to a simplified state string for UI display logic.
-    pub fn simple_state(&self) -> &'static str {
+    #[must_use]
+    pub const fn simple_state(&self) -> &'static str {
         match self {
             Self::Initializing | Self::Supported | Self::CheckingMetadata | Self::RemovingMetadata => "working",
             Self::Unsupported | Self::ErrorWhileInitializing
@@ -32,11 +32,13 @@ impl FileState {
         }
     }
 
-    pub fn is_cleanable(&self) -> bool {
+    #[must_use]
+    pub const fn is_cleanable(&self) -> bool {
         matches!(self, Self::HasMetadata | Self::HasNoMetadata)
     }
 
-    pub fn is_working(&self) -> bool {
+    #[must_use]
+    pub const fn is_working(&self) -> bool {
         matches!(
             self,
             Self::Initializing | Self::Supported | Self::CheckingMetadata | Self::RemovingMetadata
@@ -57,6 +59,7 @@ pub struct FileEntry {
 }
 
 impl FileEntry {
+    #[must_use]
     pub fn new(path: &Path) -> Self {
         let filename = path
             .file_name()
@@ -80,13 +83,9 @@ impl FileEntry {
         }
     }
 
+    #[must_use]
     pub fn total_metadata(&self) -> usize {
-        self.metadata.as_ref().map_or(0, |m| m.total_count())
-    }
-
-    pub fn set_error(&mut self, state: FileState, err: CoreError) {
-        self.error = Some(err.to_string());
-        self.state = state;
+        self.metadata.as_ref().map_or(0, MetadataSet::total_count)
     }
 }
 

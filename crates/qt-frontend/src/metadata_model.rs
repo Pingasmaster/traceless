@@ -40,18 +40,18 @@ pub struct MetadataModelRust {
 
 impl ffi::MetadataModel {
     fn get_key(&self, index: i32) -> QString {
-        self.rust()
-            .items
-            .get(index as usize)
-            .map(|i| QString::from(&i.key as &str))
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().items.get(i))
+            .map(|item| QString::from(&item.key as &str))
             .unwrap_or_default()
     }
 
     fn get_value(&self, index: i32) -> QString {
-        self.rust()
-            .items
-            .get(index as usize)
-            .map(|i| QString::from(&i.value as &str))
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().items.get(i))
+            .map(|item| QString::from(&item.value as &str))
             .unwrap_or_default()
     }
 

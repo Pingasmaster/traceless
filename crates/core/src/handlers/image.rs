@@ -191,7 +191,7 @@ fn strip_jpeg_extra_segments(data: &[u8]) -> Option<Vec<u8>> {
     Some(buf)
 }
 
-/// Split a Debug-formatted ExifTag string like `ImageDescription("Hello")`
+/// Split a Debug-formatted `ExifTag` string like `ImageDescription("Hello")`
 /// into (name, value).
 fn split_debug_tag(debug: &str) -> Option<(String, String)> {
     let paren = debug.find('(')?;

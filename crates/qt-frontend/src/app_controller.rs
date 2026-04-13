@@ -26,6 +26,8 @@ pub struct AppControllerRust {
 }
 
 impl ffi::AppController {
+    // `&self` is required by `#[qinvokable]` even though the body is stateless.
+    #[allow(clippy::unused_self)]
     fn get_supported_extensions(&self) -> QString {
         let exts = traceless_core::format_support::supported_extensions();
         QString::from(&exts.join(", ") as &str)

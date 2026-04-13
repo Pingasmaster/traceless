@@ -67,7 +67,9 @@ fn main() {
         .expect("Failed to get executable directory");
     let target_exe = exe_dir.join(binary_name);
 
-    if !target_exe.exists() {
+    if target_exe.exists() {
+        launch(&target_exe);
+    } else {
         // Try the other frontend as fallback
         let fallback_name = match frontend {
             DesktopEnvironment::Gtk => "traceless-qt",
@@ -76,11 +78,7 @@ fn main() {
         let fallback_exe = exe_dir.join(fallback_name);
 
         if fallback_exe.exists() {
-            log::warn!(
-                "{} not found, falling back to {}",
-                binary_name,
-                fallback_name
-            );
+            log::warn!("{binary_name} not found, falling back to {fallback_name}");
             launch(&fallback_exe);
         } else {
             eprintln!(
@@ -89,8 +87,6 @@ fn main() {
             );
             std::process::exit(1);
         }
-    } else {
-        launch(&target_exe);
     }
 }
 

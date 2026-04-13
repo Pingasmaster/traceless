@@ -1,3 +1,9 @@
+// cxx-qt's `#[cxx_qt::bridge]` macro generates `Box<...Rust>` return types as
+// part of its FFI model. That pattern trips `unnecessary_box_returns` on every
+// bridge module, and the macro rejects per-module `#[allow]` attributes, so we
+// suppress it at the crate root.
+#![allow(clippy::unnecessary_box_returns)]
+
 mod app_controller;
 mod bridge;
 mod file_model;

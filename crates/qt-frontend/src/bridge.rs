@@ -8,7 +8,7 @@ pub struct EventBridge {
 }
 
 impl EventBridge {
-    pub fn new(rx: mpsc::Receiver<FileStoreEvent>) -> Self {
+    pub const fn new(rx: mpsc::Receiver<FileStoreEvent>) -> Self {
         Self { rx }
     }
 

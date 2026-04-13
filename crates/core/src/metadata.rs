@@ -20,10 +20,12 @@ pub struct MetadataSet {
 }
 
 impl MetadataSet {
+    #[must_use]
     pub fn total_count(&self) -> usize {
         self.groups.iter().map(|g| g.items.len()).sum()
     }
 
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.groups.iter().all(|g| g.items.is_empty())
     }

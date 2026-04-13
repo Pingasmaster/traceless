@@ -81,7 +81,7 @@ impl FileListModelRust {
     }
 
     fn update_properties(&mut self) {
-        self.file_count = self.store.len() as i32;
+        self.file_count = i32::try_from(self.store.len()).unwrap_or(i32::MAX);
         self.is_working = self.store.has_working();
         let cleaned = self.store.cleaned_count();
         if cleaned > 0 && !self.store.has_working() {
@@ -106,7 +106,7 @@ impl ffi::FileListModel {
             .collect();
 
         if let Some(tx) = self.as_mut().rust_mut().tx.clone() {
-            self.as_mut().rust_mut().store.add_files(path_list, tx);
+            self.as_mut().rust_mut().store.add_files(path_list, &tx);
         }
         self.as_mut().rust_mut().update_properties();
     }
@@ -115,13 +115,15 @@ impl ffi::FileListModel {
         self.as_mut().rust_mut().init_channel();
         let path = PathBuf::from(path.to_string());
         if let Some(tx) = self.as_mut().rust_mut().tx.clone() {
-            self.as_mut().rust_mut().store.add_directory(&path, true, tx);
+            self.as_mut().rust_mut().store.add_directory(&path, true, &tx);
         }
         self.as_mut().rust_mut().update_properties();
     }
 
     fn remove_file(mut self: Pin<&mut Self>, index: i32) {
-        self.as_mut().rust_mut().store.remove_file(index as usize);
+        if let Ok(idx) = usize::try_from(index) {
+            self.as_mut().rust_mut().store.remove_file(idx);
+        }
         self.as_mut().rust_mut().update_properties();
     }
 
@@ -133,41 +135,40 @@ impl ffi::FileListModel {
     fn clean_all(mut self: Pin<&mut Self>) {
         self.as_mut().rust_mut().init_channel();
         if let Some(tx) = self.as_mut().rust_mut().tx.clone() {
-            self.as_mut().rust_mut().store.clean_files(tx);
+            self.as_mut().rust_mut().store.clean_files(&tx);
         }
         self.as_mut().rust_mut().update_properties();
     }
 
     fn get_filename(&self, index: i32) -> QString {
-        self.rust()
-            .store
-            .get(index as usize)
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().store.get(i))
             .map(|e| QString::from(&e.filename as &str))
             .unwrap_or_default()
     }
 
     fn get_directory(&self, index: i32) -> QString {
-        self.rust()
-            .store
-            .get(index as usize)
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().store.get(i))
             .map(|e| QString::from(&e.directory as &str))
             .unwrap_or_default()
     }
 
     fn get_simple_state(&self, index: i32) -> QString {
-        self.rust()
-            .store
-            .get(index as usize)
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().store.get(i))
             .map(|e| QString::from(e.state.simple_state()))
             .unwrap_or_default()
     }
 
     fn get_metadata_count(&self, index: i32) -> i32 {
-        self.rust()
-            .store
-            .get(index as usize)
-            .map(|e| e.total_metadata() as i32)
-            .unwrap_or(0)
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().store.get(i))
+            .map_or(0, |e| i32::try_from(e.total_metadata()).unwrap_or(i32::MAX))
     }
 
     fn poll_events(mut self: Pin<&mut Self>) {

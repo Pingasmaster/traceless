@@ -278,7 +278,7 @@ mod tests {
 
         let mut store = FileStore::new();
         let (tx, _rx) = std::sync::mpsc::channel();
-        store.add_files(vec![path1, path2], tx);
+        store.add_files(vec![path1, path2], &tx);
 
         assert_eq!(store.len(), 2);
         assert!(!store.is_empty());
@@ -558,7 +558,7 @@ mod tests {
 
         let mut store = FileStore::new();
         let (tx, _rx) = std::sync::mpsc::channel();
-        store.add_files(vec![path], tx);
+        store.add_files(vec![path], &tx);
 
         let event = FileStoreEvent::FileStateChanged {
             index: 0,
@@ -582,7 +582,7 @@ mod tests {
 
         let mut store = FileStore::new();
         let (tx, _rx) = std::sync::mpsc::channel();
-        store.add_files(vec![path], tx);
+        store.add_files(vec![path], &tx);
 
         let metadata = MetadataSet {
             groups: vec![MetadataGroup {
@@ -614,7 +614,7 @@ mod tests {
 
         let mut store = FileStore::new();
         let (tx, _rx) = std::sync::mpsc::channel();
-        store.add_files(vec![path], tx);
+        store.add_files(vec![path], &tx);
 
         let event = FileStoreEvent::FileError {
             index: 0,
@@ -646,13 +646,13 @@ mod tests {
         let (tx, _rx) = std::sync::mpsc::channel();
 
         // Non-recursive: should find 2 files
-        store.add_directory(dir.path(), false, tx.clone());
+        store.add_directory(dir.path(), false, &tx);
         assert_eq!(store.len(), 2);
 
         store.clear();
 
         // Recursive: should find 3 files
-        store.add_directory(dir.path(), true, tx);
+        store.add_directory(dir.path(), true, &tx);
         assert_eq!(store.len(), 3);
     }
 }

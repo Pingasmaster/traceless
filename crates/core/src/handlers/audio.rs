@@ -28,7 +28,7 @@ impl FormatHandler for AudioHandler {
         for tag in tagged_file.tags() {
             let tag_type = format!("{:?}", tag.tag_type());
             for item in tag.items() {
-                let key = item_key_to_string(&item.key());
+                let key = item_key_to_string(item.key());
                 let value = item.value().text().unwrap_or("(binary data)").to_string();
                 items.push(MetadataItem {
                     key: format!("[{tag_type}] {key}"),
@@ -126,7 +126,7 @@ impl FormatHandler for AudioHandler {
     }
 }
 
-fn item_key_to_string(key: &ItemKey) -> String {
+fn item_key_to_string(key: ItemKey) -> String {
     match key {
         ItemKey::TrackTitle => "Title".to_string(),
         ItemKey::TrackArtist => "Artist".to_string(),

@@ -223,8 +223,7 @@ fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
             Ok(Event::End(_)) => {
                 current_tag = None;
             }
-            Ok(Event::Eof) => break,
-            Err(_) => break,
+            Ok(Event::Eof) | Err(_) => break,
             _ => {}
         }
     }
@@ -348,13 +347,12 @@ fn clean_xml_metadata_lightweight(xml: &str) -> String {
                     writer.write_event(Event::Text(e.clone())).ok();
                 }
             }
-            Ok(Event::Eof) => break,
+            Ok(Event::Eof) | Err(_) => break,
             Ok(other) => {
                 if skip_depth == 0 {
                     writer.write_event(other).ok();
                 }
             }
-            Err(_) => break,
         }
     }
 

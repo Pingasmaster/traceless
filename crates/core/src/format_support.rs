@@ -8,6 +8,7 @@ use crate::handlers::video::VideoHandler;
 use crate::handlers::FormatHandler;
 
 /// Return the appropriate format handler for the given MIME type.
+#[must_use]
 pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
     match mime {
         "image/jpeg" | "image/png" | "image/webp" => Some(Box::new(ImageHandler)),
@@ -29,6 +30,7 @@ pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
 }
 
 /// Detect MIME type for a file path using extension-based guessing.
+#[must_use]
 pub fn detect_mime(path: &Path) -> String {
     mime_guess::from_path(path)
         .first_or_octet_stream()
@@ -36,7 +38,8 @@ pub fn detect_mime(path: &Path) -> String {
 }
 
 /// All supported file extensions.
-pub fn supported_extensions() -> &'static [&'static str] {
+#[must_use]
+pub const fn supported_extensions() -> &'static [&'static str] {
     &[
         // Images
         "jpg", "jpeg", "png", "webp",
