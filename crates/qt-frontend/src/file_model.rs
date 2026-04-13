@@ -239,18 +239,38 @@ impl ffi::FileListModel {
             return;
         }
 
-        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
-        let end = start + i32::try_from(path_list.len()).unwrap_or(0) - 1;
+        let Some(tx) = self.as_mut().rust_mut().tx.clone() else {
+            self.as_mut().update_aux_properties();
+            return;
+        };
 
-        unsafe {
-            self.as_mut()
-                .begin_insert_rows(&QModelIndex::default(), start, end);
+        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
+        let pre_count = self.rust().store.len();
+
+        // Drag-and-drop can mix files and folders, so route each directory through
+        // add_directory (recursive) and batch the rest through add_files. Row count
+        // is only known after expansion, hence the retroactive begin/end_insert_rows
+        // pattern (mirrors add_folder below).
+        let mut files: Vec<PathBuf> = Vec::new();
+        for p in path_list {
+            if p.is_dir() {
+                self.as_mut().rust_mut().store.add_directory(&p, true, &tx);
+            } else {
+                files.push(p);
+            }
         }
-        if let Some(tx) = self.as_mut().rust_mut().tx.clone() {
-            self.as_mut().rust_mut().store.add_files(path_list, &tx);
+        if !files.is_empty() {
+            self.as_mut().rust_mut().store.add_files(files, &tx);
         }
-        unsafe {
-            self.as_mut().end_insert_rows();
+
+        let added = self.rust().store.len().saturating_sub(pre_count);
+        if added > 0 {
+            let end = start + i32::try_from(added).unwrap_or(0) - 1;
+            unsafe {
+                self.as_mut()
+                    .begin_insert_rows(&QModelIndex::default(), start, end);
+                self.as_mut().end_insert_rows();
+            }
         }
 
         self.as_mut().update_aux_properties();

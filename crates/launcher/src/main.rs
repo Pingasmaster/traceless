@@ -1,4 +1,6 @@
 #![forbid(unsafe_code)]
+// See CLAUDE.md: transitive dep version duplication we cannot fix.
+#![allow(clippy::multiple_crate_versions)]
 
 use std::env;
 use std::process::Command;

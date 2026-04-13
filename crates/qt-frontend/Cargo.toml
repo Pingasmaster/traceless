@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Qt6/QML frontend for Traceless metadata cleaner"
+
 
 [[bin]]
 name = "traceless-qt"

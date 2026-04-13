@@ -3,6 +3,8 @@
 // bridge module, and the macro rejects per-module `#[allow]` attributes, so we
 // suppress it at the crate root.
 #![allow(clippy::unnecessary_box_returns)]
+// See CLAUDE.md: transitive dep version duplication we cannot fix.
+#![allow(clippy::multiple_crate_versions)]
 
 mod app_controller;
 mod file_model;

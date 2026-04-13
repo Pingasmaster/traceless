@@ -8,6 +8,10 @@ window.main headerbar {
     color: @accent_fg_color;
 }
 
+window.main.drop-target {
+    box-shadow: inset 0 0 0 3px @accent_color;
+}
+
 window.main headerbar button {
     color: @accent_fg_color;
 }

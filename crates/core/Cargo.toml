@@ -4,7 +4,12 @@ version.workspace = true
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
+repository.workspace = true
+readme.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "Core metadata reading and cleaning library for Traceless"
+
 
 [dependencies]
 # Image metadata
@@ -19,7 +24,7 @@ lofty = "= 0.24.0"
 
 # Document metadata (ODT, DOCX, etc.)
 zip = { version = "= 8.5.1", default-features = false, features = ["deflate"] }
-quick-xml = "= 0.39.2"
+quick-xml = "= 0.37.5"
 
 # General
 log.workspace = true

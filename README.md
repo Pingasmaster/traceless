@@ -4,7 +4,7 @@
 
 A fast, safe metadata cleaner for Linux desktops, written in Rust.
 
-Traceless lets you view and remove metadata from your files — EXIF data from photos, author info from documents, tags from audio files, and more. It provides native frontends for both GNOME (GTK4/libadwaita) and KDE Plasma (Qt6/QML), with automatic desktop environment detection at launch.
+Traceless lets you view and remove metadata from your files: EXIF data from photos, author info from documents, tags from audio files, and more. It provides native frontends for both GNOME (GTK4/libadwaita) and KDE Plasma (Qt6/QML), with automatic desktop environment detection at launch.
 
 ## Attribution
 
@@ -225,7 +225,7 @@ traceless-qt
 |-------------------|----------|-----------|
 | GNOME, Unity, Budgie, Pantheon, COSMIC | GTK (libadwaita) | `XDG_CURRENT_DESKTOP` |
 | KDE Plasma, LXQt | Qt (QML) | `XDG_CURRENT_DESKTOP` |
-| XFCE, Cinnamon, MATE | GTK (libadwaita) | `XDG_CURRENT_DESKTOP` |
+| XFCE, Cinnamon, MATE, Deepin, Enlightenment | GTK (libadwaita) | `XDG_CURRENT_DESKTOP` |
 | Hyprland, Sway, i3, other WMs | GTK (default fallback) | Falls back to GTK |
 | Any (manual override) | Either | `TRACELESS_FRONTEND=gtk\|qt` |
 

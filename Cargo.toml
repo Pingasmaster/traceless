@@ -12,6 +12,10 @@ version = "1.0.0"
 edition = "2024"
 license = "GPL-3.0-or-later"
 rust-version = "1.92"
+repository = "https://github.com/Pingasmaster/traceless"
+readme = "README.md"
+keywords = ["metadata", "exif", "privacy", "gtk", "qt"]
+categories = ["command-line-utilities", "multimedia", "gui"]
 
 [workspace.dependencies]
 traceless-core = { path = "crates/core" }

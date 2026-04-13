@@ -58,6 +58,32 @@ ApplicationWindow {
         }
     }
 
+    DropArea {
+        id: dropZone
+        anchors.fill: parent
+        keys: ["text/uri-list"]
+
+        onDropped: (drop) => {
+            if (!drop.hasUrls) return
+            var paths = []
+            for (var i = 0; i < drop.urls.length; i++) {
+                paths.push(drop.urls[i].toString().replace(/^file:\/\//, ""))
+            }
+            if (paths.length > 0) {
+                fileModel.add_files(paths.join("\n"))
+            }
+            drop.accept(Qt.CopyAction)
+        }
+
+        Rectangle {
+            anchors.fill: parent
+            visible: dropZone.containsDrag
+            color: "transparent"
+            border.color: "#813d9c"
+            border.width: 3
+            z: 1000
+        }
+
     ColumnLayout {
         anchors.fill: parent
         spacing: 0
@@ -142,6 +168,7 @@ ApplicationWindow {
                 }
             }
         }
+    }
     }
 
     Dialog {

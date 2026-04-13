@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::rc::Rc;
 
 use adw::prelude::*;
@@ -253,6 +254,7 @@ impl Window {
         {
             let window_clone = window.clone();
             let store = store.clone();
+            let tx = tx.clone();
             files_view.clean_button.connect_clicked(move |_| {
                 let store = store.clone();
                 let tx = tx.clone();
@@ -272,6 +274,67 @@ impl Window {
                     store.borrow_mut().clean_files(sender);
                 }
             });
+        }
+
+        // Drag-and-drop: accept files and folders dropped onto the window.
+        {
+            let drop_target = gtk::DropTarget::new(
+                gtk::gdk::FileList::static_type(),
+                gtk::gdk::DragAction::COPY,
+            );
+
+            let store_drop = store.clone();
+            let vs_drop = view_stack.clone();
+            let fv_drop = files_view.clone();
+            let window_drop = window.clone();
+            drop_target.connect_drop(move |_, value, _, _| {
+                let Ok(file_list) = value.get::<gtk::gdk::FileList>() else {
+                    return false;
+                };
+                let mut files: Vec<PathBuf> = Vec::new();
+                let mut dirs: Vec<PathBuf> = Vec::new();
+                for file in file_list.files() {
+                    if let Some(path) = file.path() {
+                        if path.is_dir() {
+                            dirs.push(path);
+                        } else {
+                            files.push(path);
+                        }
+                    }
+                }
+                if files.is_empty() && dirs.is_empty() {
+                    window_drop.remove_css_class("drop-target");
+                    return false;
+                }
+                let Some(sender) = tx.borrow().clone() else {
+                    window_drop.remove_css_class("drop-target");
+                    return false;
+                };
+                let start = store_drop.borrow().len();
+                if !files.is_empty() {
+                    store_drop.borrow_mut().add_files(files, &sender);
+                }
+                for dir in dirs {
+                    store_drop.borrow_mut().add_directory(&dir, true, &sender);
+                }
+                fv_drop.append_new(&store_drop.borrow(), start);
+                vs_drop.set_visible_child_name("files");
+                window_drop.remove_css_class("drop-target");
+                true
+            });
+
+            let window_enter = window.clone();
+            drop_target.connect_enter(move |_, _, _| {
+                window_enter.add_css_class("drop-target");
+                gtk::gdk::DragAction::COPY
+            });
+
+            let window_leave = window.clone();
+            drop_target.connect_leave(move |_| {
+                window_leave.remove_css_class("drop-target");
+            });
+
+            window.add_controller(drop_target);
         }
 
         // Window actions
