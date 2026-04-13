@@ -46,9 +46,18 @@ impl FileState {
     }
 }
 
+/// Stable, monotonically-increasing identifier assigned to a `FileEntry`.
+///
+/// Workers refer to rows by `FileId` across the channel boundary so that
+/// in-flight events remain correctly routed after user-driven `remove_file`
+/// or `clear` calls mutate the underlying `Vec<FileEntry>`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord)]
+pub struct FileId(pub u64);
+
 /// Represents a file being processed by the application.
 #[derive(Debug)]
 pub struct FileEntry {
+    pub id: FileId,
     pub path: PathBuf,
     pub filename: String,
     pub directory: String,
@@ -60,7 +69,7 @@ pub struct FileEntry {
 
 impl FileEntry {
     #[must_use]
-    pub fn new(path: &Path) -> Self {
+    pub fn new(id: FileId, path: &Path) -> Self {
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -73,6 +82,7 @@ impl FileEntry {
             .to_string();
 
         Self {
+            id,
             path: path.to_path_buf(),
             filename,
             directory,

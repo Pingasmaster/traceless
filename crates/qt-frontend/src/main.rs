@@ -8,7 +8,6 @@
 
 mod app_controller;
 mod file_model;
-mod metadata_model;
 
 use cxx_qt_lib::{QGuiApplication, QQmlApplicationEngine, QUrl};
 

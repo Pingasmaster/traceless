@@ -3,6 +3,7 @@ use std::io::{BufWriter, Cursor};
 use std::path::Path;
 
 use img_parts::jpeg::Jpeg;
+use img_parts::png::Png;
 use img_parts::{DynImage, ImageEXIF, ImageICC};
 use little_exif::metadata::Metadata as ExifMetadata;
 
@@ -46,49 +47,72 @@ impl FormatHandler for ImageHandler {
             }
         }
 
-        // Check for additional metadata segments via img-parts
+        // Check for additional metadata segments. For JPEG we parse
+        // once via `Jpeg::from_bytes` and inspect raw markers (covers
+        // XMP APP1, IPTC APP13, and ICC as a side-effect). For other
+        // formats we fall back to `DynImage::from_bytes`.
         let data = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
 
-        match DynImage::from_bytes(data.clone().into()) {
-            Ok(Some(img)) => {
-                if img.icc_profile().is_some() {
-                    items.push(MetadataItem {
-                        key: "ICC Profile".to_string(),
-                        value: "present".to_string(),
-                    });
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        if mime == "image/jpeg" {
+            match Jpeg::from_bytes(data.into()) {
+                Ok(jpeg) => {
+                    let mut saw_icc = false;
+                    for segment in jpeg.segments() {
+                        let marker = segment.marker();
+                        let seg_data = segment.contents();
+                        if marker == 0xE1
+                            && seg_data.starts_with(b"http://ns.adobe.com/xap/1.0/\0")
+                        {
+                            items.push(MetadataItem {
+                                key: "XMP data".to_string(),
+                                value: "present".to_string(),
+                            });
+                        }
+                        if marker == 0xED {
+                            items.push(MetadataItem {
+                                key: "IPTC/Photoshop data".to_string(),
+                                value: "present".to_string(),
+                            });
+                        }
+                        if !saw_icc
+                            && marker == 0xE2
+                            && seg_data.starts_with(b"ICC_PROFILE\0")
+                        {
+                            items.push(MetadataItem {
+                                key: "ICC Profile".to_string(),
+                                value: "present".to_string(),
+                            });
+                            saw_icc = true;
+                        }
+                    }
                 }
-                if img.exif().is_some() && items.is_empty() {
-                    items.push(MetadataItem {
-                        key: "EXIF data".to_string(),
-                        value: "present (could not parse individual tags)".to_string(),
-                    });
+                Err(e) => {
+                    log::debug!("img-parts JPEG parse error for {}: {e}", path.display());
                 }
             }
-            Ok(None) => {}
-            Err(e) => {
-                log::debug!("img-parts parse error for {}: {e}", path.display());
-            }
-        }
-
-        // Check for XMP/IPTC in JPEG
-        if let Ok(jpeg) = Jpeg::from_bytes(data.into()) {
-            for segment in jpeg.segments() {
-                let marker = segment.marker();
-                let seg_data = segment.contents();
-                if marker == 0xE1 && seg_data.starts_with(b"http://ns.adobe.com/xap/1.0/\0") {
-                    items.push(MetadataItem {
-                        key: "XMP data".to_string(),
-                        value: "present".to_string(),
-                    });
+        } else {
+            match DynImage::from_bytes(data.into()) {
+                Ok(Some(img)) => {
+                    if img.icc_profile().is_some() {
+                        items.push(MetadataItem {
+                            key: "ICC Profile".to_string(),
+                            value: "present".to_string(),
+                        });
+                    }
+                    if img.exif().is_some() && items.is_empty() {
+                        items.push(MetadataItem {
+                            key: "EXIF data".to_string(),
+                            value: "present (could not parse individual tags)".to_string(),
+                        });
+                    }
                 }
-                if marker == 0xED {
-                    items.push(MetadataItem {
-                        key: "IPTC/Photoshop data".to_string(),
-                        value: "present".to_string(),
-                    });
+                Ok(None) => {}
+                Err(e) => {
+                    log::debug!("img-parts parse error for {}: {e}", path.display());
                 }
             }
         }
@@ -104,22 +128,9 @@ impl FormatHandler for ImageHandler {
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError> {
-        if lightweight {
-            // Lightweight: copy file, then clear EXIF metadata via little_exif
-            fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to copy file: {e}"),
-            })?;
-            ExifMetadata::file_clear_metadata(output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to clear EXIF: {e}"),
-            })?;
-            return Ok(());
-        }
-
-        // Full clean: strip all metadata segments via img-parts
+        // Strip all metadata segments via img-parts, then run format-
+        // specific post-passes for the bits img-parts doesn't expose.
         let data = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -139,10 +150,13 @@ impl FormatHandler for ImageHandler {
                         detail: format!("Failed to encode cleaned image: {e}"),
                     })?;
 
-                // If JPEG, do an additional pass to strip remaining APP markers
+                // Format-specific post-pass: strip leftover metadata
+                // chunks that img-parts doesn't expose a setter for.
                 let mime = mime_guess::from_path(path).first_or_octet_stream();
                 let final_data = if mime == "image/jpeg" {
                     strip_jpeg_extra_segments(&buf).unwrap_or(buf)
+                } else if mime == "image/png" {
+                    strip_png_text_chunks(&buf).unwrap_or(buf)
                 } else {
                     buf
                 };
@@ -186,6 +200,30 @@ fn strip_jpeg_extra_segments(data: &[u8]) -> Option<Vec<u8>> {
 
     let mut buf = Vec::new();
     jpeg.encoder()
+        .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
+        .ok()?;
+    Some(buf)
+}
+
+/// Strip PNG ancillary text + timestamp chunks (`tEXt`, `iTXt`, `zTXt`,
+/// `tIME`). img-parts already zeroed `eXIf` and `iCCP` via `set_exif` /
+/// `set_icc_profile`, but it has no API for the text/time chunks, so a
+/// PNG with Author / Software / Creation Time fields would survive a
+/// full clean otherwise.
+fn strip_png_text_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK_TEXT: [u8; 4] = *b"tEXt";
+    const CHUNK_ITXT: [u8; 4] = *b"iTXt";
+    const CHUNK_ZTXT: [u8; 4] = *b"zTXt";
+    const CHUNK_TIME: [u8; 4] = *b"tIME";
+
+    let mut png = Png::from_bytes(data.to_vec().into()).ok()?;
+    png.remove_chunks_by_type(CHUNK_TEXT);
+    png.remove_chunks_by_type(CHUNK_ITXT);
+    png.remove_chunks_by_type(CHUNK_ZTXT);
+    png.remove_chunks_by_type(CHUNK_TIME);
+
+    let mut buf = Vec::new();
+    png.encoder()
         .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
         .ok()?;
     Some(buf)

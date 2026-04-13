@@ -16,27 +16,27 @@ window.main headerbar button {
     color: @accent_fg_color;
 }
 
-listview.files > row {
+list.files > row {
     padding: 0;
     border-bottom: 1px solid alpha(currentColor, 0.15);
 }
 
-listview.files .remove,
-listview.files .file {
+list.files .remove,
+list.files .file {
     border-radius: unset;
     font-weight: unset;
 }
 
-listview.files .remove {
+list.files .remove {
     padding: 6px 12px;
 }
 
-listview.files separator {
+list.files separator {
     opacity: 0;
     transition: 0.1s opacity;
 }
 
-listview.files > row:hover separator {
+list.files > row:hover separator {
     opacity: 1;
     transition: none;
 }
@@ -75,19 +75,6 @@ listview.files > row:hover separator {
 .toolbar.details {
     background-color: @headerbar_bg_color;
     color: @headerbar_fg_color;
-}
-
-listview.metadata {
-    background: none;
-}
-
-listview.metadata > row {
-    margin: 12px 24px;
-}
-
-row.metadata > box {
-    margin: 6px;
-    border-spacing: 12px;
 }
 ";
 

@@ -5,6 +5,9 @@ import QtQuick.Layouts
 Page {
     id: detailsPanel
 
+    // The `FileListModel` — `detail_row`, `detail_count`, `detail_group`
+    // are qproperties populated by `select_detail`, and `detail_key(i)` /
+    // `detail_value(i)` / `detail_error()` are qinvokables.
     required property var model
     signal backClicked()
 
@@ -36,26 +39,45 @@ Page {
             spacing: 8
 
             Label {
-                text: detailsPanel.model.group_name
+                text: detailsPanel.model.detail_group
                 font.bold: true
-                visible: detailsPanel.model.group_name.length > 0
+                visible: detailsPanel.model.detail_group.length > 0
                 wrapMode: Text.Wrap
                 Layout.fillWidth: true
             }
 
             Repeater {
-                model: detailsPanel.model.count
+                // Reading `detail_row` creates a QML binding on the
+                // property's notify signal; whenever `select_detail` is
+                // called, this Repeater reinstantiates with the new count.
+                model: detailsPanel.model.detail_row >= 0
+                       ? detailsPanel.model.detail_count
+                       : 0
 
                 MetadataSection {
                     Layout.fillWidth: true
-                    metadataKey: detailsPanel.model.get_key(index)
-                    metadataValue: detailsPanel.model.get_value(index)
+                    metadataKey: detailsPanel.model.detail_key(index)
+                    metadataValue: detailsPanel.model.detail_value(index)
                 }
             }
 
             Label {
+                id: errorLabel
+                text: detailsPanel.model.detail_error()
+                visible: detailsPanel.model.detail_row >= 0
+                         && detailsPanel.model.detail_count === 0
+                         && errorLabel.text.length > 0
+                color: "#c01c28"
+                wrapMode: Text.Wrap
+                Layout.fillWidth: true
+                Layout.topMargin: 12
+            }
+
+            Label {
                 text: "No metadata to display"
-                visible: detailsPanel.model.count === 0
+                visible: detailsPanel.model.detail_row >= 0
+                         && detailsPanel.model.detail_count === 0
+                         && errorLabel.text.length === 0
                 opacity: 0.5
                 Layout.alignment: Qt.AlignHCenter
                 Layout.topMargin: 40

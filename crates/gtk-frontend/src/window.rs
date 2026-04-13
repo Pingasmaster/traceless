@@ -32,7 +32,6 @@ impl Window {
         let store = Rc::new(RefCell::new(FileStore::new()));
         let tx: Rc<RefCell<Option<Sender<FileStoreEvent>>>> =
             Rc::new(RefCell::new(None));
-        let show_warning = Rc::new(RefCell::new(true));
 
         // --- Layout ---
 
@@ -53,9 +52,24 @@ impl Window {
         header.pack_start(&add_files_btn);
         header.pack_start(&add_folders_btn);
 
+        // Ctrl+O → click the Add Files button. Using a ShortcutController
+        // attached to the window so the accelerator works regardless of
+        // which child widget currently has focus.
+        {
+            let add_files_btn_for_shortcut = add_files_btn.clone();
+            let trigger = gtk::ShortcutTrigger::parse_string("<Control>o");
+            let action = gtk::CallbackAction::new(move |_, _| {
+                add_files_btn_for_shortcut.emit_clicked();
+                gtk::glib::Propagation::Stop
+            });
+            let shortcut = gtk::Shortcut::new(trigger, Some(action));
+            let controller = gtk::ShortcutController::new();
+            controller.add_shortcut(shortcut);
+            window.add_controller(controller);
+        }
+
         // Menu button
         let menu = gtk::gio::Menu::new();
-        menu.append(Some("New Window"), Some("app.new-window"));
         menu.append(Some("Clear Window"), Some("win.clear-files"));
         let section2 = gtk::gio::Menu::new();
         section2.append(Some("About Traceless"), Some("win.about"));
@@ -155,13 +169,10 @@ impl Window {
             let files_view = files_view.clone();
 
             bridge::install_event_pump(event_rx, move |event| {
-                let affected: Option<usize> = match &event {
-                    FileStoreEvent::FileStateChanged { index, .. }
-                    | FileStoreEvent::MetadataReady { index, .. }
-                    | FileStoreEvent::FileError { index, .. } => Some(*index),
-                    FileStoreEvent::AllDone => None,
-                };
-                store.borrow_mut().apply_event(&event);
+                // `apply_event` resolves the stable FileId to a row index
+                // in the current store and returns None for stale events
+                // (e.g. after the user removed the file mid-scan).
+                let affected = store.borrow_mut().apply_event(&event);
                 let s = store.borrow();
                 if let Some(idx) = affected {
                     files_view.update_row(&s, idx);
@@ -192,15 +203,6 @@ impl Window {
         }
 
         // --- Connect Actions ---
-
-        // Lightweight cleaning toggle
-        {
-            let store = store.clone();
-            files_view.settings_switch.connect_state_set(move |_, active| {
-                store.borrow_mut().lightweight_mode = active;
-                gtk::glib::Propagation::Proceed
-            });
-        }
 
         // Add Files button
         {
@@ -250,7 +252,8 @@ impl Window {
             });
         }
 
-        // Clean button
+        // Clean button — cleaning is destructive and irreversible, so
+        // always show the confirmation dialog per GNOME HIG.
         {
             let window_clone = window.clone();
             let store = store.clone();
@@ -258,21 +261,13 @@ impl Window {
             files_view.clean_button.connect_clicked(move |_| {
                 let store = store.clone();
                 let tx = tx.clone();
-                let sw = show_warning.clone();
-
-                if *sw.borrow() {
-                    let store2 = store;
-                    let tx2 = tx;
-                    dialogs::show_cleaning_warning(&window_clone, move |confirmed| {
-                        if confirmed
-                            && let Some(sender) = tx2.borrow().as_ref()
-                        {
-                            store2.borrow_mut().clean_files(sender);
-                        }
-                    });
-                } else if let Some(sender) = tx.borrow().as_ref() {
-                    store.borrow_mut().clean_files(sender);
-                }
+                dialogs::show_cleaning_warning(&window_clone, move |confirmed| {
+                    if confirmed
+                        && let Some(sender) = tx.borrow().as_ref()
+                    {
+                        store.borrow_mut().clean_files(sender);
+                    }
+                });
             });
         }
 

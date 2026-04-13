@@ -10,7 +10,6 @@ Item {
     property bool isWorking: false
 
     signal cleanClicked()
-    signal settingsChanged(bool lightweight)
 
     RowLayout {
         anchors.fill: parent
@@ -36,19 +35,6 @@ Item {
         Item {
             Layout.fillWidth: true
             visible: !statusBar.isWorking && statusBar.statusMessage.length === 0
-        }
-
-        // Settings button
-        ToolButton {
-            icon.name: "configure"
-            onClicked: settingsPopup.open()
-
-            SettingsPopup {
-                id: settingsPopup
-                onLightweightChanged: function(enabled) {
-                    statusBar.settingsChanged(enabled)
-                }
-            }
         }
 
         // Clean button

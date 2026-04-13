@@ -9,7 +9,6 @@ Item {
     signal fileClicked(int index)
     signal removeClicked(int index)
     signal cleanClicked()
-    signal settingsChanged(bool lightweight)
 
     ColumnLayout {
         anchors.fill: parent
@@ -51,9 +50,6 @@ Item {
             statusMessage: filesView.model.status_message
             isWorking: filesView.model.is_working
             onCleanClicked: filesView.cleanClicked()
-            onSettingsChanged: function(lightweight) {
-                filesView.settingsChanged(lightweight)
-            }
         }
     }
 }

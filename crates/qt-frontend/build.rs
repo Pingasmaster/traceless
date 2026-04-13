@@ -11,12 +11,10 @@ fn main() {
             "qml/MetadataSection.qml",
             "qml/Badge.qml",
             "qml/StatusBar.qml",
-            "qml/SettingsPopup.qml",
             "qml/CleaningWarningDialog.qml",
         ]),
     )
     .file("src/file_model.rs")
-    .file("src/metadata_model.rs")
     .file("src/app_controller.rs")
     .build();
 }

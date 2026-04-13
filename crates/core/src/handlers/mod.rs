@@ -22,20 +22,16 @@ pub trait FormatHandler: Send + Sync {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError>;
 
     /// Remove all metadata from the file, writing the cleaned version
-    /// to `output_path`. If `lightweight` is true, the handler should
-    /// preserve data integrity at the cost of possibly leaving some
-    /// metadata intact.
+    /// to `output_path`.
     ///
     /// # Errors
     ///
     /// Returns an error if the input cannot be read, the cleaned output
-    /// cannot be written to `output_path`, or the format does not support
-    /// the requested clean depth.
+    /// cannot be written to `output_path`, or the format cannot be parsed.
     fn clean_metadata(
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError>;
 
     /// MIME types this handler supports.

@@ -10,7 +10,7 @@ pub struct VideoHandler;
 
 impl FormatHandler for VideoHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
-        check_ffmpeg_available()?;
+        check_tool_available("ffprobe")?;
 
         let output = Command::new("ffprobe")
             .args([
@@ -56,37 +56,22 @@ impl FormatHandler for VideoHandler {
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError> {
-        check_ffmpeg_available()?;
+        check_tool_available("ffmpeg")?;
 
-        let mut args = vec![
+        // Full strip: copy streams, discard all metadata and chapters.
+        let args = [
             "-y".to_string(),
             "-i".to_string(),
             path.to_string_lossy().into_owned(),
             "-map_metadata".to_string(),
             "-1".to_string(),
+            "-c".to_string(),
+            "copy".to_string(),
+            "-map_chapters".to_string(),
+            "-1".to_string(),
+            output_path.to_string_lossy().into_owned(),
         ];
-
-        if lightweight {
-            // Keep some structural metadata, just remove user-facing tags
-            args.extend([
-                "-c".to_string(),
-                "copy".to_string(),
-                "-map_metadata:s".to_string(),
-                "0:s".to_string(), // keep stream metadata
-            ]);
-        } else {
-            // Full strip: copy streams, discard all metadata and chapters
-            args.extend([
-                "-c".to_string(),
-                "copy".to_string(),
-                "-map_chapters".to_string(),
-                "-1".to_string(),
-            ]);
-        }
-
-        args.push(output_path.to_string_lossy().into_owned());
 
         let output = Command::new("ffmpeg")
             .args(&args)
@@ -119,12 +104,14 @@ impl FormatHandler for VideoHandler {
     }
 }
 
-fn check_ffmpeg_available() -> Result<(), CoreError> {
-    let result = Command::new("ffmpeg").arg("-version").output();
-    match result {
+/// Verify that `tool -version` runs and succeeds. Returns
+/// `CoreError::ToolNotFound` with the exact tool name when it doesn't so
+/// the UI can point the user at the right missing package.
+fn check_tool_available(tool: &str) -> Result<(), CoreError> {
+    match Command::new(tool).arg("-version").output() {
         Ok(output) if output.status.success() => Ok(()),
         _ => Err(CoreError::ToolNotFound {
-            tool: "ffmpeg".to_string(),
+            tool: tool.to_string(),
         }),
     }
 }

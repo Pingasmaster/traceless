@@ -13,7 +13,6 @@ ApplicationWindow {
     color: palette.window
 
     FileListModel { id: fileModel }
-    MetadataModel { id: metadataModel }
     AppController { id: appController }
 
     FileDialog {
@@ -50,10 +49,11 @@ ApplicationWindow {
         width: Math.min(360, root.width * 0.8)
         height: root.height
         interactive: true
+        onClosed: fileModel.select_detail(-1)
 
         DetailsPanel {
             anchors.fill: parent
-            model: metadataModel
+            model: fileModel
             onBackClicked: detailsDrawer.close()
         }
     }
@@ -157,15 +157,13 @@ ApplicationWindow {
             FilesView {
                 model: fileModel
                 onFileClicked: function(index) {
+                    fileModel.select_detail(index)
                     detailsDrawer.open()
                 }
                 onRemoveClicked: function(index) {
                     fileModel.remove_file(index)
                 }
                 onCleanClicked: cleaningWarning.open()
-                onSettingsChanged: function(lightweight) {
-                    fileModel.set_lightweight_mode(lightweight)
-                }
             }
         }
     }

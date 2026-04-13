@@ -63,9 +63,9 @@ impl FormatHandler for AudioHandler {
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError> {
-        // Copy original to output first
+        // Copy original to output first so lofty parses a file with the
+        // correct extension (see file_store::make_temp_path).
         std::fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to copy file: {e}"),
@@ -77,27 +77,7 @@ impl FormatHandler for AudioHandler {
                 detail: format!("Failed to read audio file: {e}"),
             })?;
 
-        if lightweight {
-            // Lightweight: only remove comment and less critical tags from each tag type
-            for tag_type in [
-                lofty::tag::TagType::Id3v2,
-                lofty::tag::TagType::Id3v1,
-                lofty::tag::TagType::Ape,
-                lofty::tag::TagType::VorbisComments,
-                lofty::tag::TagType::Mp4Ilst,
-                lofty::tag::TagType::RiffInfo,
-                lofty::tag::TagType::AiffText,
-            ] {
-                if let Some(tag) = tagged_file.tag_mut(tag_type) {
-                    tag.remove_key(ItemKey::Comment);
-                    tag.remove_key(ItemKey::EncoderSoftware);
-                    tag.remove_key(ItemKey::EncoderSettings);
-                }
-            }
-        } else {
-            // Full: remove all tags
-            tagged_file.clear();
-        }
+        tagged_file.clear();
 
         tagged_file
             .save_to_path(output_path, lofty::config::WriteOptions::default())

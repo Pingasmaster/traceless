@@ -5,7 +5,6 @@ use adw::prelude::*;
 use gtk::glib::BoxedAnyObject;
 
 use crate::file_row;
-use crate::settings_popover;
 use crate::status_indicator::StatusIndicator;
 use traceless_core::{FileEntry, FileState, FileStore};
 
@@ -36,7 +35,6 @@ pub struct FilesView {
     pub widget: gtk::Box,
     pub list_store: gtk::gio::ListStore,
     pub status: StatusIndicator,
-    pub settings_switch: gtk::Switch,
     pub clean_button: gtk::Button,
     on_remove: RowCallback,
     on_details: RowCallback,
@@ -109,9 +107,6 @@ impl FilesView {
         let status = StatusIndicator::new();
         toolbar.append(&status.widget);
 
-        let (settings_btn, settings_switch) = settings_popover::create_settings_popover();
-        toolbar.append(&settings_btn);
-
         let clean_button = gtk::Button::with_label("Clean");
         clean_button.add_css_class("destructive-action");
         clean_button.set_sensitive(false);
@@ -123,7 +118,6 @@ impl FilesView {
             widget: outer,
             list_store,
             status,
-            settings_switch,
             clean_button,
             on_remove,
             on_details,

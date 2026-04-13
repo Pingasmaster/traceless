@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::thread;
 
 use async_channel::Sender;
-use traceless_core::{FileStore, FileStoreEvent};
+use traceless_core::{collect_paths, FileStore, FileStoreEvent};
 
 #[cxx_qt::bridge]
 mod ffi {
@@ -45,6 +45,9 @@ mod ffi {
         #[qproperty(i32, file_count)]
         #[qproperty(bool, is_working)]
         #[qproperty(QString, status_message)]
+        #[qproperty(i32, detail_row)]
+        #[qproperty(QString, detail_group)]
+        #[qproperty(i32, detail_count)]
         type FileListModel = super::FileListModelRust;
     }
 
@@ -78,8 +81,23 @@ mod ffi {
         #[qinvokable]
         fn clean_all(self: Pin<&mut FileListModel>);
 
+        /// Populate the detail_* properties from the given row of the
+        /// underlying `FileStore`. Passing `-1` clears the details.
         #[qinvokable]
-        fn set_lightweight_mode(self: Pin<&mut FileListModel>, enabled: bool);
+        fn select_detail(self: Pin<&mut FileListModel>, row: i32);
+
+        /// Read a metadata key for the currently selected detail row.
+        #[qinvokable]
+        fn detail_key(self: &FileListModel, index: i32) -> QString;
+
+        /// Read a metadata value for the currently selected detail row.
+        #[qinvokable]
+        fn detail_value(self: &FileListModel, index: i32) -> QString;
+
+        /// Returns the user-facing error attached to the currently selected
+        /// detail row, or an empty string if there is none.
+        #[qinvokable]
+        fn detail_error(self: &FileListModel) -> QString;
     }
 
     extern "RustQt" {
@@ -160,13 +178,38 @@ mod ffi {
 use cxx_qt::{CxxQtType, Threading};
 use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector};
 
-#[derive(Default)]
 pub struct FileListModelRust {
     store: FileStore,
     tx: Option<Sender<FileStoreEvent>>,
     file_count: i32,
     is_working: bool,
     status_message: QString,
+    /// Currently selected detail row, or -1 when the details drawer is empty.
+    detail_row: i32,
+    detail_group: QString,
+    detail_count: i32,
+    /// Flat buffer of (key, value) pairs captured the moment the user
+    /// selected a detail row. Captured into the model so that QML can
+    /// render from it even if the underlying file state mutates later.
+    detail_items: Vec<(String, String)>,
+    detail_error: String,
+}
+
+impl Default for FileListModelRust {
+    fn default() -> Self {
+        Self {
+            store: FileStore::default(),
+            tx: None,
+            file_count: 0,
+            is_working: false,
+            status_message: QString::default(),
+            detail_row: -1,
+            detail_group: QString::default(),
+            detail_count: 0,
+            detail_items: Vec::new(),
+            detail_error: String::new(),
+        }
+    }
 }
 
 impl ffi::FileListModel {
@@ -183,16 +226,16 @@ impl ffi::FileListModel {
         thread::spawn(move || {
             while let Ok(event) = rx.recv_blocking() {
                 let _ = qt_thread.queue(move |mut this: Pin<&mut Self>| {
-                    let affected_index: Option<i32> = match &event {
-                        FileStoreEvent::FileStateChanged { index, .. }
-                        | FileStoreEvent::MetadataReady { index, .. }
-                        | FileStoreEvent::FileError { index, .. } => {
-                            i32::try_from(*index).ok()
-                        }
-                        FileStoreEvent::AllDone => None,
-                    };
-                    this.as_mut().rust_mut().store.apply_event(&event);
-                    if let Some(row) = affected_index {
+                    // `apply_event` resolves the stable FileId to a row
+                    // index, returning None for stale events whose file
+                    // was removed before the event was delivered.
+                    let affected_row = this
+                        .as_mut()
+                        .rust_mut()
+                        .store
+                        .apply_event(&event)
+                        .and_then(|idx| i32::try_from(idx).ok());
+                    if let Some(row) = affected_row {
                         let model_index = this.index(row, 0, &QModelIndex::default());
                         let mut roles = QVector::<i32>::default();
                         roles.append(ffi::Role::Filename.repr);
@@ -244,36 +287,19 @@ impl ffi::FileListModel {
             return;
         };
 
-        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
-        let pre_count = self.rust().store.len();
-
-        // Drag-and-drop can mix files and folders, so route each directory through
-        // add_directory (recursive) and batch the rest through add_files. Row count
-        // is only known after expansion, hence the retroactive begin/end_insert_rows
-        // pattern (mirrors add_folder below).
-        let mut files: Vec<PathBuf> = Vec::new();
+        // Drag-and-drop can mix files and folders. Expand directories
+        // up-front with `collect_paths` so we know the final row count
+        // *before* touching the store, which means we can call
+        // `beginInsertRows` in the order Qt's model protocol requires.
+        let mut expanded: Vec<PathBuf> = Vec::new();
         for p in path_list {
             if p.is_dir() {
-                self.as_mut().rust_mut().store.add_directory(&p, true, &tx);
+                expanded.extend(collect_paths(&p, true));
             } else {
-                files.push(p);
+                expanded.push(p);
             }
         }
-        if !files.is_empty() {
-            self.as_mut().rust_mut().store.add_files(files, &tx);
-        }
-
-        let added = self.rust().store.len().saturating_sub(pre_count);
-        if added > 0 {
-            let end = start + i32::try_from(added).unwrap_or(0) - 1;
-            unsafe {
-                self.as_mut()
-                    .begin_insert_rows(&QModelIndex::default(), start, end);
-                self.as_mut().end_insert_rows();
-            }
-        }
-
-        self.as_mut().update_aux_properties();
+        self.as_mut().insert_expanded(&tx, expanded);
     }
 
     fn add_folder(mut self: Pin<&mut Self>, path: &QString) {
@@ -285,21 +311,32 @@ impl ffi::FileListModel {
             return;
         };
 
-        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
-        let pre_count = self.rust().store.len();
-        self.as_mut().rust_mut().store.add_directory(&path, true, &tx);
-        let added = self.rust().store.len().saturating_sub(pre_count);
+        let expanded = collect_paths(&path, true);
+        self.as_mut().insert_expanded(&tx, expanded);
+    }
 
-        if added > 0 {
-            let end = start + i32::try_from(added).unwrap_or(0) - 1;
-            // add_directory already mutated the store; we announce the insertion
-            // retroactively, which still triggers the ListView to pick up the
-            // new rows because the model internals haven't been observed yet.
-            unsafe {
-                self.as_mut()
-                    .begin_insert_rows(&QModelIndex::default(), start, end);
-                self.as_mut().end_insert_rows();
-            }
+    /// Insert a pre-expanded list of files, obeying Qt's model protocol:
+    /// `beginInsertRows` → mutate the store → `endInsertRows`.
+    fn insert_expanded(
+        mut self: Pin<&mut Self>,
+        tx: &Sender<FileStoreEvent>,
+        expanded: Vec<PathBuf>,
+    ) {
+        if expanded.is_empty() {
+            self.as_mut().update_aux_properties();
+            return;
+        }
+
+        let start = i32::try_from(self.rust().store.len()).unwrap_or(i32::MAX);
+        let end = start + i32::try_from(expanded.len()).unwrap_or(0) - 1;
+
+        unsafe {
+            self.as_mut()
+                .begin_insert_rows(&QModelIndex::default(), start, end);
+        }
+        self.as_mut().rust_mut().store.add_files(expanded, tx);
+        unsafe {
+            self.as_mut().end_insert_rows();
         }
 
         self.as_mut().update_aux_properties();
@@ -338,8 +375,63 @@ impl ffi::FileListModel {
         self.as_mut().update_aux_properties();
     }
 
-    fn set_lightweight_mode(mut self: Pin<&mut Self>, enabled: bool) {
-        self.as_mut().rust_mut().store.lightweight_mode = enabled;
+    fn select_detail(mut self: Pin<&mut Self>, row: i32) {
+        // Capture a snapshot of the row's metadata and error into the
+        // detail_* fields so that the QML details drawer has something
+        // stable to render. Passing row = -1 clears the details.
+        let mut items: Vec<(String, String)> = Vec::new();
+        let mut group = QString::default();
+        let mut error = String::new();
+
+        if row >= 0
+            && let Ok(idx) = usize::try_from(row)
+            && let Some(entry) = self.rust().store.get(idx)
+        {
+            if let Some(meta) = &entry.metadata {
+                for g in &meta.groups {
+                    // The QML layer renders a flat list; use the first
+                    // group's filename as the header label and concatenate
+                    // every group's items below it.
+                    if group.is_empty() {
+                        group = QString::from(&g.filename as &str);
+                    }
+                    for it in &g.items {
+                        items.push((it.key.clone(), it.value.clone()));
+                    }
+                }
+            }
+            if let Some(err) = &entry.error {
+                error.clone_from(err);
+            }
+        }
+
+        let count = i32::try_from(items.len()).unwrap_or(i32::MAX);
+        {
+            let mut state = self.as_mut().rust_mut();
+            state.detail_items = items;
+            state.detail_error = error;
+        }
+        self.as_mut().set_detail_row(row);
+        self.as_mut().set_detail_group(group);
+        self.as_mut().set_detail_count(count);
+    }
+
+    fn detail_key(&self, index: i32) -> QString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().detail_items.get(i))
+            .map_or_else(QString::default, |(k, _)| QString::from(k as &str))
+    }
+
+    fn detail_value(&self, index: i32) -> QString {
+        usize::try_from(index)
+            .ok()
+            .and_then(|i| self.rust().detail_items.get(i))
+            .map_or_else(QString::default, |(_, v)| QString::from(v as &str))
+    }
+
+    fn detail_error(&self) -> QString {
+        QString::from(&self.rust().detail_error as &str)
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {

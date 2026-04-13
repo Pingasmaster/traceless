@@ -92,43 +92,31 @@ impl FormatHandler for PdfHandler {
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError> {
         let mut doc = Document::load(path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to load PDF: {e}"),
         })?;
 
-        // Remove /Info dictionary
+        // Remove /Info dictionary entirely
         if let Ok(info_ref) = doc.trailer.get(b"Info")
             && let Ok(obj_ref) = info_ref.as_reference()
         {
-            if lightweight {
-                // Lightweight: only clear Author, Creator, Producer
-                if let Ok(info_obj) = doc.get_object_mut(obj_ref)
-                    && let Ok(dict) = info_obj.as_dict_mut()
-                {
-                    for key in &["Author", "Creator", "Producer"] {
-                        dict.remove(key.as_bytes());
-                    }
-                }
-            } else {
-                // Full: remove the entire Info object
-                doc.delete_object(obj_ref);
-                doc.trailer.remove(b"Info");
-            }
+            doc.delete_object(obj_ref);
+            doc.trailer.remove(b"Info");
         }
 
-        // Remove XMP metadata stream from catalog
-        if !lightweight
-            && let Ok(catalog) = doc.catalog_mut()
-        {
-            if let Ok(meta_ref) = catalog.get(b"Metadata")
-                && let Ok(obj_ref) = meta_ref.clone().as_reference()
-            {
-                doc.delete_object(obj_ref);
-            }
-            // Need to get catalog again after deleting
+        // Remove the XMP metadata stream and the catalog's /Metadata
+        // pointer to it. Pull the object id out under a read-only borrow
+        // of the catalog first so the later delete_object + catalog_mut
+        // don't need to juggle overlapping mutable borrows.
+        let meta_ref = doc
+            .catalog()
+            .ok()
+            .and_then(|cat| cat.get(b"Metadata").ok().cloned())
+            .and_then(|obj| obj.as_reference().ok());
+        if let Some(obj_ref) = meta_ref {
+            doc.delete_object(obj_ref);
             if let Ok(catalog) = doc.catalog_mut() {
                 catalog.remove(b"Metadata");
             }

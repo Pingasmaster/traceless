@@ -67,7 +67,6 @@ impl FormatHandler for DocumentHandler {
         &self,
         path: &Path,
         output_path: &Path,
-        lightweight: bool,
     ) -> Result<(), CoreError> {
         let file = File::open(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
@@ -104,12 +103,7 @@ impl FormatHandler for DocumentHandler {
                     detail: format!("Failed to read entry {entry_name}: {e}"),
                 })?;
 
-                // Clean the XML
-                let cleaned = if lightweight {
-                    clean_xml_metadata_lightweight(&contents)
-                } else {
-                    clean_xml_metadata_full(&contents, &entry_name)
-                };
+                let cleaned = clean_xml_metadata_full(&contents, &entry_name);
 
                 let options = SimpleFileOptions::default()
                     .compression_method(entry.compression());
@@ -307,20 +301,29 @@ fn clean_xml_metadata_full(xml: &str, entry_name: &str) -> String {
     }
 }
 
-/// Lightweight clean: remove only creator, date, and tool-related metadata.
-fn clean_xml_metadata_lightweight(xml: &str) -> String {
-    let remove_tags: &[&str] = &[
-        "creator",
-        "initial-creator",
-        "lastModifiedBy",
-        "Company",
-        "Manager",
-        "Application",
-        "AppVersion",
-        "generator",
-        "printed-by",
-    ];
+#[cfg(test)]
+pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
+    clean_xml_metadata_lightweight(xml)
+}
 
+const LIGHTWEIGHT_REMOVE_TAGS: &[&str] = &[
+    "creator",
+    "initial-creator",
+    "lastModifiedBy",
+    "Company",
+    "Manager",
+    "Application",
+    "AppVersion",
+    "generator",
+    "printed-by",
+];
+
+/// Lightweight clean: remove only creator, date, and tool-related metadata.
+///
+/// Handles both the paired `<Start>…</End>` case (by suppressing all
+/// events while `skip_depth > 0`) and the self-closing `<Empty/>` case
+/// (by matching the local name directly and dropping just that event).
+fn clean_xml_metadata_lightweight(xml: &str) -> String {
     let mut reader = Reader::from_str(xml);
     let mut writer = quick_xml::Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
@@ -329,7 +332,7 @@ fn clean_xml_metadata_lightweight(xml: &str) -> String {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
                 let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
-                if skip_depth > 0 || remove_tags.contains(&local_name.as_str()) {
+                if skip_depth > 0 || LIGHTWEIGHT_REMOVE_TAGS.contains(&local_name.as_str()) {
                     skip_depth += 1;
                 } else {
                     writer.write_event(Event::Start(e.clone())).ok();
@@ -340,6 +343,17 @@ fn clean_xml_metadata_lightweight(xml: &str) -> String {
                     skip_depth -= 1;
                 } else {
                     writer.write_event(Event::End(e.clone())).ok();
+                }
+            }
+            Ok(Event::Empty(ref e)) => {
+                // Self-closing tags (`<meta:generator/>`) don't open a
+                // depth; we just drop the single event if it matches.
+                if skip_depth > 0 {
+                    continue;
+                }
+                let local_name = String::from_utf8_lossy(e.local_name().as_ref()).to_string();
+                if !LIGHTWEIGHT_REMOVE_TAGS.contains(&local_name.as_str()) {
+                    writer.write_event(Event::Empty(e.clone())).ok();
                 }
             }
             Ok(Event::Text(ref e)) => {

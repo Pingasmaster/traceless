@@ -12,6 +12,6 @@ pub mod handlers;
 pub mod metadata;
 
 pub use error::CoreError;
-pub use file::{FileEntry, FileState};
-pub use file_store::{FileStore, FileStoreEvent};
+pub use file::{FileEntry, FileId, FileState};
+pub use file_store::{collect_paths, FileStore, FileStoreEvent};
 pub use metadata::{MetadataGroup, MetadataItem, MetadataSet};
