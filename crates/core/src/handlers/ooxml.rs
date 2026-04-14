@@ -361,7 +361,7 @@ fn rewrite_id_attribute(
         let key_str = String::from_utf8_lossy(&key_bytes);
         let local = key_str
             .rsplit_once(':')
-            .map_or(key_str.as_ref(), |(_, l)| l);
+            .map_or_else(|| key_str.as_ref(), |(_, l)| l);
         if local == target_local {
             let new_val = format!("{}", rng.random::<u32>());
             out.push_attribute((key_bytes.as_slice(), new_val.as_bytes()));
@@ -377,31 +377,37 @@ fn rewrite_id_attribute(
 }
 
 /// mat2's final byte-level regex that strips `mc:Ignorable="…"`. Doing
-/// this with quick-xml would require tracking element state; a single
-/// regex-style replace is what mat2 does and is sufficient because we
-/// already produced the output ourselves via `sort_xml_attributes`.
+/// this with quick-xml would require tracking element state; a regex-
+/// style replace is what mat2 does and is sufficient because we already
+/// produced the output ourselves via `sort_xml_attributes`.
+///
+/// Must loop until no more matches - mat2 uses `re.sub` which replaces
+/// every occurrence, and valid OOXML can carry multiple `mc:Ignorable`
+/// attributes (e.g. nested `mc:AlternateContent` elements). A single-
+/// shot strip would leave every occurrence past the first as a producer
+/// fingerprint.
 fn strip_mc_ignorable(xml: &str) -> String {
-    let bytes = xml.as_bytes();
     let needle = b"mc:Ignorable=\"";
-    let Some(start) = find_bytes(bytes, needle) else {
-        return xml.to_string();
-    };
-    let after_open = start + needle.len();
-    let Some(close_rel) = bytes[after_open..].iter().position(|&b| b == b'"') else {
-        return xml.to_string();
-    };
-    let close_abs = after_open + close_rel + 1;
-    // Also swallow a preceding space if there is one, to keep the output
-    // well-formed (`<tag  x="y">` → `<tag x="y">`).
-    let prefix_end = if start > 0 && bytes[start - 1] == b' ' {
-        start - 1
-    } else {
-        start
-    };
-    let mut out = Vec::with_capacity(bytes.len());
-    out.extend_from_slice(&bytes[..prefix_end]);
-    out.extend_from_slice(&bytes[close_abs..]);
-    String::from_utf8(out).unwrap_or_else(|_| xml.to_string())
+    let mut buf = xml.as_bytes().to_vec();
+    loop {
+        let Some(start) = find_bytes(&buf, needle) else {
+            break;
+        };
+        let after_open = start + needle.len();
+        let Some(close_rel) = buf[after_open..].iter().position(|&b| b == b'"') else {
+            break;
+        };
+        let close_abs = after_open + close_rel + 1;
+        // Also swallow a preceding space if there is one, to keep the
+        // output well-formed (`<tag  x="y">` → `<tag x="y">`).
+        let prefix_end = if start > 0 && buf[start - 1] == b' ' {
+            start - 1
+        } else {
+            start
+        };
+        buf.drain(prefix_end..close_abs);
+    }
+    String::from_utf8(buf).unwrap_or_else(|_| xml.to_string())
 }
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
@@ -445,6 +451,26 @@ mod tests {
         let xml = r#"<doc xmlns:mc="x" mc:Ignorable="w14 w15"><p/></doc>"#;
         let out = strip_mc_ignorable(xml);
         assert!(!out.contains("mc:Ignorable"), "mc:Ignorable must be stripped: {out}");
+    }
+
+    #[test]
+    fn strip_mc_ignorable_removes_every_occurrence() {
+        // mat2 uses `re.sub` which replaces every match, and valid OOXML
+        // can carry more than one mc:Ignorable (nested mc:AlternateContent
+        // wrappers). A single-shot strip would leave the second one as a
+        // producer fingerprint; this test pins the fix.
+        let xml = concat!(
+            r#"<root xmlns:mc="x" mc:Ignorable="w14">"#,
+            r#"<mc:AlternateContent mc:Ignorable="w15"/>"#,
+            r#"<mc:AlternateContent mc:Ignorable="w16 w17"/>"#,
+            r#"</root>"#,
+        );
+        let out = strip_mc_ignorable(xml);
+        assert!(
+            !out.contains("mc:Ignorable"),
+            "every mc:Ignorable must be stripped, got: {out}"
+        );
+        assert!(out.contains("mc:AlternateContent"), "wrappers must survive: {out}");
     }
 
     #[test]

@@ -36,7 +36,15 @@ strip = true
 # still enabled has been reviewed and is worth enforcing as a quality
 # gate.
 [workspace.lints.clippy]
+# Each group is denied at priority -1 so the per-lint `allow` overrides
+# below (priority 0) win against them. Encoding the gate in the manifest
+# rather than relying on `cargo clippy -- -D ...` is required since rust
+# 1.94: command-line `-D` flags override manifest allows, while
+# manifest-side denies still respect the per-lint allow precedence rules.
+all = { level = "deny", priority = -1 }
 pedantic = { level = "deny", priority = -1 }
+nursery = { level = "deny", priority = -1 }
+cargo = { level = "deny", priority = -1 }
 
 # --- noisy / subjective ---
 doc_markdown = "allow"             # flags acronyms and filenames in prose
@@ -56,3 +64,15 @@ cast_possible_truncation = "allow"
 cast_sign_loss = "allow"
 cast_possible_wrap = "allow"
 cast_lossless = "allow"
+
+# --- stylistic preferences from newer clippy releases ---
+# Both `if let / else` and `map_or_else` are clear; forcing one stylistic
+# choice over the other does not improve readability across this codebase.
+option_if_let_else = "allow"
+# clippy 1.94 added a hard limit on first-doc-paragraph length; the extra
+# context line some helpers carry is worth more than the brevity rule.
+too_long_first_doc_paragraph = "allow"
+# Several walkers split intentionally identical fast-paths between branches
+# (e.g. CSS / GIF byte loops). Sharing the prefix would obscure the parser
+# state machine, not clarify it.
+branches_sharing_code = "allow"

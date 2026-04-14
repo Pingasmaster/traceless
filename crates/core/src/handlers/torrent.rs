@@ -125,8 +125,8 @@ impl FormatHandler for TorrentHandler {
 pub enum BencodeValue {
     Int(i64),
     Bytes(Vec<u8>),
-    List(Vec<BencodeValue>),
-    Dict(BTreeMap<Vec<u8>, BencodeValue>),
+    List(Vec<Self>),
+    Dict(BTreeMap<Vec<u8>, Self>),
 }
 
 impl BencodeValue {

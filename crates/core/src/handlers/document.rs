@@ -165,9 +165,18 @@ impl FormatHandler for DocumentHandler {
         }
 
         // --- Collect members, sorted, mimetype first (ODF/EPUB) ------------
-        let mut names: Vec<String> = (0..archive.len())
-            .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
-            .collect();
+        // Error out on any header-parse failure instead of quietly dropping
+        // the entry via `filter_map`; a half-cleaned DOCX / ODT / EPUB that
+        // loses a member without telling the user would ship a structurally
+        // incomplete document.
+        let mut names: Vec<String> = Vec::with_capacity(archive.len());
+        for i in 0..archive.len() {
+            let entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!("bad zip entry at index {i}: {e}"),
+            })?;
+            names.push(entry.name().to_string());
+        }
         // First sort lexicographically to kill any producer-order fingerprint.
         names.sort();
         // Then move the special `mimetype` entry to the front — it must

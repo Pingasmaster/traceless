@@ -310,11 +310,23 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
     })?;
 
     // Gather entry names and sort lexicographically (kills member-
-    // order fingerprinting).
-    let mut names: Vec<String> = (0..archive.len())
-        .filter_map(|i| archive.by_index(i).ok().map(|e| e.name().to_string()))
-        .collect();
+    // order fingerprinting). Surface any header-parse failure as a
+    // `CleanError` rather than silently dropping the entry - a
+    // `filter_map` over `by_index(...).ok()` would otherwise ship a
+    // structurally incomplete cleaned archive without telling the user.
+    let mut names: Vec<String> = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("bad zip entry at index {i}: {e}"),
+        })?;
+        names.push(entry.name().to_string());
+    }
     names.sort();
+    // Duplicate-named zip entries would otherwise route every lookup to
+    // the first occurrence, so the cleaned output would write that member
+    // twice and silently drop its twin.
+    names.dedup();
 
     let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
         path: path.to_path_buf(),
@@ -545,22 +557,41 @@ impl CleanedTarEntry {
     }
 }
 
+/// Upper bound on the size of a decompressed tar archive the cleaner
+/// will accept. A crafted `.tar.gz` / `.tar.bz2` / `.tar.xz` compression
+/// bomb could balloon from a few KB into many GiB and OOM the process,
+/// so cap the eager `read_to_end` at a value that is still comfortable
+/// for legitimate archives (CI artefacts, source tarballs) but refuses
+/// gibibyte-scale payloads. If a real use case needs larger, the
+/// streaming TAR pipeline noted in `CLAUDE.md` is the real fix.
+const MAX_TAR_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+
 // F1 preserves symlinks as their own enum variant; the writer loop has to
 // branch on regular-vs-symlink to emit the correct `EntryType`, which pushes
 // the top-level body past clippy's 100-line ceiling. Splitting it further
 // just fragments one linear pipeline across four helpers for no real gain.
 #[allow(clippy::too_many_lines)]
 fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), CoreError> {
-    // 1. Decompress into memory. Real-world .tar archives are usually
-    //    tens of MiB at most; if we ever need to support 10+ GiB archives
-    //    this should become a streaming pipeline.
+    // 1. Decompress into memory, bounded by `MAX_TAR_DECOMPRESSED_BYTES`
+    //    to defeat compression bombs. We read one extra byte so we can
+    //    tell "exactly at the cap" from "would have exceeded it".
     let mut decompressed = Vec::new();
-    open_tar(path, fmt)?.read_to_end(&mut decompressed).map_err(|e| {
-        CoreError::ReadError {
+    open_tar(path, fmt)?
+        .take(MAX_TAR_DECOMPRESSED_BYTES + 1)
+        .read_to_end(&mut decompressed)
+        .map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
-        }
-    })?;
+        })?;
+    if decompressed.len() as u64 > MAX_TAR_DECOMPRESSED_BYTES {
+        return Err(CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!(
+                "tar archive exceeds the {MAX_TAR_DECOMPRESSED_BYTES}-byte \
+                 decompression cap; refusing to clean (likely a compression bomb)"
+            ),
+        });
+    }
 
     // 2. Enumerate and clean each entry in-memory.
     let tmpdir = tempfile::tempdir().map_err(|e| CoreError::CleanError {

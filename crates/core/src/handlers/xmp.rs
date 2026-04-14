@@ -262,7 +262,7 @@ fn parse_iim_stream(bytes: &[u8]) -> Vec<MetadataItem> {
 /// The IIM record-2 datasets that are user-visible leaks. mat2 uses
 /// exiftool to parse these; we hardcode the common ones. Full list at
 /// <https://www.iptc.org/std/photometadata/documentation/userguide/>.
-fn iim_record2_name(dataset: u8) -> Option<&'static str> {
+const fn iim_record2_name(dataset: u8) -> Option<&'static str> {
     Some(match dataset {
         5 => "Object Name",
         10 => "Urgency",
