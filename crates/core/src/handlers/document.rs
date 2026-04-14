@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read, Write};
 use std::path::Path;
@@ -189,6 +190,19 @@ impl FormatHandler for DocumentHandler {
             names.insert(0, m);
         }
 
+        // Pre-compute the set of parts that survive `should_omit`. OOXML's
+        // `[Content_Types].xml` and every `.rels` file reference these by
+        // name, so we need the kept-set up-front to rewrite those
+        // manifests and drop dangling references to parts we deleted.
+        // Without this pass, a cleaned DOCX carries an `<Override>` for
+        // (say) `word/theme/theme1.xml` even though the part is gone,
+        // which strict consumers like python-docx reject as malformed.
+        let kept_parts: HashSet<String> = names
+            .iter()
+            .filter(|n| !should_omit(kind, n))
+            .cloned()
+            .collect();
+
         let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to create output: {e}"),
@@ -240,11 +254,12 @@ impl FormatHandler for DocumentHandler {
                 (buf, compression)
             };
 
-            let cleaned_bytes =
-                clean_entry(kind, entry_name, raw_bytes).map_err(|e| CoreError::CleanError {
+            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(
+                |e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("Failed to clean entry {entry_name}: {e}"),
-                })?;
+                },
+            )?;
 
             let options = zip_util::normalized_options(compression);
             writer
@@ -363,10 +378,15 @@ impl std::fmt::Display for CleanEntryError {
 /// Clean a single archive member. Dispatches on file extension and
 /// archive kind to decide whether to replace the bytes entirely, deep-
 /// clean the XML, strip EXIF from an embedded image, or leave as-is.
+///
+/// `kept_parts` is only consulted for OOXML: `[Content_Types].xml` and
+/// `.rels` files are rewritten to drop references to any zip member
+/// that isn't in the set. It is unused for ODF / EPUB / Generic.
 fn clean_entry(
     kind: ArchiveKind,
     entry_name: &str,
     raw: Vec<u8>,
+    kept_parts: &HashSet<String>,
 ) -> Result<Vec<u8>, CleanEntryError> {
     // 1. Embedded raster images: strip EXIF/XMP/ICC unconditionally,
     //    regardless of archive family. If the image can't be parsed we
@@ -411,7 +431,25 @@ fn clean_entry(
     };
 
     let cleaned: String = match kind {
-        ArchiveKind::Ooxml => ooxml::clean_xml_member(entry_name, xml),
+        ArchiveKind::Ooxml => {
+            // `clean_xml_member` runs the rsid / nsid / revisions /
+            // attribute-order / mc:Ignorable passes. For
+            // `[Content_Types].xml` and every `.rels` file we then run a
+            // second pass that drops Override / Relationship entries
+            // pointing at parts we deleted via `should_omit` - otherwise
+            // the output package manifest references parts that no
+            // longer exist in the zip, and strict consumers (python-docx)
+            // reject it. Do NOT "simplify" this by dropping the second
+            // pass; see CLAUDE.md.
+            let base = ooxml::clean_xml_member(entry_name, xml);
+            if entry_name == "[Content_Types].xml" {
+                ooxml::rewrite_content_types(&base, kept_parts)
+            } else if entry_name.ends_with(".rels") {
+                ooxml::rewrite_rels(&base, entry_name, kept_parts)
+            } else {
+                base
+            }
+        }
         ArchiveKind::Odf => odf::clean_xml_member(entry_name, xml),
         ArchiveKind::Epub => {
             if epub::is_opf_path(entry_name) {

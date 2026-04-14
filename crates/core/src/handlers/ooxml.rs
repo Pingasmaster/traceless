@@ -21,6 +21,8 @@ use quick_xml::events::{BytesStart, Event};
 use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use rand::{Rng, RngExt};
+use std::collections::HashSet;
+use std::hash::BuildHasher;
 use std::io::Cursor;
 
 use super::xml_util::{local_name, sort_xml_attributes};
@@ -411,6 +413,204 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .position(|window| window == needle)
 }
 
+/// Rewrite `[Content_Types].xml` to drop every `<Override PartName="/X"/>`
+/// whose target `X` is not in the `kept_parts` set.
+///
+/// This pass is critical because `is_office_junk_path` deletes parts like
+/// `word/theme/theme1.xml`, `word/numbering.xml`, `word/webSettings.xml`
+/// and `customXml/*` without rewriting the package manifest. A DOCX whose
+/// `[Content_Types].xml` points at parts that are no longer in the zip is
+/// malformed per ECMA-376. Word and LibreOffice are lenient and auto-
+/// repair, but strict consumers (python-docx, for example) reject it.
+///
+/// `Default Extension="..."` entries are content-type wildcards and are
+/// preserved unchanged. Only explicit `Override` entries are filtered.
+#[must_use]
+pub fn rewrite_content_types<S: BuildHasher>(
+    xml: &str,
+    kept_parts: &HashSet<String, S>,
+) -> String {
+    let mut reader = Reader::from_str(xml);
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(ref e)) if local_name(e) == "Override" => {
+                if !override_part_name_is_dropped(e, kept_parts)
+                    && writer.write_event(Event::Empty(e.clone())).is_err()
+                {
+                    return xml.to_string();
+                }
+            }
+            Ok(Event::Start(ref e)) if local_name(e) == "Override" => {
+                // Paired `<Override ...></Override>` - read to the matching
+                // end so nested text (shouldn't happen in practice) and the
+                // close tag are swallowed with the element if we're dropping
+                // it.
+                let end_name = e.to_end().into_owned();
+                let drop = override_part_name_is_dropped(e, kept_parts);
+                if drop {
+                    let _ = reader.read_to_end(end_name.name());
+                } else if writer.write_event(Event::Start(e.clone())).is_err() {
+                    return xml.to_string();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(other) => {
+                if writer.write_event(other).is_err() {
+                    return xml.to_string();
+                }
+            }
+            Err(_) => return xml.to_string(),
+        }
+    }
+
+    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+}
+
+/// Return `true` if an `<Override>` element should be removed because its
+/// `PartName` points at a part that isn't in `kept_parts`. An Override
+/// without a `PartName` attribute is left alone (malformed input; we
+/// don't silently drop it).
+fn override_part_name_is_dropped<S: BuildHasher>(
+    e: &BytesStart<'_>,
+    kept: &HashSet<String, S>,
+) -> bool {
+    for attr in e.attributes().filter_map(Result::ok) {
+        if attr.key.as_ref() == b"PartName" {
+            let raw = String::from_utf8_lossy(&attr.value).into_owned();
+            let normalized = raw.trim_start_matches('/').to_string();
+            return !kept.contains(&normalized);
+        }
+    }
+    false
+}
+
+/// Rewrite a `.rels` file to drop every `<Relationship Target="Y"/>`
+/// whose resolved target is not in the `kept_parts` set.
+///
+/// `rels_path` is the package-relative path of the `.rels` file itself
+/// (e.g. `word/_rels/document.xml.rels`), which anchors the resolution
+/// of relative `Target` attributes. External relationships
+/// (`TargetMode="External"`) point at URLs, not package parts, and are
+/// preserved unconditionally.
+#[must_use]
+pub fn rewrite_rels<S: BuildHasher>(
+    xml: &str,
+    rels_path: &str,
+    kept_parts: &HashSet<String, S>,
+) -> String {
+    let base = rels_base_for(rels_path);
+    let mut reader = Reader::from_str(xml);
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Empty(ref e)) if local_name(e) == "Relationship" => {
+                if !relationship_target_is_dropped(e, &base, kept_parts)
+                    && writer.write_event(Event::Empty(e.clone())).is_err()
+                {
+                    return xml.to_string();
+                }
+            }
+            Ok(Event::Start(ref e)) if local_name(e) == "Relationship" => {
+                let end_name = e.to_end().into_owned();
+                let drop = relationship_target_is_dropped(e, &base, kept_parts);
+                if drop {
+                    let _ = reader.read_to_end(end_name.name());
+                } else if writer.write_event(Event::Start(e.clone())).is_err() {
+                    return xml.to_string();
+                }
+            }
+            Ok(Event::Eof) => break,
+            Ok(other) => {
+                if writer.write_event(other).is_err() {
+                    return xml.to_string();
+                }
+            }
+            Err(_) => return xml.to_string(),
+        }
+    }
+
+    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+}
+
+fn relationship_target_is_dropped<S: BuildHasher>(
+    e: &BytesStart<'_>,
+    base: &str,
+    kept: &HashSet<String, S>,
+) -> bool {
+    let mut target: Option<String> = None;
+    let mut is_external = false;
+    for attr in e.attributes().filter_map(Result::ok) {
+        match attr.key.as_ref() {
+            b"Target" => {
+                target = Some(String::from_utf8_lossy(&attr.value).into_owned());
+            }
+            b"TargetMode" => {
+                if attr.value.as_ref() == b"External" {
+                    is_external = true;
+                }
+            }
+            _ => {}
+        }
+    }
+    if is_external {
+        return false;
+    }
+    let Some(t) = target else {
+        return false; // malformed, leave alone
+    };
+    let resolved = resolve_rels_target(base, &t);
+    !kept.contains(&resolved)
+}
+
+/// Compute the package-root-relative directory that a `.rels` file's
+/// `Target` attributes are resolved against.
+///
+/// `_rels/.rels` -> `""` (package root)
+/// `word/_rels/document.xml.rels` -> `"word/"`
+/// `ppt/slides/_rels/slide1.xml.rels` -> `"ppt/slides/"`
+fn rels_base_for(rels_path: &str) -> String {
+    // Strip the trailing `_rels/<file>.rels` segment. In every legal
+    // OOXML path the `.rels` file lives in a `_rels/` directory whose
+    // parent is the logical owner.
+    if let Some(idx) = rels_path.rfind("_rels/") {
+        rels_path[..idx].to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Resolve a `Relationship/@Target` value against the `.rels` file's base
+/// directory, returning the package-root-relative path with `.` / `..`
+/// segments collapsed and no leading slash.
+fn resolve_rels_target(base: &str, target: &str) -> String {
+    let joined = if let Some(abs) = target.strip_prefix('/') {
+        abs.to_string()
+    } else {
+        format!("{base}{target}")
+    };
+    normalize_path(&joined)
+}
+
+/// Collapse `.` and `..` segments in a forward-slash-separated path.
+/// A `..` at the root is treated as a no-op (package paths never escape
+/// the archive root).
+fn normalize_path(path: &str) -> String {
+    let mut out: Vec<&str> = Vec::new();
+    for segment in path.split('/') {
+        match segment {
+            "" | "." => {}
+            ".." => {
+                out.pop();
+            }
+            other => out.push(other),
+        }
+    }
+    out.join("/")
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -496,5 +696,178 @@ mod tests {
         assert!(!out.contains("commentRange"));
         assert!(!out.contains("commentReference"));
         assert!(out.contains("body"));
+    }
+
+    fn kept_set(entries: &[&str]) -> HashSet<String> {
+        entries.iter().map(|s| (*s).to_string()).collect()
+    }
+
+    #[test]
+    fn rewrite_content_types_drops_dangling_overrides() {
+        let kept = kept_set(&[
+            "word/document.xml",
+            "word/styles.xml",
+            "docProps/core.xml",
+            "docProps/app.xml",
+            "[Content_Types].xml",
+            "_rels/.rels",
+            "word/_rels/document.xml.rels",
+        ]);
+        let xml = concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+            r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+            r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+            r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+            r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#,
+            r#"<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#,
+            r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#,
+            r#"<Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/>"#,
+            r#"<Override PartName="/customXml/item1.xml" ContentType="application/xml"/>"#,
+            r#"<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>"#,
+            r#"<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#,
+            r#"</Types>"#,
+        );
+        let out = rewrite_content_types(xml, &kept);
+
+        // Kept parts survive.
+        assert!(out.contains(r#"PartName="/word/document.xml""#), "{out}");
+        assert!(out.contains(r#"PartName="/word/styles.xml""#), "{out}");
+        assert!(out.contains(r#"PartName="/docProps/core.xml""#), "{out}");
+        assert!(out.contains(r#"PartName="/docProps/app.xml""#), "{out}");
+
+        // Default wildcards unchanged.
+        assert!(out.contains(r#"Default Extension="rels""#), "{out}");
+        assert!(out.contains(r#"Default Extension="xml""#), "{out}");
+
+        // Dropped parts are gone.
+        assert!(!out.contains("theme1.xml"), "theme1 override leaked: {out}");
+        assert!(
+            !out.contains("numbering.xml"),
+            "numbering override leaked: {out}"
+        );
+        assert!(
+            !out.contains("webSettings.xml"),
+            "webSettings override leaked: {out}"
+        );
+        assert!(
+            !out.contains("customXml/item1.xml"),
+            "customXml override leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_rels_drops_dangling_relationships() {
+        let kept = kept_set(&[
+            "word/document.xml",
+            "word/styles.xml",
+            "word/_rels/document.xml.rels",
+        ]);
+        let xml = concat!(
+            r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type=".../styles" Target="styles.xml"/>"#,
+            r#"<Relationship Id="rId2" Type=".../theme" Target="theme/theme1.xml"/>"#,
+            r#"<Relationship Id="rId3" Type=".../numbering" Target="numbering.xml"/>"#,
+            r#"<Relationship Id="rId4" Type=".../webSettings" Target="webSettings.xml"/>"#,
+            r#"<Relationship Id="rId5" Type=".../hyperlink" Target="http://example.com" TargetMode="External"/>"#,
+            r#"</Relationships>"#,
+        );
+        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept);
+
+        assert!(out.contains(r#"Target="styles.xml""#), "{out}");
+        assert!(
+            out.contains(r#"Target="http://example.com""#),
+            "external URL relationship dropped: {out}"
+        );
+        assert!(
+            !out.contains(r#"Target="theme/theme1.xml""#),
+            "theme rel leaked: {out}"
+        );
+        assert!(
+            !out.contains(r#"Target="numbering.xml""#),
+            "numbering rel leaked: {out}"
+        );
+        assert!(
+            !out.contains(r#"Target="webSettings.xml""#),
+            "webSettings rel leaked: {out}"
+        );
+    }
+
+    #[test]
+    fn rewrite_rels_resolves_absolute_target() {
+        // A `Target` with a leading slash resolves against the package
+        // root, not against the .rels file's base directory.
+        let kept = kept_set(&["word/document.xml"]);
+        let xml = concat!(
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type="x" Target="/word/document.xml"/>"#,
+            r#"<Relationship Id="rId2" Type="x" Target="/word/theme/theme1.xml"/>"#,
+            r#"</Relationships>"#,
+        );
+        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept);
+        assert!(out.contains(r#"Target="/word/document.xml""#), "{out}");
+        assert!(!out.contains("theme1.xml"), "{out}");
+    }
+
+    #[test]
+    fn resolve_rels_target_handles_relative_absolute_and_dot_dot() {
+        // Package root .rels
+        assert_eq!(
+            resolve_rels_target("", "word/document.xml"),
+            "word/document.xml"
+        );
+        // word/_rels/document.xml.rels with relative target
+        assert_eq!(
+            resolve_rels_target("word/", "theme/theme1.xml"),
+            "word/theme/theme1.xml"
+        );
+        // Absolute target (leading slash)
+        assert_eq!(
+            resolve_rels_target("word/", "/docProps/core.xml"),
+            "docProps/core.xml"
+        );
+        // Parent-dir traversal: `word/../word/styles.xml` -> `word/styles.xml`
+        assert_eq!(
+            resolve_rels_target("word/", "../word/styles.xml"),
+            "word/styles.xml"
+        );
+        // Current-dir `.` is a no-op
+        assert_eq!(
+            resolve_rels_target("word/", "./styles.xml"),
+            "word/styles.xml"
+        );
+    }
+
+    #[test]
+    fn rels_base_for_extracts_parent_directory() {
+        assert_eq!(rels_base_for("_rels/.rels"), "");
+        assert_eq!(rels_base_for("word/_rels/document.xml.rels"), "word/");
+        assert_eq!(
+            rels_base_for("ppt/slides/_rels/slide1.xml.rels"),
+            "ppt/slides/"
+        );
+    }
+
+    #[test]
+    fn override_drop_predicate_strips_leading_slash() {
+        let kept = kept_set(&["word/document.xml"]);
+        let keep_elem = BytesStart::from_content(
+            r#"Override PartName="/word/document.xml" ContentType="x""#,
+            "Override".len(),
+        );
+        assert!(!override_part_name_is_dropped(&keep_elem, &kept));
+
+        let drop_elem = BytesStart::from_content(
+            r#"Override PartName="/word/theme/theme1.xml" ContentType="x""#,
+            "Override".len(),
+        );
+        assert!(override_part_name_is_dropped(&drop_elem, &kept));
+
+        let missing_attr = BytesStart::from_content("Override", "Override".len());
+        assert!(
+            !override_part_name_is_dropped(&missing_attr, &kept),
+            "malformed Override without PartName should be left alone"
+        );
     }
 }

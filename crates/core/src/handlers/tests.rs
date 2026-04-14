@@ -663,6 +663,258 @@ fn test_docx_deep_clean_strips_rsid_revisions_and_junk() {
     );
 }
 
+/// Build a DOCX whose `[Content_Types].xml` and `word/_rels/document.xml.rels`
+/// carry realistic Override / Relationship entries for parts that the OOXML
+/// drop list (`zip_util::is_office_junk_path`) removes: theme, numbering,
+/// webSettings, customXml. Matches what LibreOffice and Word produce in the
+/// wild, so the post-clean package manifest must stay consistent with the
+/// actual parts in the zip.
+fn build_docx_with_realistic_manifest(path: &std::path::Path) {
+    let file = fs::File::create(path).unwrap();
+    let mut writer = zip::ZipWriter::new(file);
+    let options = zip::write::SimpleFileOptions::default();
+
+    writer.start_file("[Content_Types].xml", options).unwrap();
+    writer.write_all(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+        r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+        r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+        r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+        r#"<Override PartName="/word/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.styles+xml"/>"#,
+        r#"<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#,
+        r#"<Override PartName="/word/numbering.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.numbering+xml"/>"#,
+        r#"<Override PartName="/word/webSettings.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.webSettings+xml"/>"#,
+        r#"<Override PartName="/customXml/item1.xml" ContentType="application/xml"/>"#,
+        r#"<Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>"#,
+        r#"<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#,
+        r#"</Types>"#,
+    ).as_bytes()).unwrap();
+
+    writer.start_file("_rels/.rels", options).unwrap();
+    writer.write_all(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>"#,
+        r#"</Relationships>"#,
+    ).as_bytes()).unwrap();
+
+    writer.start_file("word/_rels/document.xml.rels", options).unwrap();
+    writer.write_all(concat!(
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
+        r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+        r#"<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/>"#,
+        r#"<Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/theme" Target="theme/theme1.xml"/>"#,
+        r#"<Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/numbering" Target="numbering.xml"/>"#,
+        r#"<Relationship Id="rId4" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/webSettings" Target="webSettings.xml"/>"#,
+        r#"<Relationship Id="rId5" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/hyperlink" Target="https://example.com/" TargetMode="External"/>"#,
+        r#"</Relationships>"#,
+    ).as_bytes()).unwrap();
+
+    writer.start_file("docProps/core.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"/>"#).unwrap();
+
+    writer.start_file("docProps/app.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties"/>"#).unwrap();
+
+    writer.start_file("word/document.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body><w:p><w:r><w:t>hello</w:t></w:r></w:p></w:body></w:document>"#).unwrap();
+
+    writer.start_file("word/styles.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><w:styles xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"/>"#).unwrap();
+
+    // The parts the cleaner drops. Contents are irrelevant; only their
+    // presence in the zip matters for the pre-clean manifest shape.
+    writer
+        .start_file("word/theme/theme1.xml", options)
+        .unwrap();
+    writer.write_all(b"<theme/>").unwrap();
+
+    writer.start_file("word/numbering.xml", options).unwrap();
+    writer.write_all(b"<numbering/>").unwrap();
+
+    writer.start_file("word/webSettings.xml", options).unwrap();
+    writer.write_all(b"<webSettings/>").unwrap();
+
+    writer.start_file("customXml/item1.xml", options).unwrap();
+    writer.write_all(b"<item/>").unwrap();
+
+    writer.finish().unwrap();
+}
+
+#[test]
+fn docx_clean_rewrites_content_types_to_drop_dangling_overrides() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+    build_docx_with_realistic_manifest(&path);
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    let content_types =
+        String::from_utf8(read_entry(&output, "[Content_Types].xml").unwrap()).unwrap();
+
+    // Kept parts still have Override entries.
+    assert!(
+        content_types.contains(r#"PartName="/word/document.xml""#),
+        "document.xml override missing: {content_types}"
+    );
+    assert!(
+        content_types.contains(r#"PartName="/word/styles.xml""#),
+        "styles.xml override missing: {content_types}"
+    );
+    assert!(
+        content_types.contains(r#"PartName="/docProps/core.xml""#),
+        "core.xml override missing: {content_types}"
+    );
+    assert!(
+        content_types.contains(r#"PartName="/docProps/app.xml""#),
+        "app.xml override missing: {content_types}"
+    );
+
+    // Default wildcards pass through unchanged.
+    assert!(
+        content_types.contains(r#"Extension="rels""#),
+        "Default Extension=\"rels\" lost: {content_types}"
+    );
+    assert!(
+        content_types.contains(r#"Extension="xml""#),
+        "Default Extension=\"xml\" lost: {content_types}"
+    );
+
+    // Dropped parts have no dangling Override entries.
+    assert!(
+        !content_types.contains("theme/theme1.xml"),
+        "theme override leaked: {content_types}"
+    );
+    assert!(
+        !content_types.contains(r#"PartName="/word/numbering.xml""#),
+        "numbering override leaked: {content_types}"
+    );
+    assert!(
+        !content_types.contains("webSettings.xml"),
+        "webSettings override leaked: {content_types}"
+    );
+    assert!(
+        !content_types.contains("customXml/item1.xml"),
+        "customXml override leaked: {content_types}"
+    );
+}
+
+#[test]
+fn docx_clean_rewrites_rels_to_drop_dangling_relationships() {
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+    build_docx_with_realistic_manifest(&path);
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    let rels =
+        String::from_utf8(read_entry(&output, "word/_rels/document.xml.rels").unwrap()).unwrap();
+
+    // The styles relationship points at a kept part and survives.
+    assert!(
+        rels.contains(r#"Target="styles.xml""#),
+        "styles relationship lost: {rels}"
+    );
+    // External http/https relationship survives unconditionally.
+    assert!(
+        rels.contains("https://example.com/"),
+        "external relationship lost: {rels}"
+    );
+    // Dangling relationships to dropped parts are gone.
+    assert!(
+        !rels.contains("theme/theme1.xml"),
+        "theme relationship leaked: {rels}"
+    );
+    assert!(
+        !rels.contains(r#"Target="numbering.xml""#),
+        "numbering relationship leaked: {rels}"
+    );
+    assert!(
+        !rels.contains(r#"Target="webSettings.xml""#),
+        "webSettings relationship leaked: {rels}"
+    );
+
+    // The top-level `_rels/.rels` pointed only at parts that survive,
+    // so every entry there must still be present.
+    let top_rels = String::from_utf8(read_entry(&output, "_rels/.rels").unwrap()).unwrap();
+    assert!(top_rels.contains(r#"Target="word/document.xml""#));
+    assert!(top_rels.contains(r#"Target="docProps/core.xml""#));
+    assert!(top_rels.contains(r#"Target="docProps/app.xml""#));
+}
+
+#[test]
+fn docx_clean_rels_handles_absolute_targets() {
+    // ECMA-376 permits a Relationship/@Target with a leading slash, meaning
+    // the target resolves against the package root rather than the .rels
+    // file's parent directory. `rewrite_rels` must handle that case so a
+    // DOCX authored with absolute targets still gets its dangling
+    // relationships cleaned up.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("doc.docx");
+    let output = dir.path().join("cleaned.docx");
+
+    {
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer.write_all(concat!(
+            r#"<?xml version="1.0"?>"#,
+            r#"<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">"#,
+            r#"<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>"#,
+            r#"<Default Extension="xml" ContentType="application/xml"/>"#,
+            r#"<Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>"#,
+            r#"<Override PartName="/word/theme/theme1.xml" ContentType="application/vnd.openxmlformats-officedocument.theme+xml"/>"#,
+            r#"</Types>"#,
+        ).as_bytes()).unwrap();
+
+        writer.start_file("_rels/.rels", options).unwrap();
+        writer.write_all(concat!(
+            r#"<?xml version="1.0"?>"#,
+            r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
+            r#"<Relationship Id="rId1" Type="x" Target="/word/document.xml"/>"#,
+            r#"<Relationship Id="rId2" Type="x" Target="/word/theme/theme1.xml"/>"#,
+            r#"</Relationships>"#,
+        ).as_bytes()).unwrap();
+
+        writer.start_file("word/document.xml", options).unwrap();
+        writer.write_all(br#"<?xml version="1.0"?><w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main"><w:body/></w:document>"#).unwrap();
+
+        writer.start_file("word/theme/theme1.xml", options).unwrap();
+        writer.write_all(b"<theme/>").unwrap();
+
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    let top_rels = String::from_utf8(read_entry(&output, "_rels/.rels").unwrap()).unwrap();
+    assert!(
+        top_rels.contains(r#"Target="/word/document.xml""#),
+        "kept absolute-target relationship lost: {top_rels}"
+    );
+    assert!(
+        !top_rels.contains("theme1.xml"),
+        "dropped absolute-target relationship leaked: {top_rels}"
+    );
+
+    let content_types =
+        String::from_utf8(read_entry(&output, "[Content_Types].xml").unwrap()).unwrap();
+    assert!(
+        !content_types.contains("theme1.xml"),
+        "theme Override leaked: {content_types}"
+    );
+}
+
 #[test]
 fn test_docx_embedded_jpeg_exif_is_stripped() {
     // Create a dirty JPEG on disk, embed it, clean the DOCX, verify the
