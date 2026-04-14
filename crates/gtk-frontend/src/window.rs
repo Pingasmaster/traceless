@@ -10,7 +10,7 @@ use crate::details_view::DetailsView;
 use crate::dialogs;
 use crate::empty_view;
 use crate::files_view::FilesView;
-use traceless_core::{FileStore, FileStoreEvent};
+use traceless_core::{FileId, FileStore, FileStoreEvent};
 
 pub struct Window;
 
@@ -32,6 +32,14 @@ impl Window {
         let store = Rc::new(RefCell::new(FileStore::new()));
         let tx: Rc<RefCell<Option<Sender<FileStoreEvent>>>> =
             Rc::new(RefCell::new(None));
+        // `FileId` of the file currently being rendered in the details
+        // drawer, or `None` when the drawer is hidden. Used by the
+        // worker-thread event pump to auto-refresh the drawer when the
+        // affected row matches the one the user is looking at, and by
+        // `on_remove` / `on_details` / `clear-files` to keep the
+        // tracker in sync with the drawer's visible state. Mirrors the
+        // Qt Bug 8 fix from round 5.
+        let current_detail: Rc<RefCell<Option<FileId>>> = Rc::new(RefCell::new(None));
 
         // --- Layout ---
 
@@ -109,8 +117,12 @@ impl Window {
         split.set_min_sidebar_width(320.0);
 
         let split_for_back = split.clone();
+        let current_detail_for_back = current_detail.clone();
         let details_view = Rc::new(DetailsView::new(move || {
             split_for_back.set_show_sidebar(false);
+            // Clear the tracker so subsequent background events don't
+            // try to refresh a drawer the user just closed.
+            *current_detail_for_back.borrow_mut() = None;
         }));
         split.set_sidebar(Some(&details_view.widget));
 
@@ -138,23 +150,43 @@ impl Window {
                 let files_view = files_view.clone();
                 let view_stack = view_stack.clone();
                 let split = split.clone();
+                let current_detail = current_detail.clone();
                 move |idx: usize| {
+                    // Capture the FileId before removing so we can
+                    // tell whether the drawer-tracked file is the one
+                    // being removed. We must read it first: after
+                    // `remove_file(idx)` the entry is gone.
+                    let removed_id = store.borrow().get(idx).map(|e| e.id);
                     store.borrow_mut().remove_file(idx);
                     let s = store.borrow();
                     files_view.remove_row(&s, idx);
+
+                    // If the removed file was the one being rendered
+                    // in the details drawer, clear the tracker and
+                    // hide the sidebar. Otherwise leave both alone.
+                    if let Some(removed) = removed_id
+                        && *current_detail.borrow() == Some(removed)
+                    {
+                        *current_detail.borrow_mut() = None;
+                        split.set_show_sidebar(false);
+                    }
+
                     if s.is_empty() {
                         view_stack.set_visible_child_name("empty");
                         split.set_show_sidebar(false);
+                        *current_detail.borrow_mut() = None;
                     }
                 }
             };
             let on_details = {
                 let store = store.clone();
-                let dv = details_view;
+                let dv = details_view.clone();
                 let split = split.clone();
+                let current_detail = current_detail.clone();
                 move |idx: usize| {
                     let s = store.borrow();
                     if let Some(entry) = s.get(idx) {
+                        *current_detail.borrow_mut() = Some(entry.id);
                         dv.show_file(entry);
                         split.set_show_sidebar(true);
                     }
@@ -167,6 +199,7 @@ impl Window {
         {
             let store = store.clone();
             let files_view = files_view.clone();
+            let current_detail = current_detail.clone();
 
             bridge::install_event_pump(event_rx, move |event| {
                 // `apply_event` resolves the stable FileId to a row index
@@ -176,6 +209,19 @@ impl Window {
                 let s = store.borrow();
                 if let Some(idx) = affected {
                     files_view.update_row(&s, idx);
+
+                    // Round-7 Bug 16: if the updated row is the file
+                    // currently rendered in the details drawer, rebuild
+                    // the drawer from the fresh entry. Matches the Qt
+                    // Bug 8 fix. Without this the user sees "No
+                    // metadata found" on a file that has since finished
+                    // scanning and would have to re-click Details to
+                    // see the real state.
+                    if let Some(entry) = s.get(idx)
+                        && *current_detail.borrow() == Some(entry.id)
+                    {
+                        details_view.show_file(entry);
+                    }
                 }
 
                 // Status bar update
@@ -340,6 +386,9 @@ impl Window {
                 files_view.clear_rows();
                 view_stack.set_visible_child_name("empty");
                 split.set_show_sidebar(false);
+                // Drop the detail tracker too: the file it pointed at
+                // is gone along with the rest of the store.
+                *current_detail.borrow_mut() = None;
             });
         }
         window.add_action(&clear_action);

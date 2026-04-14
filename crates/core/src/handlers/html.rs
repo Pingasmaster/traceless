@@ -214,18 +214,25 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
 
         i += 1; // consume `>`
 
-        // `<script>` and `<style>` are HTML "raw text" elements: their
-        // content is consumed verbatim until the matching closing tag,
-        // and `<`, `<!--`, etc. inside the body are NOT tags. Without
-        // this branch the generic tokenizer re-parses JavaScript string
-        // literals as HTML, and the cleaner then drops fake `<meta>` /
-        // `<!-- -->` / `<title>` spans out of the script body, producing
-        // broken JS.
+        // `<script>`, `<style>`, and `<textarea>` are HTML raw-text /
+        // escapable-raw-text elements per HTML5 §12.2.5: their content
+        // is consumed verbatim until the matching closing tag, and
+        // `<`, `<!--`, etc. inside the body are NOT tags. Without this
+        // branch the generic tokenizer re-parses JavaScript / CSS /
+        // textarea string bytes as HTML, and the cleaner then drops
+        // fake `<meta>` / `<!-- -->` / `<title>` spans out of the
+        // body, producing broken output. `<title>` is also escapable
+        // raw text per spec but its current `title_depth` path in
+        // `clean_html` already produces the mat2-parity "blank the
+        // title body" behaviour, so we deliberately leave it alone
+        // and don't add a fourth arm here.
         let rawtext_needle: Option<&[u8]> =
             if !self_closing && local_name == "script" {
                 Some(b"script")
             } else if !self_closing && local_name == "style" {
                 Some(b"style")
+            } else if !self_closing && local_name == "textarea" {
+                Some(b"textarea")
             } else {
                 None
             };
@@ -731,5 +738,76 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
             out.contains("</style"),
             "partial close at EOF must round-trip verbatim, got: {out}"
         );
+    }
+
+    #[test]
+    fn html_clean_preserves_textarea_literal_meta_and_comment() {
+        // Round-7 Bug 15: `<textarea>` is "escapable raw text" per
+        // HTML5 §12.2.5, so embedded `<meta>` / `<!--...-->` must
+        // round-trip verbatim. Before the fix the tokenizer parsed
+        // them as real HTML tags and `clean_html` dropped the meta
+        // and the comment, corrupting the user's textarea content.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        let input = r#"<html><body><form><textarea>Report draft:
+<meta name="author" content="example">
+<!-- TODO: review -->
+End of draft.</textarea></form></body></html>"#;
+        fs::write(&src, input).unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains(r#"<meta name="author" content="example">"#),
+            "textarea literal meta must round-trip verbatim, got: {out}"
+        );
+        assert!(
+            out.contains("<!-- TODO: review -->"),
+            "textarea literal comment must round-trip verbatim, got: {out}"
+        );
+        assert!(out.contains("Report draft:"));
+        assert!(out.contains("End of draft."));
+        assert!(out.contains("</textarea>"));
+    }
+
+    #[test]
+    fn html_clean_drops_real_meta_outside_textarea() {
+        // Negative control for the fix above: a real `<meta>` in
+        // `<head>` (outside any textarea) must still be dropped.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        let input = r#"<html><head><meta name="author" content="real-author"></head><body><textarea><meta name="fake" content="kept"></textarea></body></html>"#;
+        fs::write(&src, input).unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            !out.contains("real-author"),
+            "real head <meta> must be stripped, got: {out}"
+        );
+        assert!(
+            out.contains(r#"<meta name="fake" content="kept">"#),
+            "textarea literal meta must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn html_clean_textarea_case_insensitive_close() {
+        // The rawtext scanner must match `</TEXTAREA>` in any case.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(
+            &src,
+            r"<html><body><TEXTAREA>pre <meta> post</TEXTAREA><p>after</p></body></html>",
+        )
+        .unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(out.contains("pre <meta> post"));
+        assert!(out.contains("<p>after</p>"));
     }
 }
