@@ -2548,3 +2548,204 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
         .windows(needle.len())
         .position(|w| w == needle)
 }
+
+// ================================================================
+// §28. UnknownMemberPolicy × ArchiveFormat matrix
+// ================================================================
+//
+// §26 established that Keep / Omit / Abort work for plain ZIP and
+// proved Abort + Omit work for plain TAR. The full cross-product
+// (3 policies × 5 archive formats = 15 combinations) is spelled out
+// here so that a policy regression in, say, the tar.xz path cannot
+// hide behind zip-only coverage. Each test asserts the correct
+// action for a single (policy, format) pair using the shared
+// policy lock from §26.
+
+fn build_tar_like(path: &std::path::Path, fmt: &str) {
+    use std::io::Write as _;
+    use tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
+
+    let tar_bytes = {
+        let mut buf: Vec<u8> = Vec::new();
+        {
+            let mut builder = TarBuilder::new(&mut buf);
+
+            // Known member: a tiny JPEG the image handler routes.
+            let mut known = TarHeader::new_gnu();
+            known.set_path("known.jpg").unwrap();
+            let jpeg = TEST_JPEG.to_vec();
+            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+            known.set_size(jpeg.len() as u64);
+            known.set_mode(0o644);
+            known.set_entry_type(EntryType::Regular);
+            known.set_cksum();
+            builder.append(&known, jpeg.as_slice()).unwrap();
+
+            // Unknown member: extension and MIME neither handler
+            // recognises.
+            let mut unknown = TarHeader::new_gnu();
+            unknown.set_path("mystery.xyz").unwrap();
+            unknown.set_size(4);
+            unknown.set_mode(0o644);
+            unknown.set_entry_type(EntryType::Regular);
+            unknown.set_cksum();
+            builder.append(&unknown, &b"blob"[..]).unwrap();
+
+            builder.into_inner().unwrap();
+        }
+        buf
+    };
+
+    match fmt {
+        "tar" => fs::write(path, &tar_bytes).unwrap(),
+        "tar.gz" => {
+            use flate2::write::GzEncoder;
+            use flate2::Compression;
+            let f = fs::File::create(path).unwrap();
+            let mut enc = GzEncoder::new(f, Compression::default());
+            enc.write_all(&tar_bytes).unwrap();
+            enc.finish().unwrap();
+        }
+        "tar.bz2" => {
+            use bzip2::write::BzEncoder;
+            let f = fs::File::create(path).unwrap();
+            let mut enc = BzEncoder::new(f, bzip2::Compression::default());
+            enc.write_all(&tar_bytes).unwrap();
+            enc.finish().unwrap();
+        }
+        "tar.xz" => {
+            use xz2::write::XzEncoder;
+            let f = fs::File::create(path).unwrap();
+            let mut enc = XzEncoder::new(f, 6);
+            enc.write_all(&tar_bytes).unwrap();
+            enc.finish().unwrap();
+        }
+        other => panic!("unsupported fmt in build_tar_like: {other}"),
+    }
+}
+
+/// Run one cell of the policy × format matrix and assert the
+/// expected outcome. Takes the mime and extension explicitly so the
+/// test function name reveals which cell is being exercised.
+fn run_policy_cell(
+    mime: &str,
+    ext: &str,
+    policy: traceless_core::UnknownMemberPolicy,
+    expect_success: bool,
+) {
+    use traceless_core::PolicyGuard;
+    let _lock = policy_test_lock();
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join(format!("mix.{ext}"));
+    let dst = dir.path().join(format!("out.{ext}"));
+
+    if ext == "zip" {
+        make_zip_with_unknown_member(&src);
+    } else {
+        build_tar_like(&src, ext);
+    }
+
+    let _g = PolicyGuard::new(policy);
+    let handler = get_handler_for_mime(mime).unwrap();
+    let result = handler.clean_metadata(&src, &dst);
+    assert_eq!(
+        result.is_ok(),
+        expect_success,
+        "({mime}, {policy:?}) expected success={expect_success}, got {result:?}",
+    );
+}
+
+#[test]
+fn policy_keep_zip() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/zip", "zip", UnknownMemberPolicy::Keep, true);
+}
+#[test]
+fn policy_omit_zip() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/zip", "zip", UnknownMemberPolicy::Omit, true);
+}
+#[test]
+fn policy_abort_zip() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/zip", "zip", UnknownMemberPolicy::Abort, false);
+}
+
+#[test]
+fn policy_keep_tar() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-tar", "tar", UnknownMemberPolicy::Keep, true);
+}
+#[test]
+fn policy_omit_tar() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-tar", "tar", UnknownMemberPolicy::Omit, true);
+}
+#[test]
+fn policy_abort_tar() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-tar", "tar", UnknownMemberPolicy::Abort, false);
+}
+
+#[test]
+fn policy_keep_targz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Keep, true);
+}
+#[test]
+fn policy_omit_targz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Omit, true);
+}
+#[test]
+fn policy_abort_targz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Abort, false);
+}
+
+#[test]
+fn policy_keep_tarbz2() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell(
+        "application/x-bzip2",
+        "tar.bz2",
+        UnknownMemberPolicy::Keep,
+        true,
+    );
+}
+#[test]
+fn policy_omit_tarbz2() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell(
+        "application/x-bzip2",
+        "tar.bz2",
+        UnknownMemberPolicy::Omit,
+        true,
+    );
+}
+#[test]
+fn policy_abort_tarbz2() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell(
+        "application/x-bzip2",
+        "tar.bz2",
+        UnknownMemberPolicy::Abort,
+        false,
+    );
+}
+
+#[test]
+fn policy_keep_tarxz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Keep, true);
+}
+#[test]
+fn policy_omit_tarxz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Omit, true);
+}
+#[test]
+fn policy_abort_tarxz() {
+    use traceless_core::UnknownMemberPolicy;
+    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Abort, false);
+}

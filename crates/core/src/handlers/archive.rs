@@ -1183,4 +1183,67 @@ mod tests {
         assert!(!is_path_traversal("foo/bar/baz"));
         assert!(!is_path_traversal("foo.bar.baz"));
     }
+
+    #[test]
+    fn zip_per_entry_cap_rejects_oversized_member() {
+        // The `#[cfg(test)]` override lowers MAX_ENTRY_DECOMPRESSED_BYTES
+        // to 4 MiB; a 5 MiB member therefore lands over the cap.
+        use zip::write::SimpleFileOptions;
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("bomb.zip");
+        let dst = dir.path().join("out.zip");
+        {
+            let file = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            w.start_file("payload.bin", SimpleFileOptions::default())
+                .unwrap();
+            let payload = vec![0u8; 5 * 1024 * 1024];
+            w.write_all(&payload).unwrap();
+            w.finish().unwrap();
+        }
+        let h = ArchiveHandler;
+        let result = h.clean_metadata(&src, &dst);
+        assert!(
+            result.is_err(),
+            "per-entry cap should reject a 5 MiB member when the test cap is 4 MiB"
+        );
+    }
+
+    #[test]
+    fn tar_per_entry_cap_rejects_oversized_member() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("bomb.tar");
+        let dst = dir.path().join("out.tar");
+        {
+            let file = File::create(&src).unwrap();
+            let mut builder = TarBuilder::new(file);
+            let mut header = TarHeader::new_gnu();
+            header.set_path("payload.bin").unwrap();
+            header.set_size(5 * 1024 * 1024);
+            header.set_mode(0o644);
+            header.set_entry_type(EntryType::Regular);
+            header.set_cksum();
+            let body = vec![0u8; 5 * 1024 * 1024];
+            builder.append(&header, body.as_slice()).unwrap();
+            builder.into_inner().unwrap();
+        }
+        let h = ArchiveHandler;
+        let result = h.clean_metadata(&src, &dst);
+        assert!(
+            result.is_err(),
+            "per-entry cap should reject a 5 MiB tar member when the test cap is 4 MiB"
+        );
+    }
+
+    #[test]
+    fn is_path_traversal_handles_backslash_and_dotdot_patterns() {
+        // Supplementary cases that complement `path_traversal_detector`.
+        // The detector is intentionally lexical: anything containing
+        // a `..` path component is rejected, but attribute-style
+        // fields (`..foo`, `foo..`) are fine.
+        assert!(is_path_traversal("a/../b"));
+        assert!(is_path_traversal("../a"));
+        assert!(!is_path_traversal("a/b/c"));
+        assert!(!is_path_traversal("a/..bar"));
+    }
 }

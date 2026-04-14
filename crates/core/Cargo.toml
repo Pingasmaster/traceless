@@ -48,10 +48,12 @@ workspace = true
 tempfile = "= 3.27.0"
 # Integration tests build synthetic "dirty" fixtures on the fly using the
 # same crates traceless-core already depends on. Repeating them here is
-# harmless — cargo unifies versions.
+# harmless: cargo unifies versions.
 lopdf = { version = "= 0.40.0", default-features = false }
 little_exif = "= 0.6.23"
 lofty = "= 0.24.0"
 zip = { version = "= 8.5.1", default-features = false, features = ["deflate"] }
 tar = "= 0.4.44"
 flate2 = "= 1.1.9"
+bzip2 = "= 0.6.1"
+xz2 = "= 0.1.7"
