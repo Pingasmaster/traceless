@@ -459,6 +459,20 @@ pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
     writer.start_file("word/theme/theme1.xml", options).unwrap();
     writer.write_all(b"<theme/>").unwrap();
 
+    // numbering.xml carries `w:rsid` author-revision markers on the
+    // producer side, so mat2 drops it in every OOXML family. Added here
+    // so `docx_round_trip_strips_every_fingerprint` can guard the drop.
+    writer.start_file("word/numbering.xml", options).unwrap();
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<w:numbering xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:numIdMacAtCleanup w:val="1"/>
+  <w:rsids><w:rsidRoot w:val="00112233"/></w:rsids>
+</w:numbering>"#,
+        )
+        .unwrap();
+
     // Embedded media — the EXIF-recursion vector
     writer
         .start_file("word/media/image1.jpeg", options)
@@ -733,9 +747,75 @@ pub fn make_dirty_aiff(path: &Path) -> std::io::Result<()> {
             "aiff",
         ],
     )?;
-    // Lofty's AIFF tag support is limited; for AIFF we accept the file
-    // as-is and just verify that cleaning doesn't explode.
+    // Lofty's AIFF tag support is limited (and mat2 does not use lofty
+    // here at all), so we inject AIFF metadata chunks directly into the
+    // IFF container: NAME, AUTH, (c) , ANNO. The caller's round-trip
+    // test asserts every one of these survives the dirty path and is
+    // gone from the cleaned file.
+    inject_aiff_text_chunk(path, *b"NAME", b"aiff-secret-title")?;
+    inject_aiff_text_chunk(path, *b"AUTH", b"aiff-secret-author")?;
+    inject_aiff_text_chunk(path, *b"(c) ", b"aiff-secret-copyright")?;
+    inject_aiff_text_chunk(path, *b"ANNO", b"aiff-secret-annotation")?;
     Ok(())
+}
+
+pub fn make_dirty_opus(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=48000",
+            "-t",
+            "0.1",
+            "-codec:a",
+            "libopus",
+            "-b:a",
+            "32k",
+        ],
+    )?;
+    inject_audio_tag(path, "opus-secret-artist")
+}
+
+/// Insert a text chunk into an AIFF file at the end of its chunk list,
+/// rewriting the enclosing FORM size header. AIFF chunks are IFF-style
+/// `(id: [u8;4], size: u32be, data: [u8; size], optional_pad: [u8])`.
+/// The pad byte is required when `size` is odd so every chunk starts
+/// at an even offset.
+fn inject_aiff_text_chunk(path: &Path, chunk_id: [u8; 4], payload: &[u8]) -> std::io::Result<()> {
+    let data = std::fs::read(path)?;
+    if data.len() < 12 || &data[..4] != b"FORM" {
+        return Err(std::io::Error::other("inject_aiff: not an AIFF file"));
+    }
+    let magic = &data[8..12];
+    if magic != b"AIFF" && magic != b"AIFC" {
+        return Err(std::io::Error::other(
+            "inject_aiff: missing AIFF/AIFC magic",
+        ));
+    }
+
+    let chunk_len =
+        u32::try_from(payload.len()).map_err(|e| std::io::Error::other(e.to_string()))?;
+    let mut chunk: Vec<u8> = Vec::with_capacity(8 + payload.len() + 1);
+    chunk.extend_from_slice(&chunk_id);
+    chunk.extend_from_slice(&chunk_len.to_be_bytes());
+    chunk.extend_from_slice(payload);
+    if payload.len() % 2 == 1 {
+        chunk.push(0);
+    }
+
+    let mut out: Vec<u8> = Vec::with_capacity(data.len() + chunk.len());
+    out.extend_from_slice(&data);
+    out.extend_from_slice(&chunk);
+
+    // Recompute the FORM size (bytes 4..8, big-endian). FORM size is
+    // the length of everything after the 8-byte FORM header.
+    let form_size =
+        u32::try_from(out.len() - 8).map_err(|e| std::io::Error::other(e.to_string()))?;
+    out[4..8].copy_from_slice(&form_size.to_be_bytes());
+
+    std::fs::write(path, out)
 }
 
 /// Run ffprobe on `path` and return every (key, value) pair ffprobe

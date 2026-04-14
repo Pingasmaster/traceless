@@ -89,6 +89,12 @@ pub fn is_office_junk_path(name: &str) -> bool {
         || name == "word/presProps.xml"
         || name == "ppt/presProps.xml"
         || name == "xl/presProps.xml"
+        // `numbering.xml` is list-formatting metadata that frequently
+        // carries `w:rsid` author-revision markers on the producer side.
+        // mat2 drops it unconditionally in every OOXML family.
+        || name == "word/numbering.xml"
+        || name == "ppt/numbering.xml"
+        || name == "xl/numbering.xml"
         || name.ends_with("webSettings.xml")
         || name.ends_with("docMetadata/LabelInfo.xml")
     {
@@ -202,6 +208,17 @@ mod tests {
         assert!(is_office_junk_path("iTunesMetadata.plist"));
         assert!(is_office_junk_path("META-INF/calibre_bookmarks.txt"));
         assert!(is_office_junk_path("meta.xml"));
+    }
+
+    #[test]
+    fn office_junk_drops_numbering_xml_in_every_ooxml_family() {
+        // mat2's `files_to_omit` regex `^(?:word|ppt|xl)/numbering\.xml$`
+        // drops list-numbering metadata in every OOXML family. Match
+        // that behaviour here so `w:rsid` author-revision markers inside
+        // numbering.xml cannot leak out of a cleaned document.
+        assert!(is_office_junk_path("word/numbering.xml"));
+        assert!(is_office_junk_path("ppt/numbering.xml"));
+        assert!(is_office_junk_path("xl/numbering.xml"));
     }
 
     #[test]

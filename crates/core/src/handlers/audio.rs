@@ -1,5 +1,4 @@
 use std::path::Path;
-use std::process::Command;
 
 use lofty::file::TaggedFileExt;
 use lofty::tag::{ItemKey, TagType};
@@ -8,6 +7,7 @@ use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
 use super::FormatHandler;
+use super::sandbox;
 
 pub struct AudioHandler;
 
@@ -96,7 +96,7 @@ impl FormatHandler for AudioHandler {
             mime.as_ref(),
             "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac"
         ) {
-            return clean_via_ffmpeg(path, output_path);
+            return sandbox::clean_with_ffmpeg(path, output_path);
         }
 
         // Copy original to output first so lofty parses a file with the
@@ -139,9 +139,17 @@ impl FormatHandler for AudioHandler {
         // VorbisComments block is a standalone metadata block inside
         // the FLAC container. For OGG/Vorbis/Opus lofty refuses to
         // overwrite the vendor (see lofty/src/ogg/write.rs lines 117-
-        // 134 — the existing vendor is force-copied from disk), so the
+        // 134 - the existing vendor is force-copied from disk), so the
         // best we can do there is hide the synthetic reader-side
         // EncoderSoftware item.
+        //
+        // We also sweep any FLAC `APPLICATION` metadata blocks (type 2).
+        // Lofty's `TagType::remove_from_path(VorbisComments)` only
+        // touches the VorbisComments block; APPLICATION blocks are a
+        // free-form producer slot where mastering tools (shntool,
+        // cuetools, Melodyne, ReplayGain scanners) stuff arbitrary
+        // identifying payloads. mat2 doesn't explicitly strip these
+        // but they are a real fingerprinting channel, so we do.
         if matches!(
             mime_guess::from_path(output_path)
                 .first_or_octet_stream()
@@ -152,6 +160,7 @@ impl FormatHandler for AudioHandler {
                 path: path.to_path_buf(),
                 detail: format!("Failed to blank FLAC vendor: {e}"),
             })?;
+            strip_flac_application_blocks(output_path)?;
         }
 
         Ok(())
@@ -213,60 +222,6 @@ fn probe_picture_metadata(
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Shell out to ffmpeg to strip every non-codec atom from an M4A /
-/// MP4-audio container. This mirrors `VideoHandler::clean_metadata`:
-/// `-c copy` keeps the streams bit-exact, `-map_metadata -1 -map_chapters -1`
-/// drops every format- and stream-level tag, `+bitexact` prevents
-/// ffmpeg from re-stamping its own `encoder=Lavf...` fingerprint, and
-/// `-disposition 0` clears the per-stream disposition flags mat2
-/// also strips.
-fn clean_via_ffmpeg(path: &Path, output_path: &Path) -> Result<(), CoreError> {
-    match Command::new("ffmpeg").arg("-version").output() {
-        Ok(o) if o.status.success() => {}
-        _ => {
-            return Err(CoreError::ToolNotFound {
-                tool: "ffmpeg".to_string(),
-            });
-        }
-    }
-    let output = Command::new("ffmpeg")
-        .arg("-y")
-        .arg("-i")
-        .arg(path)
-        .arg("-map")
-        .arg("0")
-        .arg("-c")
-        .arg("copy")
-        .arg("-map_metadata")
-        .arg("-1")
-        .arg("-map_chapters")
-        .arg("-1")
-        .arg("-disposition")
-        .arg("0")
-        .arg("-fflags")
-        .arg("+bitexact")
-        .arg("-flags:v")
-        .arg("+bitexact")
-        .arg("-flags:a")
-        .arg("+bitexact")
-        .arg("-loglevel")
-        .arg("error")
-        .arg("-hide_banner")
-        .arg(output_path)
-        .output()
-        .map_err(|e| CoreError::ToolFailed {
-            tool: "ffmpeg".to_string(),
-            detail: format!("Failed to run ffmpeg: {e}"),
-        })?;
-    if !output.status.success() {
-        return Err(CoreError::ToolFailed {
-            tool: "ffmpeg".to_string(),
-            detail: format!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr)),
-        });
-    }
-    Ok(())
-}
-
 /// Rewrite a FLAC file's VorbisComments block with an empty vendor
 /// string. FLAC stores VorbisComments as a standalone metadata block
 /// inside the FLAC container, so lofty will honor our vendor value on
@@ -280,6 +235,141 @@ fn blank_flac_vendor(path: &Path) -> Result<(), String> {
     vc.save_to_path(path, lofty::config::WriteOptions::default())
         .map_err(|e| e.to_string())?;
     Ok(())
+}
+
+/// FLAC metadata block type constants. See the FLAC format spec
+/// <https://xiph.org/flac/format.html#metadata_block_header> -
+/// the 7-bit block type field uses these values.
+const FLAC_BLOCK_APPLICATION: u8 = 2;
+
+/// Walk a FLAC file's metadata block list and drop every `APPLICATION`
+/// (type 2) block. The file is only rewritten when at least one such
+/// block is found; the common case (no APPLICATION blocks) is a cheap
+/// read-only scan.
+///
+/// A FLAC stream begins with the ASCII magic `fLaC`, followed by a
+/// sequence of metadata blocks. Each block has a 4-byte header: 1 bit
+/// "last metadata block" flag, 7-bit block type, 24-bit big-endian
+/// body length. The body of the final block is followed immediately by
+/// audio frames. The walker preserves that structure: when the block
+/// being dropped was flagged as the last one, the function promotes
+/// the new trailing kept block so decoders still know where the audio
+/// frames start.
+///
+/// On corrupted or non-FLAC input the function is a no-op rather than
+/// returning an error, so a caller that happens to mis-dispatch a
+/// non-FLAC file through this path does not corrupt it.
+fn strip_flac_application_blocks(path: &Path) -> Result<(), CoreError> {
+    let data = std::fs::read(path).map_err(|e| CoreError::CleanError {
+        path: path.to_path_buf(),
+        detail: format!("Failed to re-read FLAC for block sweep: {e}"),
+    })?;
+
+    let Some(rewritten) = rewrite_flac_without_application_blocks(&data) else {
+        return Ok(());
+    };
+
+    std::fs::write(path, rewritten).map_err(|e| CoreError::CleanError {
+        path: path.to_path_buf(),
+        detail: format!("Failed to rewrite FLAC after block sweep: {e}"),
+    })
+}
+
+/// Pure function: parse `data` as a FLAC stream and return a rewritten
+/// copy with every `APPLICATION` block removed. Returns `None` when
+/// the input is not a valid FLAC stream, or when there are no
+/// APPLICATION blocks to drop (so the caller can skip the write).
+fn rewrite_flac_without_application_blocks(data: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 4 || &data[..4] != b"fLaC" {
+        return None;
+    }
+
+    // First pass: walk the block list, noting where each block body
+    // starts and ends. Stop when the last-metadata-block flag is set
+    // or the buffer is exhausted. Returns None on any structural
+    // damage so we never emit a truncated rewrite.
+    let mut blocks: Vec<BlockSlice> = Vec::new();
+    let mut pos = 4usize;
+    loop {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let header = data[pos];
+        let is_last = header & 0x80 != 0;
+        let block_type = header & 0x7f;
+        let len = (u32::from(data[pos + 1]) << 16)
+            | (u32::from(data[pos + 2]) << 8)
+            | u32::from(data[pos + 3]);
+        let body_start = pos + 4;
+        let body_end = body_start.checked_add(len as usize)?;
+        if body_end > data.len() {
+            return None;
+        }
+        blocks.push(BlockSlice {
+            block_type,
+            body_start,
+            body_end,
+        });
+        pos = body_end;
+        if is_last {
+            break;
+        }
+    }
+
+    if !blocks
+        .iter()
+        .any(|b| b.block_type == FLAC_BLOCK_APPLICATION)
+    {
+        return None;
+    }
+
+    // Filter APPLICATION blocks out. STREAMINFO (type 0) must always
+    // be present as the first block per the FLAC spec; if a crafted
+    // input has marked STREAMINFO itself as an APPLICATION block the
+    // filtered list will be empty and the output would be invalid.
+    // Bail rather than corrupt.
+    let kept: Vec<&BlockSlice> = blocks
+        .iter()
+        .filter(|b| b.block_type != FLAC_BLOCK_APPLICATION)
+        .collect();
+    if kept.is_empty() || kept[0].block_type != 0 {
+        return None;
+    }
+
+    let audio_frames_start = pos;
+    let mut out: Vec<u8> = Vec::with_capacity(data.len());
+    out.extend_from_slice(b"fLaC");
+
+    let kept_count = kept.len();
+    for (i, block) in kept.iter().enumerate() {
+        let is_last = i + 1 == kept_count;
+        let body_len = block.body_end - block.body_start;
+        // 24-bit big-endian length field.
+        let len_bytes = [
+            ((body_len >> 16) & 0xff) as u8,
+            ((body_len >> 8) & 0xff) as u8,
+            (body_len & 0xff) as u8,
+        ];
+        let header_byte = if is_last {
+            block.block_type | 0x80
+        } else {
+            block.block_type & 0x7f
+        };
+        out.push(header_byte);
+        out.extend_from_slice(&len_bytes);
+        out.extend_from_slice(&data[block.body_start..block.body_end]);
+    }
+
+    // Copy the audio frames unchanged.
+    out.extend_from_slice(&data[audio_frames_start..]);
+    Some(out)
+}
+
+#[derive(Clone, Copy)]
+struct BlockSlice {
+    block_type: u8,
+    body_start: usize,
+    body_end: usize,
 }
 
 fn item_key_to_string(key: ItemKey) -> String {
@@ -431,5 +521,151 @@ mod tests {
             .read_metadata(&path)
             .expect_err("empty file must not parse");
         matches!(err, CoreError::ParseError { .. });
+    }
+
+    // ---------- FLAC APPLICATION block walker ----------
+
+    /// Build the smallest possible synthetic FLAC stream with a
+    /// STREAMINFO block, zero or more intermediate blocks, and a
+    /// trailing 8-byte "audio frames" payload. Used by the walker tests
+    /// so we don't depend on ffmpeg for pure structural coverage.
+    fn synth_flac(extra_blocks: &[(u8, &[u8])]) -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(b"fLaC");
+
+        // STREAMINFO block: type 0, 34-byte body filled with zeros.
+        // The body is structurally bogus but the walker only looks at
+        // block types + lengths, so zeros suffice.
+        let streaminfo_body = vec![0u8; 34];
+        let is_last = extra_blocks.is_empty();
+        push_block(&mut out, 0, is_last, &streaminfo_body);
+
+        for (i, (block_type, body)) in extra_blocks.iter().enumerate() {
+            let is_last = i + 1 == extra_blocks.len();
+            push_block(&mut out, *block_type, is_last, body);
+        }
+
+        // Fake audio frames; any bytes work since the walker never
+        // dereferences them as codec data.
+        out.extend_from_slice(b"AUDIO456");
+        out
+    }
+
+    fn push_block(out: &mut Vec<u8>, block_type: u8, is_last: bool, body: &[u8]) {
+        let header = if is_last {
+            block_type | 0x80
+        } else {
+            block_type
+        };
+        out.push(header);
+        let len = u32::try_from(body.len()).unwrap();
+        out.push(((len >> 16) & 0xff) as u8);
+        out.push(((len >> 8) & 0xff) as u8);
+        out.push((len & 0xff) as u8);
+        out.extend_from_slice(body);
+    }
+
+    #[test]
+    fn rewrite_flac_returns_none_on_non_flac_magic() {
+        assert!(rewrite_flac_without_application_blocks(b"oggS...").is_none());
+        assert!(rewrite_flac_without_application_blocks(b"").is_none());
+    }
+
+    #[test]
+    fn rewrite_flac_returns_none_when_no_application_blocks() {
+        // STREAMINFO + PADDING + audio frames, no APPLICATION anywhere.
+        let flac = synth_flac(&[(1, &[0u8; 16])]);
+        assert!(
+            rewrite_flac_without_application_blocks(&flac).is_none(),
+            "no-op case must skip the write"
+        );
+    }
+
+    #[test]
+    fn rewrite_flac_drops_application_block_and_rewires_last_flag() {
+        // Layout: STREAMINFO | APPLICATION("XXXX" + payload) | audio.
+        // The APPLICATION block is currently the last metadata block
+        // (is_last=1 on its header). After removal, STREAMINFO must
+        // inherit the last-flag so decoders stop parsing metadata
+        // before walking into the audio frames.
+        let app_body = b"XXXXsecret-producer-data";
+        let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, app_body)]);
+        let rewritten = rewrite_flac_without_application_blocks(&flac).expect("should rewrite");
+
+        // Magic preserved.
+        assert_eq!(&rewritten[..4], b"fLaC");
+
+        // STREAMINFO header byte = type 0 | last-flag 0x80 = 0x80.
+        assert_eq!(
+            rewritten[4], 0x80,
+            "STREAMINFO must become the new last metadata block"
+        );
+
+        // APPLICATION body must not appear anywhere in the rewrite.
+        assert!(
+            !rewritten.windows(app_body.len()).any(|w| w == app_body),
+            "APPLICATION body survived the rewrite"
+        );
+
+        // Audio frames preserved at the tail.
+        assert!(rewritten.ends_with(b"AUDIO456"));
+    }
+
+    #[test]
+    fn rewrite_flac_drops_application_in_the_middle() {
+        // STREAMINFO | APPLICATION | VORBIS_COMMENT | audio.
+        // Dropping the middle block must leave STREAMINFO as a
+        // non-last block and VORBIS_COMMENT as the last.
+        let vc_body = b"junk-vorbis-body";
+        let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, b"APP1payload"), (4, vc_body)]);
+        let rewritten = rewrite_flac_without_application_blocks(&flac).expect("should rewrite");
+
+        // First kept block (STREAMINFO, type 0) has last-flag clear.
+        assert_eq!(rewritten[4] & 0x80, 0);
+        // Walk to the next header: 4 magic + 4 streaminfo header + 34 body = 42.
+        let second_header_idx = 4 + 4 + 34;
+        assert_eq!(
+            rewritten[second_header_idx] & 0x7f,
+            4,
+            "second kept block must be VORBIS_COMMENT"
+        );
+        assert_eq!(
+            rewritten[second_header_idx] & 0x80,
+            0x80,
+            "VORBIS_COMMENT must now be the last metadata block"
+        );
+    }
+
+    #[test]
+    fn rewrite_flac_returns_none_on_truncated_block_body() {
+        // Header claims a 100-byte APPLICATION body but we only ship 4 bytes.
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        flac.push(FLAC_BLOCK_APPLICATION | 0x80);
+        flac.extend_from_slice(&[0x00, 0x00, 0x64]); // 100 bytes
+        flac.extend_from_slice(b"abcd");
+        assert!(
+            rewrite_flac_without_application_blocks(&flac).is_none(),
+            "truncated body must not corrupt the file"
+        );
+    }
+
+    #[test]
+    fn rewrite_flac_returns_none_when_streaminfo_missing_after_filter() {
+        // A pathological fixture where the *first* block is typed as
+        // APPLICATION. Dropping it would leave the FLAC stream without
+        // a STREAMINFO, which is invalid per the spec. The walker must
+        // bail rather than emit that.
+        let mut flac = Vec::new();
+        flac.extend_from_slice(b"fLaC");
+        // Single APPLICATION block with is_last=1.
+        flac.push(FLAC_BLOCK_APPLICATION | 0x80);
+        flac.extend_from_slice(&[0x00, 0x00, 0x04]);
+        flac.extend_from_slice(b"APP1");
+        flac.extend_from_slice(b"AUDIO");
+        assert!(
+            rewrite_flac_without_application_blocks(&flac).is_none(),
+            "rewriting must not emit a FLAC without STREAMINFO"
+        );
     }
 }

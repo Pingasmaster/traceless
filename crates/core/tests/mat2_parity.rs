@@ -421,6 +421,9 @@ fn docx_round_trip_strips_every_fingerprint() {
         "word/theme/theme1.xml",
         "word/printerSettings/printerSettings1.bin",
         "docProps/custom.xml",
+        // numbering.xml drop mirrors mat2's `^(?:word|ppt|xl)/numbering\.xml$`
+        // omit regex; it carries `w:rsid` author-revision markers.
+        "word/numbering.xml",
     ] {
         assert!(
             read_zip_entry(&cleaned, junk).is_none(),
@@ -878,6 +881,229 @@ fn flac_round_trip() {
             "ffprobe still reports user tags on cleaned FLAC: {post:?}"
         );
     }
+}
+
+#[test]
+fn aiff_round_trip_strips_name_auth_copy_anno() {
+    // mat2-parity guard: AIFF carries user-visible metadata in IFF
+    // text chunks (NAME, AUTH, (c) , ANNO). Lofty's AIFF writer
+    // support is thin, so we verify behaviourally that none of the
+    // four needles survive a full clean, regardless of how lofty
+    // decides to serialize the file back.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.aiff");
+    let cleaned = dir.path().join("cleaned.aiff");
+    if make_dirty_aiff(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg failed to synthesize AIFF");
+        return;
+    }
+
+    let needles: &[&[u8]] = &[
+        b"aiff-secret-title",
+        b"aiff-secret-author",
+        b"aiff-secret-copyright",
+        b"aiff-secret-annotation",
+    ];
+    let dirty_bytes = fs::read(&dirty).unwrap();
+    for needle in needles {
+        assert!(
+            dirty_bytes.windows(needle.len()).any(|w| &w == needle),
+            "dirty fixture must carry needle {:?}",
+            std::str::from_utf8(needle).unwrap()
+        );
+    }
+
+    let handler = get_handler_for_mime("audio/x-aiff")
+        .or_else(|| get_handler_for_mime("audio/aiff"))
+        .unwrap();
+    // A clean failure is a test failure - if lofty can't handle an
+    // AIFF with extra text chunks, that's the regression this test
+    // is meant to catch.
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let cleaned_bytes = fs::read(&cleaned).unwrap();
+    for needle in needles {
+        assert!(
+            !cleaned_bytes.windows(needle.len()).any(|w| &w == needle),
+            "needle {:?} survived AIFF clean",
+            std::str::from_utf8(needle).unwrap()
+        );
+    }
+}
+
+#[test]
+fn opus_round_trip_strips_user_comments() {
+    // mat2-parity guard for OGG/Opus. Per the audio handler comment,
+    // lofty force-preserves the vendor string on OGG-family writes,
+    // so we assert the weaker (but still load-bearing) property:
+    // user-visible comment fields like artist/title/comment must not
+    // survive the clean, even though the vendor header may.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.opus");
+    let cleaned = dir.path().join("cleaned.opus");
+    if make_dirty_opus(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg libopus encoder not available");
+        return;
+    }
+
+    let handler = get_handler_for_mime("audio/opus").unwrap();
+    let before = handler.read_metadata(&dirty).unwrap();
+    assert!(!before.is_empty(), "dirty Opus should report metadata");
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    assert!(
+        after.is_empty(),
+        "cleaned Opus should have no metadata: {after:?}"
+    );
+
+    // Binary-level needle check: the synthesized fixture injects
+    // `opus-secret-artist` via inject_audio_tag. It must not appear
+    // anywhere in the cleaned file.
+    let cleaned_bytes = fs::read(&cleaned).unwrap();
+    let needle = b"opus-secret-artist";
+    assert!(
+        !cleaned_bytes.windows(needle.len()).any(|w| w == needle),
+        "artist needle survived Opus clean"
+    );
+
+    // If ffprobe is available, confirm independently.
+    if have_ffprobe() {
+        let post: Vec<_> = ffprobe_user_tags(&cleaned)
+            .into_iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("encoder"))
+            .collect();
+        assert!(
+            post.is_empty(),
+            "ffprobe still reports user tags on cleaned Opus: {post:?}"
+        );
+    }
+}
+
+#[test]
+fn flac_application_block_is_stripped() {
+    // Regression for the audit finding that lofty's
+    // `TagType::VorbisComments.remove_from_path` only touches the
+    // VorbisComments block; APPLICATION (type 2) metadata blocks
+    // survived a clean. They carry arbitrary producer-specific
+    // payloads (shntool, cuetools, Melodyne, ReplayGain scanners) and
+    // are a real fingerprinting channel.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let base = dir.path().join("base.flac");
+    let dirty = dir.path().join("dirty.flac");
+    let cleaned = dir.path().join("cleaned.flac");
+    if make_dirty_flac(&base).is_err() {
+        eprintln!("[SKIP] ffmpeg failed to synthesize FLAC");
+        return;
+    }
+
+    // Take the synthesized FLAC and splice an APPLICATION block
+    // carrying a needle string in between the existing metadata
+    // blocks and the audio frames. The walker only cares about the
+    // block structure, so the payload can be anything.
+    let needle = b"TRACELESS_APP_NEEDLE_12345";
+    let data = fs::read(&base).unwrap();
+    let with_app = inject_flac_application_block(&data, needle).unwrap();
+    fs::write(&dirty, &with_app).unwrap();
+
+    // Preconditions: the needle must be present in the dirty fixture
+    // so the post-clean assertion is meaningful.
+    assert!(
+        fs::read(&dirty)
+            .unwrap()
+            .windows(needle.len())
+            .any(|w| w == needle),
+        "dirty fixture must carry the APPLICATION needle"
+    );
+
+    let handler = get_handler_for_mime("audio/flac")
+        .or_else(|| get_handler_for_mime("audio/x-flac"))
+        .unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let cleaned_bytes = fs::read(&cleaned).unwrap();
+    assert!(
+        !cleaned_bytes.windows(needle.len()).any(|w| w == needle),
+        "APPLICATION block needle survived the clean"
+    );
+
+    // The cleaned FLAC must still be a valid FLAC stream.
+    assert!(cleaned_bytes.starts_with(b"fLaC"));
+
+    // And the reader should still be able to parse it (no trailing
+    // tags, by design).
+    let after = handler.read_metadata(&cleaned).unwrap();
+    assert!(
+        after.is_empty(),
+        "cleaned FLAC (post-APPLICATION strip) should have no metadata: {after:?}"
+    );
+}
+
+/// Parse a FLAC stream, insert a synthetic APPLICATION block with the
+/// given body after the existing metadata block list, and return the
+/// rewritten bytes. Preserves the `last-metadata-block` flag semantics
+/// by clearing it on the previously-last block and setting it on the
+/// new APPLICATION block. Returns `None` on malformed input.
+fn inject_flac_application_block(data: &[u8], body: &[u8]) -> Option<Vec<u8>> {
+    if data.len() < 4 || &data[..4] != b"fLaC" {
+        return None;
+    }
+
+    // Walk the metadata block list to find where audio frames start
+    // and which header holds the current last-flag.
+    let mut pos = 4usize;
+    let last = loop {
+        if pos + 4 > data.len() {
+            return None;
+        }
+        let header = data[pos];
+        let is_last = header & 0x80 != 0;
+        let len = (u32::from(data[pos + 1]) << 16)
+            | (u32::from(data[pos + 2]) << 8)
+            | u32::from(data[pos + 3]);
+        let body_end = pos + 4 + len as usize;
+        if body_end > data.len() {
+            return None;
+        }
+        if is_last {
+            let marker = pos;
+            pos = body_end;
+            break marker;
+        }
+        pos = body_end;
+    };
+
+    let audio_start = pos;
+
+    let mut out = Vec::with_capacity(data.len() + 4 + body.len());
+    out.extend_from_slice(&data[..last]);
+    // Clear the last-flag on the previously-last block.
+    out.push(data[last] & 0x7f);
+    out.extend_from_slice(&data[last + 1..audio_start]);
+
+    // New APPLICATION block with last-flag set.
+    let len = u32::try_from(body.len()).ok()?;
+    out.push(0x02 | 0x80);
+    out.push(((len >> 16) & 0xff) as u8);
+    out.push(((len >> 8) & 0xff) as u8);
+    out.push((len & 0xff) as u8);
+    out.extend_from_slice(body);
+
+    // Audio frames.
+    out.extend_from_slice(&data[audio_start..]);
+    Some(out)
 }
 
 #[test]

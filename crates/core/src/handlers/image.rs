@@ -5,7 +5,7 @@ use std::path::Path;
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
 use img_parts::webp::WebP;
-use img_parts::{DynImage, ImageEXIF, ImageICC};
+use img_parts::{Bytes, DynImage, ImageEXIF, ImageICC};
 use little_exif::metadata::Metadata as ExifMetadata;
 
 use crate::error::CoreError;
@@ -61,9 +61,16 @@ impl FormatHandler for ImageHandler {
             source: e,
         })?;
 
+        // Share a single refcounted `Bytes` between every parser we
+        // hand the file to. `img_parts::Bytes` is re-exported from the
+        // `bytes` crate, so cloning it is an atomic refcount bump - not
+        // a buffer copy. This replaces an earlier `data_vec = data.clone()`
+        // that unconditionally copied the full file for every non-JPEG
+        // image, even when the WebP fallback branch never fired.
+        let shared: Bytes = data.into();
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         if mime == "image/jpeg" {
-            match Jpeg::from_bytes(data.into()) {
+            match Jpeg::from_bytes(shared) {
                 Ok(jpeg) => {
                     let mut saw_icc = false;
                     for segment in jpeg.segments() {
@@ -112,8 +119,7 @@ impl FormatHandler for ImageHandler {
                 }
             }
         } else {
-            let data_vec = data.clone();
-            match DynImage::from_bytes(data.into()) {
+            match DynImage::from_bytes(shared.clone()) {
                 Ok(Some(img)) => {
                     let (icc_line, exif_line) = generic_dynimage_lines(
                         img.icc_profile().is_some(),
@@ -138,7 +144,7 @@ impl FormatHandler for ImageHandler {
             // directly via `WebP::from_bytes` so the reader surfaces the
             // XMP fields the cleaner is about to strip.
             if mime == "image/webp"
-                && let Ok(webp) = WebP::from_bytes(data_vec.into())
+                && let Ok(webp) = WebP::from_bytes(shared)
             {
                 const CHUNK_XMP: [u8; 4] = *b"XMP ";
                 for chunk in webp.chunks_by_id(CHUNK_XMP) {

@@ -39,7 +39,7 @@ jobs:
           # Matches `rust-version = "1.92"` in the workspace Cargo.toml.
           # Bump both in lockstep on any MSRV change.
           toolchain: "1.92"
-          components: clippy
+          components: clippy, rustfmt
 
       - name: Cache cargo registry and build artefacts
         uses: actions/cache@v4
@@ -51,6 +51,11 @@ jobs:
           key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
             ${{ runner.os }}-cargo-
+
+      - name: cargo fmt --check
+        # Style regressions are caught here, before clippy runs, so
+        # formatting drift can't hide behind lint noise.
+        run: cargo fmt --all -- --check
 
       - name: cargo check --workspace
         run: cargo check --workspace --all-targets
@@ -69,3 +74,59 @@ jobs:
 
       - name: cargo build --release --workspace
         run: cargo build --workspace --release
+
+  advisories:
+    name: Dependency advisory scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: cargo-deny advisories
+        # Scan the dependency graph against the RustSec advisory
+        # database. Bans/licenses/sources are intentionally omitted:
+        # the project already has documented multi-version waivers
+        # (see CLAUDE.md) and those need bespoke tuning before they
+        # can become a hard gate.
+        uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check advisories
+
+  fuzz-build:
+    name: Fuzz target compile check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libgtk-4-dev \
+            libadwaita-1-dev \
+            cmake \
+            ffmpeg \
+            bubblewrap
+
+      - name: Install nightly Rust
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install --locked cargo-fuzz
+
+      - name: Cache fuzz target dir
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            fuzz/target
+          key: ${{ runner.os }}-fuzz-${{ hashFiles('**/Cargo.lock', 'fuzz/Cargo.toml') }}
+
+      - name: cargo +nightly fuzz build
+        # Compile-only gate. The fuzz crate is excluded from the main
+        # workspace so nothing in the `test` job would catch a target
+        # that stops compiling - this job closes that gap. Actual fuzz
+        # runs are developer-driven.
+        working-directory: fuzz
+        run: cargo +nightly fuzz build
