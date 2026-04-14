@@ -263,7 +263,7 @@ fn find_rawtext_close(bytes: &[u8], from: usize, name: &[u8]) -> usize {
         }
         // Need room for `</` + name + one terminator byte.
         let header_end = i + 2 + name.len();
-        if header_end > len {
+        if header_end >= len {
             return len;
         }
         if bytes[i + 1] != b'/' {
@@ -696,5 +696,40 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
         let out = fs::read_to_string(&dst).unwrap();
         assert!(out.contains(r#"var s = "<meta>";"#));
         assert!(out.contains("<p>after</p>"));
+    }
+
+    #[test]
+    fn html_clean_script_unterminated_close_at_eof_no_panic() {
+        // Regression: an input whose tail is exactly `</script` (no
+        // terminator byte after the name) used to panic inside
+        // `find_rawtext_close` with an out-of-bounds read. The partial
+        // close must now be treated as part of the script body.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(&src, b"<script></script").unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains("</script"),
+            "partial close at EOF must round-trip verbatim, got: {out}"
+        );
+    }
+
+    #[test]
+    fn html_clean_style_unterminated_close_at_eof_no_panic() {
+        // Same regression for the `<style>` raw-text element.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(&src, b"<style></style").unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains("</style"),
+            "partial close at EOF must round-trip verbatim, got: {out}"
+        );
     }
 }
