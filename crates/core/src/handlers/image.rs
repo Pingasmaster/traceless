@@ -23,6 +23,12 @@ impl FormatHandler for ImageHandler {
             .unwrap_or_default();
 
         let mut items = Vec::new();
+        // Tracks whether `little_exif` surfaced any concrete EXIF tags.
+        // Gating the generic "EXIF data: present" fallback line on this
+        // bool - rather than on `items.is_empty()` - prevents an ICC
+        // profile pushed later in the same reader pass from masking
+        // the fallback. See Bug 14 in round-6's audit plan.
+        let mut little_exif_surfaced_tags = false;
 
         // Read EXIF tags via little_exif (iterate the Metadata struct)
         match ExifMetadata::new_from_path(path) {
@@ -41,6 +47,7 @@ impl FormatHandler for ImageHandler {
                             value: String::new(),
                         });
                     }
+                    little_exif_surfaced_tags = true;
                 }
             }
             Err(e) => {
@@ -117,17 +124,16 @@ impl FormatHandler for ImageHandler {
             let data_vec = data.clone();
             match DynImage::from_bytes(data.into()) {
                 Ok(Some(img)) => {
-                    if img.icc_profile().is_some() {
-                        items.push(MetadataItem {
-                            key: "ICC Profile".to_string(),
-                            value: "present".to_string(),
-                        });
+                    let (icc_line, exif_line) = generic_dynimage_lines(
+                        img.icc_profile().is_some(),
+                        img.exif().is_some(),
+                        little_exif_surfaced_tags,
+                    );
+                    if let Some(item) = icc_line {
+                        items.push(item);
                     }
-                    if img.exif().is_some() && items.is_empty() {
-                        items.push(MetadataItem {
-                            key: "EXIF data".to_string(),
-                            value: "present (could not parse individual tags)".to_string(),
-                        });
+                    if let Some(item) = exif_line {
+                        items.push(item);
                     }
                 }
                 Ok(None) => {}
@@ -352,4 +358,30 @@ fn split_debug_tag(debug: &str) -> Option<(String, String)> {
     // Remove surrounding quotes if present
     let value = inner.trim_matches('"').to_string();
     Some((name, value))
+}
+
+/// Return the ICC and generic-EXIF fallback lines the non-JPEG reader
+/// branch should push. Factored out as a pure function so the
+/// interaction between "little_exif surfaced concrete tags already",
+/// "img-parts sees an ICC chunk", and "img-parts sees an EXIF chunk"
+/// is unit-testable without a real image fixture.
+///
+/// The `EXIF data: present` line must only be suppressed when
+/// `little_exif` already contributed *concrete* tags for the same
+/// file. It must NOT be suppressed merely because the ICC line has
+/// just been pushed: that was the round-6 Bug 14 regression.
+pub(super) fn generic_dynimage_lines(
+    has_icc: bool,
+    has_exif: bool,
+    little_exif_surfaced_tags: bool,
+) -> (Option<MetadataItem>, Option<MetadataItem>) {
+    let icc = has_icc.then(|| MetadataItem {
+        key: "ICC Profile".to_string(),
+        value: "present".to_string(),
+    });
+    let exif = (has_exif && !little_exif_surfaced_tags).then(|| MetadataItem {
+        key: "EXIF data".to_string(),
+        value: "present (could not parse individual tags)".to_string(),
+    });
+    (icc, exif)
 }

@@ -1439,6 +1439,80 @@ fn test_docx_embedded_webp_xmp_is_stripped() {
     assert_eq!(&cleaned_webp[8..12], b"WEBP");
 }
 
+// Bug 14 regression: the non-JPEG reader branch used to gate the
+// "EXIF data: present" fallback line on `items.is_empty()`. An ICC
+// chunk pushed earlier in the same pass made `items` non-empty and
+// silently masked the EXIF-present line, so a WebP / PNG / TIFF /
+// HEIF / JXL carrying both ICC and EXIF appeared to the reader as
+// "ICC only" even though the cleaner would still strip the EXIF.
+// The fix tracks whether `little_exif` surfaced any concrete tags
+// in a dedicated bool and gates the fallback on that instead. The
+// logic is factored out into `generic_dynimage_lines` so we can
+// exercise every combination directly, without depending on the
+// exact interplay of two parser libraries on a synthetic fixture.
+
+#[test]
+fn test_image_reader_reports_exif_when_icc_is_also_present() {
+    use crate::handlers::image::generic_dynimage_lines;
+
+    // ICC and EXIF both present, little_exif surfaced nothing.
+    // Both generic lines must fire.
+    let (icc, exif) = generic_dynimage_lines(true, true, false);
+    let icc = icc.expect("ICC line must fire when an ICC chunk is present");
+    assert_eq!(icc.key, "ICC Profile");
+    let exif =
+        exif.expect("EXIF line must fire when EXIF is present and no concrete tags were surfaced");
+    assert_eq!(exif.key, "EXIF data");
+}
+
+#[test]
+fn test_image_reader_suppresses_generic_exif_when_tags_already_surfaced() {
+    use crate::handlers::image::generic_dynimage_lines;
+
+    // little_exif already surfaced individual tags, so the
+    // generic fallback would be redundant and must stay suppressed.
+    // ICC is orthogonal and must still fire.
+    let (icc, exif) = generic_dynimage_lines(true, true, true);
+    assert!(
+        icc.is_some(),
+        "ICC line must fire even when little_exif surfaced tags"
+    );
+    assert!(
+        exif.is_none(),
+        "EXIF fallback must not duplicate concrete tags"
+    );
+}
+
+#[test]
+fn test_image_reader_icc_only() {
+    use crate::handlers::image::generic_dynimage_lines;
+
+    // ICC only, no EXIF at all. Only the ICC line fires.
+    let (icc, exif) = generic_dynimage_lines(true, false, false);
+    assert!(icc.is_some());
+    assert!(exif.is_none());
+}
+
+#[test]
+fn test_image_reader_exif_only() {
+    use crate::handlers::image::generic_dynimage_lines;
+
+    // EXIF only (not parseable by little_exif), no ICC.
+    // Only the EXIF fallback fires.
+    let (icc, exif) = generic_dynimage_lines(false, true, false);
+    assert!(icc.is_none());
+    assert!(exif.is_some());
+}
+
+#[test]
+fn test_image_reader_empty_when_nothing_present() {
+    use crate::handlers::image::generic_dynimage_lines;
+
+    let (icc, exif) = generic_dynimage_lines(false, false, false);
+    assert!(icc.is_none());
+    assert!(exif.is_none());
+}
+
 #[test]
 fn test_file_store_handles_large_batch_without_panic() {
     // Regression for the unbounded-thread-spawn bug: FileStore used to
