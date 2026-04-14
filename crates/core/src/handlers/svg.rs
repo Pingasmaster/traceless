@@ -37,18 +37,35 @@ pub struct SvgHandler;
 
 /// Element local-names that we drop entirely (along with every child).
 ///
-/// `script` is here for content-safety, not metadata: an SVG can carry
-/// arbitrary JavaScript that runs when the file is opened in a browser,
-/// and a user who clicks "Clean" reasonably expects the output to be
-/// safe to share. mat2 side-steps this by rasterizing the whole SVG;
-/// we preserve vectors and instead enumerate the unsafe surface here
-/// and in `STRIP_EVENT_HANDLER_HREFS` / `sanitize_attributes` below.
+/// `script` / `foreignObject` / `iframe` are here for content-safety,
+/// not metadata: an SVG can carry arbitrary JavaScript that runs when
+/// the file is opened in a browser, and a user who clicks "Clean"
+/// reasonably expects the output to be safe to share. mat2 side-steps
+/// all of this by rasterizing the whole SVG; we preserve vectors and
+/// instead enumerate the unsafe surface here and in
+/// `sanitize_attributes` below.
+///
+/// `<foreignObject>` is the SVG mechanism for embedding arbitrary HTML
+/// (or MathML, etc.) inside an SVG. Browsers parse the embedded subtree
+/// with full HTML/DOM semantics, so an `<iframe src="javascript:...">`
+/// or `<object data="...">` inside one is a real XSS vector - and the
+/// `sanitize_attributes` javascript-URI check below only covers the
+/// native SVG `href` / `xlink:href` attributes, so every foreign
+/// URI-bearing attribute (`src`, `action`, `formaction`, `data`, ...)
+/// would otherwise slip through. Dropping the whole subtree is both
+/// simpler and stricter than trying to enumerate every URI attribute
+/// name in every foreign namespace that could legally appear inside
+/// embedded HTML. `<iframe>` is added to the list as defense-in-depth
+/// for parsers that accept mixed content outside a `<foreignObject>`
+/// wrapper.
 const DROP_ELEMENTS: &[&str] = &[
     "metadata",      // the whole RDF block
     "title",         // often contains author name
     "desc",          // often contains description + author
     "namedview",     // sodipodi editor state
     "script",        // embedded JavaScript (content-safety, not metadata)
+    "foreignObject", // XSS via embedded HTML (iframe / form / object / ...)
+    "iframe",        // defense-in-depth - not a native SVG element
 ];
 
 /// Namespace prefixes whose attributes we strip from every element.
@@ -631,5 +648,79 @@ mod tests {
         h.clean_metadata(&src, &dst).expect("clean must not panic");
         let out = fs::read_to_string(&dst).unwrap();
         assert!(out.contains("<text"), "text element must survive: {out}");
+    }
+
+    #[test]
+    fn svg_clean_drops_foreign_object_with_iframe_xss() {
+        // Round 19 regression: `<foreignObject>` is the SVG mechanism
+        // for embedding arbitrary HTML. The sanitize_attributes
+        // URI-filter only knows about `href`/`xlink:href`, so a
+        // smuggled `<iframe src="javascript:alert(1)">` inside a
+        // `<foreignObject>` used to pass through unchanged. Drop the
+        // entire subtree instead.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("xss.svg");
+        let dst = dir.path().join("clean.svg");
+        let xml = r#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg">
+  <foreignObject width="100" height="100">
+    <iframe xmlns="http://www.w3.org/1999/xhtml" src="javascript:alert(1)"/>
+  </foreignObject>
+  <rect x="0" y="0" width="10" height="10" fill="red"/>
+</svg>"#;
+        fs::write(&src, xml).unwrap();
+        let h = SvgHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            !out.contains("javascript:"),
+            "javascript: URI must not survive inside foreignObject, got: {out}"
+        );
+        assert!(
+            !out.contains("<iframe"),
+            "iframe must be dropped along with foreignObject, got: {out}"
+        );
+        assert!(
+            !out.contains("foreignObject"),
+            "foreignObject wrapper must be dropped, got: {out}"
+        );
+        // Sibling non-foreignObject content must survive.
+        assert!(
+            out.contains("<rect"),
+            "sibling rect element must survive: {out}"
+        );
+    }
+
+    #[test]
+    fn svg_clean_drops_direct_iframe_defense_in_depth() {
+        // Defense-in-depth regression: `<iframe>` is not a native SVG
+        // element, so any top-level iframe inside an svg root is a
+        // hand-crafted attempt to smuggle it through a mixed-content
+        // parser. Drop it regardless of whether it lives inside a
+        // `<foreignObject>`.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("direct.svg");
+        let dst = dir.path().join("clean.svg");
+        let xml = r#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg">
+  <iframe src="javascript:alert(2)"/>
+  <rect x="0" y="0" width="10" height="10" fill="blue"/>
+</svg>"#;
+        fs::write(&src, xml).unwrap();
+        let h = SvgHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            !out.contains("javascript:"),
+            "iframe with javascript: src must be dropped, got: {out}"
+        );
+        assert!(
+            !out.contains("<iframe"),
+            "iframe element must be dropped, got: {out}"
+        );
+        assert!(
+            out.contains("<rect"),
+            "sibling rect element must survive: {out}"
+        );
     }
 }
