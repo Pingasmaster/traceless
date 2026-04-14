@@ -180,7 +180,15 @@ impl FormatHandler for DocumentHandler {
         }
         // First sort lexicographically to kill any producer-order fingerprint.
         names.sort();
-        // Then move the special `mimetype` entry to the front — it must
+        // Drop duplicate names. A malformed DOCX / ODT / EPUB whose
+        // central directory carries two entries sharing a name would
+        // otherwise be read twice via `by_name` (which always
+        // resolves to the first occurrence) and fail the second
+        // `ZipWriter::start_file` call with a confusing
+        // `invalid Archive` error. Mirrors the dedup that
+        // `archive::clean_zip` already performs for the same reason.
+        names.dedup();
+        // Then move the special `mimetype` entry to the front - it must
         // be first in ODF and EPUB archives per their respective specs.
         if let Some(pos) = names.iter().position(|n| n == "mimetype") {
             let m = names.remove(pos);
