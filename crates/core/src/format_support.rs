@@ -86,7 +86,7 @@ pub const fn supported_extensions() -> &'static [&'static str] {
         // PDF
         "pdf",
         // Audio
-        "mp3", "flac", "ogg", "wav", "m4a", "aac", "aiff",
+        "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "aiff",
         // Documents
         "odt", "ods", "odp", "odg", "docx", "xlsx", "pptx", "epub",
         // Video
