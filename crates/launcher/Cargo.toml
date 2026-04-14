@@ -19,5 +19,7 @@ name = "traceless"
 path = "src/main.rs"
 
 [dependencies]
-log.workspace = true
-env_logger.workspace = true
+# No `log` / `env_logger`: the launcher is a tiny CLI shim with one
+# user-visible warning, written directly to stderr via `eprintln!`.
+# Removing the logger keeps the launcher binary smaller and skips an
+# unused init call.

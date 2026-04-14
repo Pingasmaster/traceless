@@ -54,8 +54,6 @@ fn detect_desktop_environment() -> DesktopEnvironment {
 }
 
 fn main() {
-    env_logger::init();
-
     let frontend = detect_desktop_environment();
 
     let binary_name = match frontend {
@@ -81,7 +79,15 @@ fn main() {
         let fallback_exe = exe_dir.join(fallback_name);
 
         if fallback_exe.exists() {
-            log::warn!("{binary_name} not found, falling back to {fallback_name}");
+            // Use stderr directly rather than `log::warn!`: env_logger's
+            // default filter is `Error`, so a `warn!` message never
+            // reaches the user. The launcher is a CLI shim whose only
+            // user-facing output channel is stderr, and a fallback
+            // notice is genuinely useful information for someone who
+            // expected a different frontend to launch.
+            eprintln!(
+                "warning: {binary_name} not found, falling back to {fallback_name}"
+            );
             launch(&fallback_exe);
         } else {
             eprintln!(

@@ -934,7 +934,7 @@ fn apply_unknown_policy(
         UnknownMemberPolicy::Abort => Err(CoreError::CleanError {
             path: archive_path.to_path_buf(),
             detail: format!(
-                "unknown archive member '{entry_name}' — aborting per policy"
+                "unknown archive member '{entry_name}': aborting per policy"
             ),
         }),
     }
