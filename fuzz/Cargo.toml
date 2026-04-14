@@ -1,0 +1,123 @@
+[package]
+name = "traceless-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+# cargo-fuzz and libfuzzer-sys need nightly to build because
+# libfuzzer-sys uses `extern "C" fn main`-style linkage the stable
+# compiler refuses. Run with `cargo +nightly fuzz run <target>`.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+tempfile = "= 3.27.0"
+
+[dependencies.traceless-core]
+path = "../crates/core"
+
+[lib]
+path = "src/lib.rs"
+
+# Every fuzz target in `fuzz_targets/` needs its own [[bin]] entry so
+# cargo-fuzz can discover it. The test=false, doc=false, doctest=false
+# trio is the cargo-fuzz recommended form; bench=false keeps the
+# target out of `cargo bench`.
+
+[[bin]]
+name = "handler_jpeg"
+path = "fuzz_targets/handler_jpeg.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_png"
+path = "fuzz_targets/handler_png.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_webp"
+path = "fuzz_targets/handler_webp.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_gif"
+path = "fuzz_targets/handler_gif.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_pdf"
+path = "fuzz_targets/handler_pdf.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_html"
+path = "fuzz_targets/handler_html.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_svg"
+path = "fuzz_targets/handler_svg.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_css"
+path = "fuzz_targets/handler_css.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_torrent"
+path = "fuzz_targets/handler_torrent.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_zip"
+path = "fuzz_targets/handler_zip.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_tar"
+path = "fuzz_targets/handler_tar.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_targz"
+path = "fuzz_targets/handler_targz.rs"
+test = false
+doc = false
+doctest = false
+bench = false

@@ -6,6 +6,12 @@ members = [
     "crates/qt-frontend",
     "crates/launcher",
 ]
+# The `fuzz/` directory holds a separate cargo-fuzz crate that
+# depends on libfuzzer-sys (nightly only). It must stay out of the
+# stable workspace so that `cargo check --workspace` and the strict
+# clippy gate don't try to compile it on stable. Run with
+# `cargo +nightly fuzz run <target>` instead.
+exclude = ["fuzz"]
 
 [workspace.package]
 version = "1.0.0"
