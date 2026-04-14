@@ -205,16 +205,34 @@ impl FormatHandler for DocumentHandler {
                     path: path.to_path_buf(),
                     detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
                 })?;
-                // Don't re-pack directory entries — they confuse ODF readers.
+                // Don't re-pack directory entries - they confuse ODF readers.
                 if e.is_dir() {
                     continue;
                 }
                 let compression = e.compression();
                 let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(e.size()));
-                e.read_to_end(&mut buf).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to read entry {entry_name}: {e}"),
-                })?;
+                // Cap the decompressed member body so a DOCX / ODT /
+                // EPUB with an embedded zip bomb can't OOM the cleaner.
+                // See `archive::MAX_ENTRY_DECOMPRESSED_BYTES` for the
+                // cap value and rationale.
+                (&mut e)
+                    .take(super::archive::MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+                    .read_to_end(&mut buf)
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("Failed to read entry {entry_name}: {e}"),
+                    })?;
+                if buf.len() as u64 > super::archive::MAX_ENTRY_DECOMPRESSED_BYTES {
+                    return Err(CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!(
+                            "document member '{entry_name}' exceeds the \
+                             {}-byte decompression cap; refusing to clean \
+                             (likely a zip bomb)",
+                            super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
+                        ),
+                    });
+                }
                 (buf, compression)
             };
 

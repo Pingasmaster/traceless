@@ -261,12 +261,28 @@ fn recurse_read_zip(
         let safe_name = name.replace(['/', '\\'], "_");
         let probe_path = tmpdir.path().join(safe_name);
         let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(entry.size()));
-        entry
+        // Cap the decompressed entry size to defeat zip bombs. ZIP has
+        // no outer wrapper to cap, so each member is an independent
+        // compression bomb vector. Read one extra byte past the cap
+        // so we can tell "exactly at the cap" from "would have
+        // exceeded it".
+        (&mut entry)
+            .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
             .read_to_end(&mut buf)
             .map_err(|e| CoreError::ParseError {
                 path: PathBuf::new(),
                 detail: format!("read zip entry {name}: {e}"),
             })?;
+        if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+            return Err(CoreError::ParseError {
+                path: PathBuf::new(),
+                detail: format!(
+                    "zip member '{name}' exceeds the \
+                     {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
+                     cap; refusing to probe (likely a zip bomb)"
+                ),
+            });
+        }
         std::fs::write(&probe_path, &buf).map_err(|e| CoreError::ParseError {
             path: PathBuf::new(),
             detail: format!("stage zip entry {name} for probe: {e}"),
@@ -358,12 +374,26 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
             }
             let compression = entry.compression();
             let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(entry.size()));
-            entry
+            // Cap the decompressed entry body so a single-member zip
+            // bomb can't OOM the cleaner. See
+            // `MAX_ENTRY_DECOMPRESSED_BYTES` at the top of this file.
+            (&mut entry)
+                .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("read entry body {name}: {e}"),
                 })?;
+            if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+                return Err(CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "zip member '{name}' exceeds the \
+                         {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
+                         cap; refusing to clean (likely a zip bomb)"
+                    ),
+                });
+            }
             (buf, compression)
         };
 
@@ -566,6 +596,21 @@ impl CleanedTarEntry {
 /// streaming TAR pipeline noted in `CLAUDE.md` is the real fix.
 const MAX_TAR_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 
+/// Upper bound on the decompressed size of a single archive entry
+/// (ZIP or TAR) the reader and cleaner will accept. Unlike the outer
+/// tar cap above, this protects the ZIP paths too - ZIP has no
+/// outer wrapper to cap, so each individual member can be a
+/// compression bomb all on its own. Set to 1 GiB to match the tar
+/// cap's spirit: a single-member tar.bz2 with a legitimate 1 GiB
+/// payload still fits under both caps.
+///
+/// Tests override this to a much smaller value (4 MiB) so they can
+/// exercise the cap-hit error path with a manageable fixture.
+#[cfg(not(test))]
+pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+#[cfg(test)]
+pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
+
 // F1 preserves symlinks as their own enum variant; the writer loop has to
 // branch on regular-vs-symlink to emit the correct `EntryType`, which pushes
 // the top-level body past clippy's 100-line ceiling. Splitting it further
@@ -639,11 +684,30 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 cleaned_members.push(CleanedTarEntry::Symlink { name, target });
                 continue;
             }
+            // The outer tar stream is already capped at
+            // `MAX_TAR_DECOMPRESSED_BYTES` above, so individual
+            // members are implicitly bounded too. We still cap each
+            // member explicitly so a future refactor that switches
+            // to a streaming outer pipeline does not silently re-open
+            // the per-entry zip-bomb hole.
             let mut buf = Vec::new();
-            entry.read_to_end(&mut buf).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("read entry {name}: {e}"),
-            })?;
+            (&mut entry)
+                .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+                .read_to_end(&mut buf)
+                .map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("read entry {name}: {e}"),
+                })?;
+            if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+                return Err(CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "tar member '{name}' exceeds the \
+                         {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
+                         cap; refusing to clean (likely a zip bomb)"
+                    ),
+                });
+            }
             let action = dispatch_member(&name, buf, tmpdir.path(), path)?;
             match action {
                 ArchiveAction::Write(cleaned) => {

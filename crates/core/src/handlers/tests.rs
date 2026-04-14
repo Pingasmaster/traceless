@@ -1514,6 +1514,59 @@ fn test_image_reader_empty_when_nothing_present() {
 }
 
 #[test]
+fn test_document_handler_rejects_oversized_zip_member() {
+    // Bug 18 regression: a DOCX / ODT / EPUB whose members
+    // decompress past the per-entry size cap used to OOM the
+    // cleaner because `ZipFile::read_to_end` was uncapped. The fix
+    // caps each read via `.take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)`
+    // and returns a `CleanError` with a "zip bomb" marker if the
+    // cap is hit. Tests use a 4 MiB cap (via a `#[cfg(test)]`
+    // override on `archive::MAX_ENTRY_DECOMPRESSED_BYTES`) so we
+    // can exercise the error path with a 5 MiB fixture that is
+    // still small enough for CI.
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("bomb.docx");
+    let dst = dir.path().join("out.docx");
+
+    // 5 MiB of zeros: one byte past the 4 MiB test cap. STORED
+    // (uncompressed) so the zip crate does not amplify the cost
+    // during fixture build.
+    let oversized = vec![0u8; 5 * 1024 * 1024];
+
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let stored = SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Stored);
+
+        writer.start_file("[Content_Types].xml", stored).unwrap();
+        writer
+            .write_all(
+                b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>",
+            )
+            .unwrap();
+        writer.start_file("word/document.xml", stored).unwrap();
+        writer.write_all(&oversized).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    let result = handler.clean_metadata(&src, &dst);
+    assert!(
+        result.is_err(),
+        "oversized zip member must produce a CleanError"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("zip bomb") || msg.contains("decompression cap"),
+        "error must mention the cap, got: {msg}"
+    );
+}
+
+#[test]
 fn test_file_store_handles_large_batch_without_panic() {
     // Regression for the unbounded-thread-spawn bug: FileStore used to
     // spawn one OS thread per added path. A user dropping a few
