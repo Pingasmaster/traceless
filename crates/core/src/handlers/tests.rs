@@ -1438,3 +1438,46 @@ fn test_docx_embedded_webp_xmp_is_stripped() {
     assert!(cleaned_webp.starts_with(b"RIFF"));
     assert_eq!(&cleaned_webp[8..12], b"WEBP");
 }
+
+#[test]
+fn test_file_store_handles_large_batch_without_panic() {
+    // Regression for the unbounded-thread-spawn bug: FileStore used to
+    // spawn one OS thread per added path. A user dropping a few
+    // thousand files (a photo library, a Downloads folder) hit
+    // `RLIMIT_NPROC` and panicked the calling thread via
+    // `thread::spawn`'s internal `expect("failed to spawn thread")`,
+    // crashing the frontend. The fix submits jobs to a shared worker
+    // pool bounded at `min(available_parallelism(), 8)`, so a 300-
+    // file batch now queues 300 jobs behind 8-or-fewer workers instead
+    // of opening 300 thread handles at once.
+    let dir = TempDir::new().unwrap();
+    let mut paths = Vec::with_capacity(300);
+    for i in 0..300 {
+        let p = dir.path().join(format!("note{i:03}.txt"));
+        fs::write(&p, format!("note {i}\n").as_bytes()).unwrap();
+        paths.push(p);
+    }
+
+    let mut store = FileStore::new();
+    let (tx, rx) = async_channel::unbounded();
+    store.add_files(paths, &tx);
+
+    // add_files must return immediately after enqueuing the jobs,
+    // not panic, and every entry must be in the store.
+    assert_eq!(store.len(), 300);
+
+    // Drain events until every file reaches a terminal state. The
+    // text/plain handler reports `HasNoMetadata` so all 300 end up
+    // in non-working states. Cap the drain at ~20 events per file
+    // so a regression that leaves files stuck in `Working` shows up
+    // as a test failure, not a hang.
+    drain_until(&mut store, &rx, 6000, |s| {
+        s.files().iter().all(|f| !f.state.is_working())
+    });
+
+    assert_eq!(store.len(), 300);
+    assert!(
+        store.files().iter().all(|f| !f.state.is_working()),
+        "every file must reach a terminal state"
+    );
+}

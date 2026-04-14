@@ -11,6 +11,7 @@ pub mod file_store;
 pub mod format_support;
 pub mod handlers;
 pub mod metadata;
+mod worker_pool;
 
 pub use config::{
     archive_unknown_policy, set_archive_unknown_policy, PolicyGuard, UnknownMemberPolicy,

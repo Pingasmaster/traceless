@@ -1,12 +1,12 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::thread;
 
 use async_channel::Sender;
 
 use crate::file::{FileEntry, FileId, FileState};
 use crate::format_support::{detect_mime, get_handler_for_mime};
+use crate::worker_pool;
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -104,10 +104,14 @@ impl FileStore {
             ids.push(id);
         }
 
-        // Spawn background threads to check metadata
+        // Submit per-file metadata scans to the shared worker pool.
+        // Using the pool bounds concurrency at
+        // `min(available_parallelism(), 8)`; the old `thread::spawn`
+        // per path hit `RLIMIT_NPROC` (and panicked the caller) on
+        // large batches such as a dropped photo library.
         for (path, id) in paths.into_iter().zip(ids) {
             let tx = tx.clone();
-            thread::spawn(move || {
+            worker_pool::submit(move || {
                 check_file_metadata(id, &path, &tx);
             });
         }
@@ -139,7 +143,7 @@ impl FileStore {
         self.files.clear();
     }
 
-    /// Start cleaning all cleanable files in background threads.
+    /// Start cleaning all cleanable files on the shared worker pool.
     pub fn clean_files(&mut self, tx: &Sender<FileStoreEvent>) {
         for entry in &mut self.files {
             if entry.state.is_cleanable() {
@@ -147,7 +151,7 @@ impl FileStore {
                 let path = entry.path.clone();
                 let id = entry.id;
                 let tx = tx.clone();
-                thread::spawn(move || {
+                worker_pool::submit(move || {
                     clean_single_file(id, &path, &tx);
                 });
             }
