@@ -15,6 +15,7 @@ pub mod svg;
 pub mod torrent;
 pub mod xmp;
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests;
 pub mod video;
 pub mod xml_util;

@@ -322,6 +322,7 @@ fn find_bytes(hay: &[u8], needle: &[u8]) -> Option<usize> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

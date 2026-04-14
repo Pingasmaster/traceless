@@ -80,6 +80,7 @@ pub fn local_name(start: &BytesStart<'_>) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

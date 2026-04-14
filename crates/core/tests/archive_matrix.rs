@@ -12,6 +12,7 @@
 //! Policy-mutating tests live in mat2_parity.rs so they share that
 //! binary's serialization lock; these tests don't touch the atomic.
 
+#![allow(clippy::unwrap_used)]
 mod common;
 
 use std::fs;

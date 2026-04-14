@@ -325,6 +325,7 @@ fn encode_into(value: &BencodeValue, out: &mut Vec<u8>) {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

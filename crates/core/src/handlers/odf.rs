@@ -90,6 +90,7 @@ fn strip_tracked_changes(xml: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

@@ -393,7 +393,7 @@ fn pdf_object_to_string(obj: &lopdf::Object) -> String {
 }
 
 #[cfg(test)]
-#[allow(clippy::too_many_lines)]
+#[allow(clippy::too_many_lines, clippy::unwrap_used)]
 mod tests {
     use super::*;
     use lopdf::dictionary;

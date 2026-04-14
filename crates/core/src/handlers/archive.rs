@@ -941,6 +941,7 @@ fn apply_unknown_policy(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

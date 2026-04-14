@@ -182,6 +182,7 @@ fn clean_ppm(path: &Path, output_path: &Path) -> Result<(), CoreError> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

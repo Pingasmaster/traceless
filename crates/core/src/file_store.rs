@@ -431,6 +431,7 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
         clean_single_file, run_job_with_terminal_error, FileId, FileState, FileStoreEvent,

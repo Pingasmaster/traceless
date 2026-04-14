@@ -141,6 +141,7 @@ pub fn is_cleanable_media(name: &str) -> Option<&'static str> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

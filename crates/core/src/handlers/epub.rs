@@ -248,6 +248,7 @@ fn generate_urn_uuid_v4(rng: &mut impl Rng) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

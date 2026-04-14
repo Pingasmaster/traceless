@@ -244,6 +244,7 @@ fn item_key_to_string(key: ItemKey) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

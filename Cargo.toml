@@ -52,6 +52,13 @@ pedantic = { level = "deny", priority = -1 }
 nursery = { level = "deny", priority = -1 }
 cargo = { level = "deny", priority = -1 }
 
+# Individual restriction-group lints. Clippy refuses to enable the
+# whole `restriction` group because it contains contradictory rules,
+# but each lint inside is individually opt-in. `unwrap_used` bans
+# `.unwrap()` in production code and pushes every call site to
+# either handle the error or document the invariant via `.expect()`.
+unwrap_used = "deny"
+
 # --- noisy / subjective ---
 doc_markdown = "allow"             # flags acronyms and filenames in prose
 missing_errors_doc = "allow"       # internal library; errors are obvious from types

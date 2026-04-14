@@ -4,6 +4,7 @@
 //! `mat2/tests/`. Every test here maps to a specific upstream test and
 //! is tagged in its docstring with the mat2 class::method it mirrors.
 
+#![allow(clippy::unwrap_used)]
 mod common;
 
 use std::fs;

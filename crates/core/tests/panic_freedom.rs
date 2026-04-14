@@ -12,6 +12,7 @@
 //! user hits them. Every time one of those gets caught, the repro
 //! bytes should get pasted into this file as a new matrix row.
 
+#![allow(clippy::unwrap_used)]
 use std::fs;
 use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::Path;

@@ -387,6 +387,7 @@ pub(super) fn generic_dynimage_lines(
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

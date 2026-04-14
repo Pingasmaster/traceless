@@ -7,6 +7,7 @@
 //!   passes paths via `&OsStr`, so none of these should need
 //!   escaping, but the only way to prove that is to try each one.
 
+#![allow(clippy::unwrap_used)]
 mod common;
 
 use std::fs;

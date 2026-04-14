@@ -349,6 +349,7 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
     use tempfile::TempDir;

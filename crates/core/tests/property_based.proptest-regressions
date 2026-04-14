@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 5bd2a7568993ec9549fa820fdff2475e3c807d69db06d8b2da49cf84a012d6f7 # shrinks to attr_name = "onaa"

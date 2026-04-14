@@ -8,6 +8,7 @@
 
 #![allow(dead_code)]
 
+#![allow(clippy::unwrap_used)]
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;

@@ -9,6 +9,7 @@
 //! These tests use proptest's default configuration (256 cases per
 //! property). They finish well under a second on a modern machine.
 
+#![allow(clippy::unwrap_used)]
 mod common;
 
 use std::fs;

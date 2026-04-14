@@ -192,6 +192,7 @@ pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Command {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

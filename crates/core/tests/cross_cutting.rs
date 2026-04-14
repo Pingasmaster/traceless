@@ -21,6 +21,7 @@
 // silence it file-wide because the uniformity is the point.
 #![allow(clippy::unnecessary_wraps)]
 
+#![allow(clippy::unwrap_used)]
 mod common;
 
 use std::fs;

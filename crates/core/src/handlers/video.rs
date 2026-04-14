@@ -191,6 +191,7 @@ fn parse_json_kv(line: &str) -> Option<(String, String)> {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 

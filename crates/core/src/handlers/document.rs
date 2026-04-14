@@ -659,6 +659,7 @@ pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
 
