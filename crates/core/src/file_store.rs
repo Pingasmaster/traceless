@@ -254,17 +254,19 @@ pub fn collect_paths(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 /// `&'static str` and `String` cases cover every panic that Rust's
 /// own `panic!` macro produces. Anything else falls back to a
 /// generic label.
-fn panic_payload_message(payload: &(dyn Any + Send)) -> &'static str {
+///
+/// Returns an owned `String` rather than a `&'static str` so the
+/// `String` payload arm does not have to `Box::leak` the cloned
+/// bytes. The caller immediately feeds the result into `format!`,
+/// which allocates anyway, so there is no efficiency cost to owning.
+fn panic_payload_message(payload: &(dyn Any + Send)) -> String {
     if let Some(s) = payload.downcast_ref::<&'static str>() {
-        return s;
+        return (*s).to_string();
     }
     if let Some(s) = payload.downcast_ref::<String>() {
-        // Leak a 'static slice: this is the panic path, so we don't
-        // care about the one-off allocation. Using Box::leak keeps
-        // the return type `&'static str` so both arms match.
-        return Box::leak(s.clone().into_boxed_str());
+        return s.clone();
     }
-    "<non-string panic payload>"
+    "<non-string panic payload>".to_string()
 }
 
 /// Run a job that emits lifecycle events through `tx`, catching any
@@ -550,5 +552,46 @@ mod tests {
                 panic!("wrapper emitted a spurious error on a successful job");
             }
         }
+    }
+
+    #[test]
+    fn panic_with_formatted_string_payload_is_surfaced_without_leaking() {
+        // Regression: `panic_payload_message` used to `Box::leak` the
+        // cloned bytes of the `String` panic payload to satisfy its
+        // `&'static str` return type. Every formatted `panic!("{}", x)`
+        // call therefore leaked its message for the rest of the
+        // process lifetime. The function now returns `String`, so the
+        // payload owns its bytes and is freed at the end of the
+        // `format!` that embeds it. This test also documents that the
+        // `String`-payload branch still delivers the message to the
+        // UI, not just the `&'static str` branch.
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        run_job_with_terminal_error(
+            FileId(99),
+            &tx,
+            FileState::ErrorWhileCheckingMetadata,
+            || {
+                let dynamic = format!("runtime-{}-error", 42);
+                panic!("{dynamic}");
+            },
+        );
+        drop(tx);
+
+        let mut saw_terminal_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let FileStoreEvent::FileError { id, state, message } = event {
+                assert_eq!(id, FileId(99));
+                assert_eq!(state, FileState::ErrorWhileCheckingMetadata);
+                assert!(
+                    message.contains("runtime-42-error"),
+                    "message should carry the formatted String payload, got: {message}"
+                );
+                saw_terminal_error = true;
+            }
+        }
+        assert!(
+            saw_terminal_error,
+            "expected a FileError event for the formatted-panic path"
+        );
     }
 }
