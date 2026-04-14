@@ -1135,3 +1135,137 @@ fn test_clean_jpeg_full_end_to_end() {
     }
 }
 
+// ===== Non-UTF-8 XML member tests (regression for the stub-bypass bug) =====
+
+/// Encode an ASCII string as UTF-16 LE with a leading byte-order mark.
+/// Used by the non-UTF-8 regression tests below.
+fn utf16_le_bom(ascii: &str) -> Vec<u8> {
+    let mut out = vec![0xFF, 0xFE];
+    for ch in ascii.chars() {
+        let mut buf = [0u16; 2];
+        let units = ch.encode_utf16(&mut buf);
+        for &u in units.iter() {
+            out.extend_from_slice(&u.to_le_bytes());
+        }
+    }
+    out
+}
+
+#[test]
+fn test_document_clean_replaces_non_utf8_core_xml_with_stub() {
+    // A DOCX whose `docProps/core.xml` is UTF-16 LE with a BOM used to
+    // slip through the cleaner entirely because `clean_entry` returned
+    // `Ok(raw)` on a non-UTF-8 decode. The fix routes stub paths ahead
+    // of the decode so a hostile `core.xml` still gets replaced with
+    // the empty property stub, regardless of encoding.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("stub-bypass.docx");
+    let output = dir.path().join("cleaned.docx");
+
+    let core_xml_utf16 = utf16_le_bom(
+        r#"<?xml version="1.0" encoding="UTF-16"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>LeakedAuthor</dc:creator></cp:coreProperties>"#,
+    );
+
+    {
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>")
+            .unwrap();
+        writer.start_file("docProps/core.xml", options).unwrap();
+        writer.write_all(&core_xml_utf16).unwrap();
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&path, &output).unwrap();
+
+    // Extract the cleaned archive and look at docProps/core.xml
+    // directly. We can't string-search the raw archive bytes because
+    // the member is deflate-compressed, so the needle bytes only
+    // survive verbatim inside the decompressed member body.
+    let cleaned_file = fs::File::open(&output).unwrap();
+    let mut cleaned_zip = zip::ZipArchive::new(cleaned_file).unwrap();
+    let mut core_xml = Vec::new();
+    {
+        use std::io::Read;
+        let mut entry = cleaned_zip.by_name("docProps/core.xml").unwrap();
+        entry.read_to_end(&mut core_xml).unwrap();
+    }
+
+    // The leaked author name must not appear in the member body in
+    // any encoding: UTF-8 (would mean the cleaner copied the stub AND
+    // the original), UTF-16 LE (would mean the raw bytes were shipped
+    // through unchanged).
+    let has_utf8 = core_xml.windows(12).any(|w| w == b"LeakedAuthor");
+    let utf16_needle = utf16_le_bom("LeakedAuthor");
+    let has_utf16 = core_xml
+        .windows(utf16_needle.len() - 2)
+        .any(|w| w == &utf16_needle[2..]);
+    assert!(
+        !has_utf8 && !has_utf16,
+        "cleaned core.xml still contains the leaked author name: {core_xml:?}"
+    );
+
+    // The stub must be in place: the cleaned archive must contain the
+    // minimal cp:coreProperties element emitted by `ooxml::CORE_STUB`.
+    let as_str = String::from_utf8_lossy(&core_xml);
+    assert!(
+        as_str.contains("<cp:coreProperties"),
+        "cleaned core.xml must carry the coreProperties stub, got: {as_str}"
+    );
+}
+
+#[test]
+fn test_document_clean_rejects_non_utf8_non_stub_xml() {
+    // A non-stub XML member (e.g. a `.rels` file) with invalid UTF-8
+    // bytes must produce a hard `CleanError` instead of being silently
+    // passed through. We don't try to recover; we bail and let the
+    // caller surface the error.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("bad-rels.docx");
+    let output = dir.path().join("cleaned.docx");
+
+    {
+        let file = fs::File::create(&path).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let options = zip::write::SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>")
+            .unwrap();
+        // A .rels file is XML-like, so it hits the XML branch, but it
+        // is NOT a stub path, so the cleaner must refuse to ship it.
+        // 0xFF / 0xFE / 0xFD are all invalid UTF-8 lead bytes.
+        writer
+            .start_file("_rels/.rels", options)
+            .unwrap();
+        writer.write_all(&[0xFFu8, 0xFE, 0xFD, 0x00, 0xFF]).unwrap();
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
+            .unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    let result = handler.clean_metadata(&path, &output);
+    assert!(
+        result.is_err(),
+        "cleaner must refuse non-UTF-8 non-stub XML members"
+    );
+    let msg = format!("{}", result.unwrap_err());
+    assert!(
+        msg.contains("not valid UTF-8"),
+        "error message should mention UTF-8, got: {msg}"
+    );
+}

@@ -213,14 +213,76 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
             .is_some_and(|&c| c == b'/');
 
         i += 1; // consume `>`
+
+        // `<script>` and `<style>` are HTML "raw text" elements: their
+        // content is consumed verbatim until the matching closing tag,
+        // and `<`, `<!--`, etc. inside the body are NOT tags. Without
+        // this branch the generic tokenizer re-parses JavaScript string
+        // literals as HTML, and the cleaner then drops fake `<meta>` /
+        // `<!-- -->` / `<title>` spans out of the script body, producing
+        // broken JS.
+        let rawtext_needle: Option<&[u8]> =
+            if !self_closing && local_name == "script" {
+                Some(b"script")
+            } else if !self_closing && local_name == "style" {
+                Some(b"style")
+            } else {
+                None
+            };
         tokens.push(Token::Open {
             raw: &src[start..i],
             local_name,
             self_closing,
         });
+        if let Some(needle) = rawtext_needle {
+            let body_start = i;
+            let body_end = find_rawtext_close(bytes, i, needle);
+            if body_end > body_start {
+                tokens.push(Token::Text(&src[body_start..body_end]));
+            }
+            i = body_end;
+        }
     }
 
     tokens
+}
+
+/// Scan forward from `from` looking for an ASCII-case-insensitive
+/// `</name` sequence followed by a tag terminator (`>`, whitespace, `/`,
+/// or EOF). Returns the byte offset at which the raw-text body ends
+/// (i.e. the `<` of the closing tag), or `bytes.len()` if no closing
+/// tag is found - an unterminated `<script>` at EOF is legal HTML and
+/// the whole tail is the script body.
+fn find_rawtext_close(bytes: &[u8], from: usize, name: &[u8]) -> usize {
+    let mut i = from;
+    let len = bytes.len();
+    while i < len {
+        if bytes[i] != b'<' {
+            i += 1;
+            continue;
+        }
+        // Need room for `</` + name + one terminator byte.
+        let header_end = i + 2 + name.len();
+        if header_end > len {
+            return len;
+        }
+        if bytes[i + 1] != b'/' {
+            i += 1;
+            continue;
+        }
+        let name_slice = &bytes[i + 2..i + 2 + name.len()];
+        if !name_slice.eq_ignore_ascii_case(name) {
+            i += 1;
+            continue;
+        }
+        // Must be followed by `>`, whitespace, or `/` to be a real close.
+        let next = bytes[header_end];
+        if next == b'>' || next == b'/' || next.is_ascii_whitespace() {
+            return i;
+        }
+        i += 1;
+    }
+    len
 }
 
 fn local_from_close(inner: &str) -> String {
@@ -525,5 +587,114 @@ mod tests {
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
         assert_eq!(out, r#"<html><body><div class="a"><span>inner</span></div></body></html>"#);
+    }
+
+    #[test]
+    fn html_clean_preserves_script_literal_meta_and_comment() {
+        // HTML "raw text" elements: a `<meta>` or `<!--...-->` that
+        // appears inside a `<script>` body is part of a JavaScript
+        // string literal, not a real HTML element. Without the
+        // rawtext-aware tokenizer the cleaner drops these and
+        // produces broken JS.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        let input = r#"<html><head><script>var s = "<meta name='x' content='y'>";
+var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
+        fs::write(&src, input).unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains("<meta name='x' content='y'>"),
+            "script literal HTML must round-trip verbatim, got: {out}"
+        );
+        assert!(
+            out.contains("<!--nope-->"),
+            "script literal comment must round-trip verbatim, got: {out}"
+        );
+        assert!(out.contains("</script>"));
+        assert!(out.contains("ok"));
+    }
+
+    #[test]
+    fn html_clean_preserves_style_literal_content() {
+        // `<style>` is also a raw-text element. A `content:` value with
+        // angle brackets must pass through untouched.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        let input = r#"<html><head><style>.x::before { content: "<meta>"; }</style></head><body/></html>"#;
+        fs::write(&src, input).unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains(r#"content: "<meta>""#),
+            "style literal must round-trip verbatim, got: {out}"
+        );
+        assert!(out.contains("</style>"));
+    }
+
+    #[test]
+    fn html_reader_ignores_meta_inside_script_body() {
+        // The reader shares the same tokenizer. A `<meta>` embedded as
+        // a JavaScript string literal must not be surfaced as real
+        // metadata the user sees.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        fs::write(
+            &src,
+            r#"<html><head><script>var s = "<meta name='author' content='not-a-real-meta'>";</script></head></html>"#,
+        )
+        .unwrap();
+        let h = HtmlHandler;
+        let meta = h.read_metadata(&src).unwrap();
+        let dump = format!("{meta:?}");
+        assert!(
+            !dump.contains("not-a-real-meta"),
+            "reader surfaced a `<meta>` that lived inside a script body: {dump}"
+        );
+    }
+
+    #[test]
+    fn html_clean_script_unterminated_at_eof_preserved() {
+        // Unterminated `<script>` bodies at EOF are legal HTML - the
+        // raw-text body simply runs to the end of the input. The
+        // cleaner must keep the whole tail verbatim instead of dropping
+        // fake inner tags.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(
+            &src,
+            r#"<html><body><script>var s = "<meta>"; // no close"#,
+        )
+        .unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains(r#"var s = "<meta>"; // no close"#),
+            "unterminated script body must round-trip: {out}"
+        );
+    }
+
+    #[test]
+    fn html_clean_script_close_tag_case_insensitive() {
+        // The raw-text scanner must match `</SCRIPT>` in any case.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(
+            &src,
+            r#"<html><body><SCRIPT>var s = "<meta>";</SCRIPT><p>after</p></body></html>"#,
+        )
+        .unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(out.contains(r#"var s = "<meta>";"#));
+        assert!(out.contains("<p>after</p>"));
     }
 }

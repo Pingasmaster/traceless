@@ -354,19 +354,32 @@ fn clean_entry(
         return Ok(raw);
     }
 
-    // 3. XML entries: decode once, dispatch, re-encode.
+    // 3. OOXML stub paths (docProps/core.xml, app.xml, custom.xml) get
+    //    replaced with a compile-time constant regardless of what the
+    //    original bytes are. Doing this before the UTF-8 decode means a
+    //    crafted document with a non-UTF-8 core.xml (UTF-16 BOM, Latin-1,
+    //    etc.) still gets its metadata stripped instead of slipping
+    //    through the fallback below.
+    if kind == ArchiveKind::Ooxml
+        && let Some(stub) = ooxml::stub_for_path(entry_name)
+    {
+        return Ok(stub.as_bytes().to_vec());
+    }
+
+    // 4. XML entries: decode once, dispatch, re-encode. OOXML / ODF / EPUB
+    //    all mandate UTF-8 (ODF additionally allows UTF-16) for XML parts,
+    //    so a non-UTF-8 payload here is either corrupt or hostile. Refuse
+    //    to ship it rather than silently re-emitting unprocessed bytes -
+    //    the caller surfaces the error to the user.
     let Ok(xml) = std::str::from_utf8(&raw) else {
-        return Ok(raw);
+        return Err(CleanEntryError(format!(
+            "XML member '{entry_name}' is not valid UTF-8; \
+             refusing to ship unprocessed bytes into the cleaned archive"
+        )));
     };
 
     let cleaned: String = match kind {
-        ArchiveKind::Ooxml => {
-            if let Some(stub) = ooxml::stub_for_path(entry_name) {
-                stub.to_string()
-            } else {
-                ooxml::clean_xml_member(entry_name, xml)
-            }
-        }
+        ArchiveKind::Ooxml => ooxml::clean_xml_member(entry_name, xml),
         ArchiveKind::Odf => odf::clean_xml_member(entry_name, xml),
         ArchiveKind::Epub => {
             if epub::is_opf_path(entry_name) {

@@ -378,6 +378,16 @@ impl ffi::FileListModel {
             self.as_mut().rust_mut().store.remove_file(idx);
             self.as_mut().end_remove_rows();
         }
+        // Keep the detail drawer anchored to the same file across the
+        // removal. If we removed the currently-viewed row, clear the
+        // drawer; if we removed a row above it, shift the stored row
+        // index down by one so it still points at the same file.
+        let current_detail = self.rust().detail_row;
+        if current_detail == index {
+            self.as_mut().reset_detail();
+        } else if current_detail > index && current_detail > 0 {
+            self.as_mut().set_detail_row(current_detail - 1);
+        }
         self.as_mut().update_aux_properties();
     }
 
@@ -387,6 +397,9 @@ impl ffi::FileListModel {
             self.as_mut().rust_mut().store.clear();
             self.as_mut().end_reset_model();
         }
+        // The file backing the drawer snapshot is gone; wipe the drawer
+        // so QML doesn't keep rendering from a stale `detail_items`.
+        self.as_mut().reset_detail();
         self.as_mut().update_aux_properties();
     }
 
@@ -395,7 +408,27 @@ impl ffi::FileListModel {
         if let Some(tx) = self.as_mut().rust_mut().tx.clone() {
             self.as_mut().rust_mut().store.clean_files(&tx);
         }
+        // Re-snapshot the drawer so it reflects the cleaned file's
+        // (soon-to-be-empty) metadata instead of the stale pre-clean
+        // values captured by the last `select_detail`.
+        let current_detail = self.rust().detail_row;
+        if current_detail >= 0 {
+            self.as_mut().select_detail(current_detail);
+        }
         self.as_mut().update_aux_properties();
+    }
+
+    /// Wipe the detail drawer snapshot. Called when the backing file is
+    /// removed or the store is cleared.
+    fn reset_detail(mut self: Pin<&mut Self>) {
+        {
+            let mut state = self.as_mut().rust_mut();
+            state.detail_items.clear();
+            state.detail_error.clear();
+        }
+        self.as_mut().set_detail_row(-1);
+        self.as_mut().set_detail_group(QString::default());
+        self.as_mut().set_detail_count(0);
     }
 
     fn select_detail(mut self: Pin<&mut Self>, row: i32) {

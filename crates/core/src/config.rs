@@ -93,9 +93,24 @@ impl Drop for PolicyGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Mutex, MutexGuard, OnceLock, PoisonError};
+
+    // `ARCHIVE_UNKNOWN_POLICY` is a process-wide atomic, so any test that
+    // sets it must hold this lock to stop other tests in this module from
+    // interleaving their set/load sequences and observing each other's
+    // writes. The integration tests in `tests/mat2_parity.rs` have their
+    // own copy of this lock for the same reason - both cannot share one
+    // because they live in separate test binaries.
+    fn policy_test_lock() -> MutexGuard<'static, ()> {
+        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        LOCK.get_or_init(|| Mutex::new(()))
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+    }
 
     #[test]
     fn default_is_keep() {
+        let _lock = policy_test_lock();
         // Note: other tests may have already mutated the global atomic.
         // We use a guard that explicitly resets, not a plain assertion.
         let _g = PolicyGuard::new(UnknownMemberPolicy::Keep);
@@ -104,6 +119,7 @@ mod tests {
 
     #[test]
     fn round_trips_all_variants() {
+        let _lock = policy_test_lock();
         for p in [
             UnknownMemberPolicy::Keep,
             UnknownMemberPolicy::Omit,
@@ -116,6 +132,7 @@ mod tests {
 
     #[test]
     fn guard_restores_previous() {
+        let _lock = policy_test_lock();
         let _outer = PolicyGuard::new(UnknownMemberPolicy::Keep);
         {
             let _inner = PolicyGuard::new(UnknownMemberPolicy::Abort);
