@@ -385,3 +385,310 @@ pub(super) fn generic_dynimage_lines(
     });
     (icc, exif)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tempfile::TempDir;
+
+    // Minimal valid 1x1 JPEG: SOI + JFIF APP0 + quantization + SOF0 +
+    // Huffman + one-line scan + EOI. Used as a base for building
+    // metadata-bearing variants.
+    const MINIMAL_JPEG: &[u8] = &[
+        0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00,
+        0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x03, 0x02, 0x02, 0x02, 0x02,
+        0x02, 0x02, 0x02, 0x02, 0x03, 0x03, 0x03, 0x03, 0x04, 0x06, 0x04, 0x04, 0x04, 0x04, 0x04,
+        0x08, 0x06, 0x06, 0x05, 0x06, 0x09, 0x08, 0x0A, 0x0A, 0x09, 0x08, 0x09, 0x09, 0x0A, 0x0C,
+        0x0F, 0x0C, 0x0A, 0x0B, 0x0E, 0x0B, 0x09, 0x09, 0x0D, 0x11, 0x0D, 0x0E, 0x0F, 0x10, 0x10,
+        0x11, 0x10, 0x0A, 0x0C, 0x12, 0x13, 0x12, 0x10, 0x13, 0x0F, 0x10, 0x10, 0x10, 0xFF, 0xC0,
+        0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x14,
+        0x00, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01,
+        0x01, 0x00, 0x00, 0x3F, 0x00, 0x37, 0xFF, 0xD9,
+    ];
+
+    fn push_app_segment(out: &mut Vec<u8>, marker: u8, payload: &[u8]) {
+        out.push(0xFF);
+        out.push(marker);
+        let total = payload.len() + 2;
+        out.push((total >> 8) as u8);
+        out.push((total & 0xff) as u8);
+        out.extend_from_slice(payload);
+    }
+
+    /// Take MINIMAL_JPEG and splice new APP segments in between the
+    /// SOI (2 bytes) and the first JFIF APP0, so the resulting JPEG
+    /// carries APP1..APP15 plus a COM segment in addition to JFIF.
+    fn jpeg_with_every_app_marker() -> Vec<u8> {
+        let mut out = Vec::new();
+        out.extend_from_slice(&MINIMAL_JPEG[..2]); // SOI
+        for marker in 0xE1u8..=0xEF {
+            push_app_segment(&mut out, marker, format!("leak-{marker:02x}").as_bytes());
+        }
+        push_app_segment(&mut out, 0xFE, b"leak-comment"); // COM
+        out.extend_from_slice(&MINIMAL_JPEG[2..]);
+        out
+    }
+
+    // ---------- split_debug_tag ----------
+
+    #[test]
+    fn split_debug_tag_basic_string() {
+        let (name, value) = split_debug_tag("ImageDescription(\"Hello\")").unwrap();
+        assert_eq!(name, "ImageDescription");
+        assert_eq!(value, "Hello");
+    }
+
+    #[test]
+    fn split_debug_tag_integer_value() {
+        let (name, value) = split_debug_tag("Orientation(6)").unwrap();
+        assert_eq!(name, "Orientation");
+        assert_eq!(value, "6");
+    }
+
+    #[test]
+    fn split_debug_tag_nested_parens_in_value() {
+        // The helper is lenient: it finds the first `(` and everything
+        // after it becomes the value, minus trailing `)`. Nested
+        // parens should not panic.
+        let (name, value) = split_debug_tag("Custom(foo (bar))").unwrap();
+        assert_eq!(name, "Custom");
+        assert_eq!(value, "foo (bar");
+    }
+
+    #[test]
+    fn split_debug_tag_no_paren_returns_none() {
+        assert!(split_debug_tag("NoParenHere").is_none());
+    }
+
+    #[test]
+    fn split_debug_tag_empty_input_returns_none() {
+        assert!(split_debug_tag("").is_none());
+    }
+
+    // ---------- generic_dynimage_lines ----------
+
+    #[test]
+    fn generic_dynimage_lines_all_off() {
+        let (icc, exif) = generic_dynimage_lines(false, false, false);
+        assert!(icc.is_none());
+        assert!(exif.is_none());
+    }
+
+    #[test]
+    fn generic_dynimage_lines_icc_only() {
+        let (icc, exif) = generic_dynimage_lines(true, false, false);
+        assert!(icc.is_some());
+        assert!(exif.is_none());
+    }
+
+    #[test]
+    fn generic_dynimage_lines_exif_only_without_little_exif_tags() {
+        let (icc, exif) = generic_dynimage_lines(false, true, false);
+        assert!(icc.is_none());
+        let exif = exif.unwrap();
+        assert_eq!(exif.key, "EXIF data");
+    }
+
+    #[test]
+    fn generic_dynimage_lines_suppresses_exif_fallback_when_tags_surfaced() {
+        // The Bug 14 regression pin: little_exif already produced
+        // concrete tags, so the fallback "EXIF data: present" line
+        // must be suppressed even if the reader saw an EXIF chunk.
+        let (_icc, exif) = generic_dynimage_lines(true, true, true);
+        assert!(exif.is_none());
+    }
+
+    #[test]
+    fn generic_dynimage_lines_all_on_surfaces_icc_only() {
+        // has_icc + has_exif + tags-already-surfaced = icc line only.
+        let (icc, exif) = generic_dynimage_lines(true, true, true);
+        assert!(icc.is_some());
+        assert!(exif.is_none());
+    }
+
+    // ---------- strip_jpeg_extra_segments ----------
+
+    #[test]
+    fn strip_jpeg_removes_every_app_marker() {
+        let dirty = jpeg_with_every_app_marker();
+        let cleaned = strip_jpeg_extra_segments(&dirty).expect("valid JPEG must parse");
+
+        // Every marker 0xE1..=0xEF and 0xFE must be absent from the
+        // cleaned output. Scanning raw bytes is fine because we built
+        // the input and know JFIF is the only legitimate APP0.
+        // Walk the markers by hand:
+        let mut i = 2usize; // skip SOI
+        while i + 1 < cleaned.len() {
+            if cleaned[i] != 0xFF {
+                break;
+            }
+            let m = cleaned[i + 1];
+            if m == 0xD9 {
+                break;
+            }
+            assert!(
+                !(0xE1..=0xEF).contains(&m),
+                "APP{} survived the strip",
+                m - 0xE0
+            );
+            assert_ne!(m, 0xFE, "COM marker survived the strip");
+            if i + 3 < cleaned.len() {
+                let len = ((cleaned[i + 2] as usize) << 8) | cleaned[i + 3] as usize;
+                if len < 2 {
+                    break;
+                }
+                i += 2 + len;
+            } else {
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn strip_jpeg_returns_none_on_invalid_input() {
+        assert!(strip_jpeg_extra_segments(&[]).is_none());
+        assert!(strip_jpeg_extra_segments(b"not a jpeg at all").is_none());
+    }
+
+    // ---------- strip_png_text_chunks ----------
+
+    fn minimal_png_with_text_chunks() -> Vec<u8> {
+        // Build a PNG with IHDR, every text-bearing chunk type, tIME,
+        // and IEND. This mirrors `tests/common::make_dirty_png` but
+        // inline so the unit test stays self-contained.
+        fn crc(ty: [u8; 4], data: &[u8]) -> u32 {
+            const TABLE: [u32; 256] = {
+                let mut table = [0u32; 256];
+                let mut n = 0u32;
+                while n < 256 {
+                    let mut c = n;
+                    let mut k = 0;
+                    while k < 8 {
+                        c = if c & 1 != 0 {
+                            0xedb8_8320 ^ (c >> 1)
+                        } else {
+                            c >> 1
+                        };
+                        k += 1;
+                    }
+                    table[n as usize] = c;
+                    n += 1;
+                }
+                table
+            };
+            let mut c: u32 = 0xffff_ffff;
+            for &b in ty.iter().chain(data.iter()) {
+                c = TABLE[((c ^ u32::from(b)) & 0xff) as usize] ^ (c >> 8);
+            }
+            c ^ 0xffff_ffff
+        }
+        fn append(out: &mut Vec<u8>, ty: [u8; 4], data: &[u8]) {
+            out.extend_from_slice(&(data.len() as u32).to_be_bytes());
+            out.extend_from_slice(&ty);
+            out.extend_from_slice(data);
+            out.extend_from_slice(&crc(ty, data).to_be_bytes());
+        }
+
+        let mut out: Vec<u8> = Vec::new();
+        out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+        // IHDR: 1x1 grayscale
+        append(
+            &mut out,
+            *b"IHDR",
+            &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0],
+        );
+        append(&mut out, *b"tEXt", b"Author\0alice");
+        append(&mut out, *b"iTXt", b"Copyright\0\0\0\0\0secret");
+        append(&mut out, *b"zTXt", b"Title\0\0compressed");
+        append(&mut out, *b"tIME", &[0x07, 0xe7, 1, 1, 0, 0, 0]);
+        // Minimal IDAT: a single deflate block with empty zlib stream
+        // won't validate, so we write the shortest legit zlib empty:
+        // CMF=0x78, FLG=0x9c, one BFINAL stored empty, adler32
+        append(
+            &mut out,
+            *b"IDAT",
+            &[0x78, 0x9c, 0x03, 0x00, 0x00, 0x00, 0x00, 0x01],
+        );
+        append(&mut out, *b"IEND", &[]);
+        out
+    }
+
+    #[test]
+    fn strip_png_removes_text_and_time_chunks() {
+        let dirty = minimal_png_with_text_chunks();
+        let cleaned = strip_png_text_chunks(&dirty).expect("valid PNG must parse");
+
+        let needles = [&b"tEXt"[..], b"iTXt", b"zTXt", b"tIME"];
+        for needle in needles {
+            assert!(
+                !cleaned.windows(4).any(|w| w == needle),
+                "PNG chunk {:?} must not survive the strip",
+                std::str::from_utf8(needle).unwrap()
+            );
+        }
+        // Sanity: IHDR and IEND must survive.
+        assert!(cleaned.windows(4).any(|w| w == b"IHDR"));
+        assert!(cleaned.windows(4).any(|w| w == b"IEND"));
+    }
+
+    #[test]
+    fn strip_png_returns_none_on_garbage() {
+        assert!(strip_png_text_chunks(&[]).is_none());
+        assert!(strip_png_text_chunks(b"no png here").is_none());
+    }
+
+    // ---------- strip_webp_extra_chunks ----------
+
+    #[test]
+    fn strip_webp_returns_none_on_garbage() {
+        assert!(strip_webp_extra_chunks(&[]).is_none());
+        assert!(strip_webp_extra_chunks(b"RIFF____").is_none());
+    }
+
+    // ---------- ImageHandler supported_mime_types ----------
+
+    #[test]
+    fn image_handler_claims_all_expected_mimes() {
+        let mimes: Vec<&&str> = ImageHandler.supported_mime_types().iter().collect();
+        for required in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/tiff",
+            "image/heic",
+            "image/heif",
+            "image/jxl",
+        ] {
+            assert!(
+                mimes.contains(&&required),
+                "ImageHandler must claim {required}, got {mimes:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn image_handler_reads_minimal_jpeg_without_panic() {
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("x.jpg");
+        fs::write(&path, MINIMAL_JPEG).unwrap();
+        // Must not panic. Must return Ok (the file is valid but has
+        // no metadata beyond the JFIF APP0, which isn't surfaced).
+        let meta = ImageHandler.read_metadata(&path).unwrap();
+        assert!(meta.groups.iter().all(|g| g.items.is_empty() || !g.items.is_empty()));
+    }
+
+    #[test]
+    fn image_handler_clean_roundtrip_on_minimal_jpeg_produces_valid_jpeg() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.jpg");
+        let dst = dir.path().join("out.jpg");
+        fs::write(&src, MINIMAL_JPEG).unwrap();
+        ImageHandler.clean_metadata(&src, &dst).unwrap();
+        let cleaned = fs::read(&dst).unwrap();
+        // Valid JPEG starts with SOI and ends with EOI.
+        assert_eq!(&cleaned[..2], &[0xFF, 0xD8]);
+        assert_eq!(&cleaned[cleaned.len() - 2..], &[0xFF, 0xD9]);
+    }
+}

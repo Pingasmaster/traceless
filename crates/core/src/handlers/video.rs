@@ -189,3 +189,201 @@ fn parse_json_kv(line: &str) -> Option<(String, String)> {
     }
     Some((key, value))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- check_tool_available ----------
+
+    #[test]
+    fn check_tool_available_rejects_nonexistent_binary() {
+        let err = check_tool_available("this-binary-definitely-does-not-exist-xyz123")
+            .expect_err("missing tool must return Err");
+        match err {
+            CoreError::ToolNotFound { tool } => {
+                assert_eq!(tool, "this-binary-definitely-does-not-exist-xyz123");
+            }
+            other => panic!("expected ToolNotFound, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn check_tool_available_accepts_sh() {
+        // `/bin/sh -version` usually exits non-zero but some shells
+        // do print a version and exit 0. We just confirm the helper
+        // produces *a* result without panicking either way.
+        let _ = check_tool_available("sh");
+    }
+
+    // ---------- parse_json_kv ----------
+
+    #[test]
+    fn parse_json_kv_basic_pair() {
+        let (k, v) = parse_json_kv("\"title\": \"Hello\"").unwrap();
+        assert_eq!(k, "title");
+        assert_eq!(v, "Hello");
+    }
+
+    #[test]
+    fn parse_json_kv_trailing_comma() {
+        let (k, v) = parse_json_kv("\"author\": \"Alice\",").unwrap();
+        assert_eq!(k, "author");
+        assert_eq!(v, "Alice");
+    }
+
+    #[test]
+    fn parse_json_kv_rejects_no_colon() {
+        assert!(parse_json_kv("\"no colon here\"").is_none());
+    }
+
+    #[test]
+    fn parse_json_kv_rejects_empty_key() {
+        assert!(parse_json_kv("\"\": \"value\"").is_none());
+    }
+
+    #[test]
+    fn parse_json_kv_rejects_empty_value() {
+        assert!(parse_json_kv("\"key\": \"\"").is_none());
+    }
+
+    #[test]
+    fn parse_json_kv_splits_on_first_colon_only() {
+        // Values containing a colon (e.g. URLs, timestamps) must not
+        // be truncated at the second colon. `splitn(2, ':')` enforces
+        // this.
+        let (k, v) = parse_json_kv("\"url\": \"https://example.com\"").unwrap();
+        assert_eq!(k, "url");
+        assert_eq!(v, "https://example.com");
+    }
+
+    #[test]
+    fn parse_json_kv_handles_leading_whitespace() {
+        let (k, v) = parse_json_kv("      \"indent\": \"deep\"").unwrap();
+        assert_eq!(k, "indent");
+        assert_eq!(v, "deep");
+    }
+
+    // ---------- parse_ffprobe_json ----------
+
+    #[test]
+    fn parse_ffprobe_json_extracts_simple_tags_block() {
+        let json = r#"{
+  "format": {
+    "filename": "foo.mp4",
+    "tags": {
+      "title": "Hello",
+      "author": "Alice"
+    }
+  }
+}"#;
+        let items = parse_ffprobe_json(json);
+        assert_eq!(items.len(), 2);
+        assert!(items.iter().any(|i| i.key == "title" && i.value == "Hello"));
+        assert!(items.iter().any(|i| i.key == "author" && i.value == "Alice"));
+    }
+
+    #[test]
+    fn parse_ffprobe_json_ignores_outer_filename_field() {
+        // `filename` appears at the `format` level, not under `tags`.
+        // The parser must only collect entries from inside `tags` so
+        // the outer `filename` is not surfaced.
+        let json = r#"{
+  "format": {
+    "filename": "leak.mp4",
+    "tags": {
+      "encoder": "Lavf60"
+    }
+  }
+}"#;
+        let items = parse_ffprobe_json(json);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "encoder");
+        assert_eq!(items[0].value, "Lavf60");
+    }
+
+    #[test]
+    fn parse_ffprobe_json_handles_multiple_tags_blocks() {
+        // Two streams + one format, each with its own tags block.
+        let json = r#"{
+  "streams": [
+    {
+      "codec_name": "h264",
+      "tags": {
+        "language": "eng"
+      }
+    },
+    {
+      "codec_name": "aac",
+      "tags": {
+        "language": "und"
+      }
+    }
+  ],
+  "format": {
+    "tags": {
+      "title": "My Video"
+    }
+  }
+}"#;
+        let items = parse_ffprobe_json(json);
+        assert!(items.iter().any(|i| i.key == "title" && i.value == "My Video"));
+        assert!(items.iter().filter(|i| i.key == "language").count() == 2);
+    }
+
+    #[test]
+    fn parse_ffprobe_json_on_empty_input_returns_empty() {
+        assert!(parse_ffprobe_json("").is_empty());
+    }
+
+    #[test]
+    fn parse_ffprobe_json_on_non_json_returns_empty() {
+        // Any text that doesn't contain `"tags"` produces no items.
+        assert!(parse_ffprobe_json("this is not json at all").is_empty());
+    }
+
+    #[test]
+    fn parse_ffprobe_json_when_tags_literal_appears_in_value() {
+        // `"tags"` inside a string value should not trigger collection
+        // unless the same line also contains an opening brace,
+        // mimicking how ffprobe actually formats the section header.
+        //
+        // Note: this is an accepted limitation of the hand-rolled
+        // parser. The parser opens a tags block only on a line that
+        // contains both `"tags"` and `{`, so a standalone value like
+        // `"comment": "some tags here"` does not false-positive.
+        let json = r#"{
+  "format": {
+    "tags": {
+      "comment": "has tags in value"
+    }
+  }
+}"#;
+        let items = parse_ffprobe_json(json);
+        assert_eq!(items.len(), 1);
+        assert_eq!(items[0].key, "comment");
+    }
+
+    // ---------- supported_mime_types ----------
+
+    #[test]
+    fn video_handler_supports_every_expected_mime() {
+        let mimes: Vec<&&str> = VideoHandler.supported_mime_types().iter().collect();
+        for required in [
+            "video/mp4",
+            "video/x-matroska",
+            "video/webm",
+            "video/x-msvideo",
+            "video/avi",
+            "video/quicktime",
+            "video/x-ms-wmv",
+            "video/x-flv",
+            "video/ogg",
+        ] {
+            assert!(
+                mimes.contains(&&required),
+                "VideoHandler must claim {required}, got {mimes:?}"
+            );
+        }
+    }
+}

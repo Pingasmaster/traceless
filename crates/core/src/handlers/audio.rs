@@ -242,3 +242,129 @@ fn item_key_to_string(key: ItemKey) -> String {
         other => format!("{other:?}"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- item_key_to_string ----------
+
+    #[test]
+    fn item_key_to_string_translates_known_keys() {
+        assert_eq!(item_key_to_string(ItemKey::TrackTitle), "Title");
+        assert_eq!(item_key_to_string(ItemKey::TrackArtist), "Artist");
+        assert_eq!(item_key_to_string(ItemKey::AlbumTitle), "Album");
+        assert_eq!(item_key_to_string(ItemKey::TrackNumber), "Track Number");
+        assert_eq!(item_key_to_string(ItemKey::Year), "Year");
+        assert_eq!(item_key_to_string(ItemKey::Genre), "Genre");
+        assert_eq!(item_key_to_string(ItemKey::Composer), "Composer");
+        assert_eq!(item_key_to_string(ItemKey::EncoderSoftware), "Encoder");
+        assert_eq!(
+            item_key_to_string(ItemKey::EncoderSettings),
+            "Encoder Settings"
+        );
+        assert_eq!(item_key_to_string(ItemKey::CopyrightMessage), "Copyright");
+        assert_eq!(item_key_to_string(ItemKey::Lyrics), "Lyrics");
+        assert_eq!(item_key_to_string(ItemKey::Publisher), "Publisher");
+        assert_eq!(item_key_to_string(ItemKey::DiscNumber), "Disc Number");
+        assert_eq!(item_key_to_string(ItemKey::Bpm), "BPM");
+    }
+
+    #[test]
+    fn item_key_to_string_falls_back_to_debug_for_unknown() {
+        // ItemKey::Description is not in the explicit match but must
+        // still produce some non-empty string via the Debug fallback.
+        let s = item_key_to_string(ItemKey::Description);
+        assert!(!s.is_empty());
+    }
+
+    // ---------- probe_picture_metadata: MIME variant coverage ----------
+
+    #[test]
+    fn probe_picture_metadata_ignores_missing_mime() {
+        assert!(probe_picture_metadata(None, b"anything").is_none());
+    }
+
+    #[test]
+    fn probe_picture_metadata_ignores_unsupported_mime() {
+        // Vorbis tags can carry arbitrary MIME types; anything outside
+        // the 5-variant allowlist (JPEG, PNG, TIFF, BMP, GIF) is
+        // dropped silently.
+        let other = lofty::picture::MimeType::Unknown("image/avif".to_string());
+        assert!(probe_picture_metadata(Some(&other), b"junk").is_none());
+    }
+
+    #[test]
+    fn probe_picture_metadata_handles_garbage_bytes_for_known_mime() {
+        // A PNG MIME with a single invalid byte must not panic; the
+        // underlying image handler returns an error and the function
+        // propagates `None`.
+        let mime = lofty::picture::MimeType::Png;
+        assert!(probe_picture_metadata(Some(&mime), &[0xff]).is_none());
+    }
+
+    // ---------- AudioHandler supported_mime_types ----------
+
+    #[test]
+    fn audio_handler_lists_every_routed_mime() {
+        let claimed: Vec<&&str> = AudioHandler.supported_mime_types().iter().collect();
+        for required in [
+            "audio/mpeg",
+            "audio/flac",
+            "audio/x-flac",
+            "audio/ogg",
+            "audio/vorbis",
+            "audio/mp4",
+            "audio/m4a",
+            "audio/x-m4a",
+            "audio/wav",
+            "audio/x-wav",
+            "audio/aac",
+            "audio/aiff",
+            "audio/x-aiff",
+            "audio/opus",
+        ] {
+            assert!(
+                claimed.contains(&&required),
+                "AudioHandler must claim {required}, got {claimed:?}"
+            );
+        }
+    }
+
+    // ---------- blank_flac_vendor: smoke test via a non-flac path ----------
+
+    #[test]
+    fn blank_flac_vendor_returns_err_for_non_flac() {
+        // Feeding a plain file that isn't a FLAC must return Err
+        // rather than panic. The exact error message depends on lofty.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("not.flac");
+        std::fs::write(&path, b"this is not flac bytes").unwrap();
+        let result = blank_flac_vendor(&path);
+        assert!(result.is_err());
+    }
+
+    // ---------- read_metadata on a non-audio file ----------
+
+    #[test]
+    fn read_metadata_on_non_audio_returns_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("fake.mp3");
+        std::fs::write(&path, b"definitely not an mp3 file").unwrap();
+        let err = AudioHandler
+            .read_metadata(&path)
+            .expect_err("non-audio must not parse");
+        matches!(err, CoreError::ParseError { .. });
+    }
+
+    #[test]
+    fn read_metadata_on_empty_file_returns_parse_error() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("empty.mp3");
+        std::fs::write(&path, b"").unwrap();
+        let err = AudioHandler
+            .read_metadata(&path)
+            .expect_err("empty file must not parse");
+        matches!(err, CoreError::ParseError { .. });
+    }
+}

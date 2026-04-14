@@ -391,3 +391,429 @@ fn pdf_object_to_string(obj: &lopdf::Object) -> String {
         _ => format!("{obj:?}"),
     }
 }
+
+#[cfg(test)]
+#[allow(clippy::too_many_lines)]
+mod tests {
+    use super::*;
+    use lopdf::dictionary;
+    use lopdf::{Dictionary, Document as PdfDoc, Object, Stream};
+    use tempfile::TempDir;
+
+    /// Build a tiny valid PDF with the requested catalog entries set.
+    /// Only the fields explicitly listed here are present; everything
+    /// else stays at whatever lopdf's default is. Always sets a valid
+    /// one-page tree so `clean_metadata` can walk it.
+    fn make_pdf_with_catalog_keys(path: &std::path::Path, extra_catalog_keys: &[(&[u8], Object)]) {
+        let mut doc = PdfDoc::with_version("1.7");
+
+        let info_id = doc.add_object(dictionary! {
+            "Author" => Object::string_literal("leak-author"),
+            "Producer" => Object::string_literal("leak-producer"),
+        });
+        doc.trailer.set("Info", Object::Reference(info_id));
+
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+
+        let mut catalog = dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        };
+        for (k, v) in extra_catalog_keys {
+            catalog.set(std::str::from_utf8(k).unwrap(), v.clone());
+        }
+        let catalog_id = doc.add_object(catalog);
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::string_literal("fingerprint-a"),
+                Object::string_literal("fingerprint-b"),
+            ]),
+        );
+
+        doc.save(path).unwrap();
+    }
+
+    /// Open a freshly cleaned PDF and return its catalog dict so the
+    /// test can assert that a given key is absent.
+    fn reload_catalog(path: &std::path::Path) -> PdfDoc {
+        PdfDoc::load(path).expect("cleaned PDF must still load")
+    }
+
+    #[test]
+    fn pdf_object_to_string_handles_primitive_variants() {
+        assert_eq!(pdf_object_to_string(&Object::string_literal("hi")), "hi");
+        assert_eq!(
+            pdf_object_to_string(&Object::Name(b"Foo".to_vec())),
+            "Foo"
+        );
+        assert_eq!(pdf_object_to_string(&Object::Integer(42)), "42");
+        assert_eq!(pdf_object_to_string(&Object::Real(3.5)), "3.5");
+        assert_eq!(pdf_object_to_string(&Object::Boolean(true)), "true");
+    }
+
+    #[test]
+    fn clean_strips_info_dict_from_trailer() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+        make_pdf_with_catalog_keys(&src, &[]);
+
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        let reloaded = reload_catalog(&dst);
+        assert!(
+            reloaded.trailer.get(b"Info").is_err(),
+            "cleaned PDF must have no /Info in the trailer"
+        );
+    }
+
+    #[test]
+    fn clean_zeros_trailer_id() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+        make_pdf_with_catalog_keys(&src, &[]);
+
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        let reloaded = reload_catalog(&dst);
+        let id = reloaded
+            .trailer
+            .get(b"ID")
+            .expect("trailer /ID must still exist (required by some readers)");
+        let arr = id.as_array().unwrap();
+        assert_eq!(arr.len(), 2);
+        for entry in arr {
+            if let Object::String(bytes, _) = entry {
+                assert!(bytes.is_empty(), "ID component must be zero-length, got {bytes:?}");
+            } else {
+                panic!("trailer /ID entry must be a string, got {entry:?}");
+            }
+        }
+    }
+
+    /// Parameterised stripping test: for each catalog key we claim to
+    /// strip, build a PDF with that key populated, clean, and assert
+    /// the key is absent from the reloaded catalog.
+    #[test]
+    fn every_catalog_key_in_strip_list_is_removed() {
+        for key in CATALOG_KEYS_TO_STRIP {
+            let dir = TempDir::new().unwrap();
+            let src = dir.path().join("in.pdf");
+            let dst = dir.path().join("out.pdf");
+
+            // A stand-in object for each key. Use a reference to a
+            // throwaway dict for the ones that expect a dict; strings
+            // are accepted for the primitive keys.
+            let placeholder = Object::string_literal("leak");
+            make_pdf_with_catalog_keys(&src, &[(key, placeholder)]);
+
+            PdfHandler.clean_metadata(&src, &dst).unwrap();
+            let reloaded = reload_catalog(&dst);
+            let catalog = reloaded.catalog().unwrap();
+            assert!(
+                catalog.get(key).is_err(),
+                "catalog key {} must be removed",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
+    fn clean_strips_per_page_metadata_and_annots() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+
+        // Build a PDF whose single page carries per-page /Metadata and
+        // /Annots. make_pdf_with_catalog_keys only sets catalog keys,
+        // so we do this one by hand.
+        let mut doc = PdfDoc::with_version("1.7");
+        let xmp_stream = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"leak xmp".to_vec(),
+        )));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+                "Metadata" => Object::Reference(xmp_stream),
+                "Annots" => Object::Array(vec![]),
+                "PieceInfo" => dictionary! { "App" => Object::string_literal("leak") },
+                "UserUnit" => Object::Real(1.25),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(&src).unwrap();
+
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        let reloaded = reload_catalog(&dst);
+        let pages: Vec<ObjectId> = reloaded.page_iter().collect();
+        assert_eq!(pages.len(), 1);
+        let page = reloaded.get_dictionary(pages[0]).unwrap();
+        for key in PAGE_KEYS_TO_STRIP {
+            assert!(
+                page.get(key).is_err(),
+                "per-page key {} must be removed",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
+    fn clean_does_not_crash_on_missing_info_reference() {
+        // Build a PDF whose trailer /Info points at an object ID that
+        // doesn't exist. The handler must handle this without
+        // panicking.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+
+        let mut doc = PdfDoc::with_version("1.7");
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        // Dangling /Info reference
+        doc.trailer
+            .set("Info", Object::Reference((9999, 0)));
+        doc.save(&src).unwrap();
+
+        // Should not panic. Result can be ok or err, but not a panic.
+        let _ = PdfHandler.clean_metadata(&src, &dst);
+    }
+
+    #[test]
+    fn read_metadata_surfaces_info_fields_before_clean() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        make_pdf_with_catalog_keys(&src, &[]);
+
+        let meta = PdfHandler.read_metadata(&src).unwrap();
+        let keys: Vec<&str> = meta
+            .groups
+            .iter()
+            .flat_map(|g| g.items.iter().map(|i| i.key.as_str()))
+            .collect();
+        assert!(keys.contains(&"Author"), "expected Author in {keys:?}");
+        assert!(keys.contains(&"Producer"), "expected Producer in {keys:?}");
+    }
+
+    #[test]
+    fn read_metadata_on_empty_info_is_empty() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+        make_pdf_with_catalog_keys(&src, &[]);
+
+        // After clean, reading must surface no Author/Producer.
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        let meta = PdfHandler.read_metadata(&dst).unwrap();
+        let items: Vec<(&str, &str)> = meta
+            .groups
+            .iter()
+            .flat_map(|g| g.items.iter().map(|i| (i.key.as_str(), i.value.as_str())))
+            .collect();
+        assert!(
+            !items.iter().any(|(k, _)| *k == "Author"),
+            "cleaned PDF still surfaces Author: {items:?}"
+        );
+        assert!(
+            !items.iter().any(|(k, _)| *k == "Producer"),
+            "cleaned PDF still surfaces Producer: {items:?}"
+        );
+    }
+
+    #[test]
+    fn clean_strips_xobject_metadata() {
+        // Image XObjects in the wild carry their own XMP via /Metadata
+        // on the stream dict. The cleaner walks `doc.objects` and
+        // strips /Metadata, /LastModified, /OC, /PieceInfo from each
+        // XObject stream. Build one and verify.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+
+        let mut doc = PdfDoc::with_version("1.7");
+
+        // A tagged XObject stream carrying a /Metadata ref.
+        let xmp_id = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"xmp leak".to_vec(),
+        )));
+        let mut xobj_dict = Dictionary::new();
+        xobj_dict.set("Type", Object::Name(b"XObject".to_vec()));
+        xobj_dict.set("Subtype", Object::Name(b"Image".to_vec()));
+        xobj_dict.set("Width", Object::Integer(1));
+        xobj_dict.set("Height", Object::Integer(1));
+        xobj_dict.set("Metadata", Object::Reference(xmp_id));
+        xobj_dict.set(
+            "LastModified",
+            Object::string_literal("D:20240101000000Z"),
+        );
+        let xobj_id = doc.add_object(Object::Stream(Stream::new(
+            xobj_dict,
+            b"pixel".to_vec(),
+        )));
+
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => dictionary! {
+                    "XObject" => dictionary! {
+                        "Im1" => Object::Reference(xobj_id),
+                    },
+                },
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(&src).unwrap();
+
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        let reloaded = reload_catalog(&dst);
+        // Walk every stream object and assert no /Metadata or
+        // /LastModified survived on any XObject.
+        for obj in reloaded.objects.values() {
+            if let Object::Stream(s) = obj {
+                let is_xobject =
+                    matches!(s.dict.get(b"Type"), Ok(Object::Name(n)) if n == b"XObject")
+                        || (s.dict.has(b"Subtype") && s.dict.has(b"Width"));
+                if is_xobject {
+                    assert!(
+                        s.dict.get(b"Metadata").is_err(),
+                        "XObject retained /Metadata after clean"
+                    );
+                    assert!(
+                        s.dict.get(b"LastModified").is_err(),
+                        "XObject retained /LastModified after clean"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn clean_with_no_catalog_does_not_panic() {
+        // Build the minimum viable PDF that lopdf will save, then
+        // remove the Root reference so the catalog is unreachable.
+        // Edge case: the handler must not crash, only return an Err.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+
+        let mut doc = PdfDoc::with_version("1.7");
+        let page_id = doc.new_object_id();
+        let pages_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Pages".to_vec()),
+            "Count" => Object::Integer(1),
+            "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+        });
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(&src).unwrap();
+
+        let result = std::panic::catch_unwind(|| {
+            let _ = PdfHandler.clean_metadata(&src, &dst);
+        });
+        assert!(result.is_ok(), "handler panicked on degenerate PDF");
+    }
+}

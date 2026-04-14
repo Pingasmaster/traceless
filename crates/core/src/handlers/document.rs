@@ -657,3 +657,202 @@ pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
 
     String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ---------- parse_xml_metadata ----------
+
+    #[test]
+    fn parse_xml_metadata_extracts_dc_creator() {
+        let xml = r#"<?xml version="1.0"?>
+<cp:coreProperties xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <dc:creator>Alice</dc:creator>
+  <dc:title>Secret</dc:title>
+</cp:coreProperties>"#;
+        let items = parse_xml_metadata(xml);
+        // `parse_xml_metadata` keys by local name, not namespace-qualified.
+        assert!(items.iter().any(|i| i.key == "creator" && i.value == "Alice"));
+        assert!(items.iter().any(|i| i.key == "title" && i.value == "Secret"));
+    }
+
+    #[test]
+    fn parse_xml_metadata_skips_non_metadata_tags() {
+        let xml = r#"<?xml version="1.0"?>
+<root>
+  <somethingElse>ignored</somethingElse>
+  <creator>alice</creator>
+</root>"#;
+        let items = parse_xml_metadata(xml);
+        assert!(items.iter().all(|i| i.key != "somethingElse"));
+        assert!(items.iter().any(|i| i.key == "creator"));
+    }
+
+    #[test]
+    fn parse_xml_metadata_on_malformed_xml_returns_partial_or_empty() {
+        // `quick_xml` returns Err on the first invalid token; the
+        // parser breaks out and returns whatever it collected before
+        // the error. Must not panic.
+        let xml = "<root><creator>alice</creator><broken attr=";
+        let items = parse_xml_metadata(xml);
+        // The `alice` line was collected before the malformed tag, so
+        // the result may contain it. Either way, no panic is the
+        // point.
+        assert!(items.iter().all(|i| i.key != "broken"));
+    }
+
+    #[test]
+    fn parse_xml_metadata_on_empty_input_returns_empty() {
+        assert!(parse_xml_metadata("").is_empty());
+    }
+
+    #[test]
+    fn parse_xml_metadata_ignores_empty_text_nodes() {
+        let xml = "<root><creator>   </creator></root>";
+        let items = parse_xml_metadata(xml);
+        assert!(items.is_empty());
+    }
+
+    // ---------- is_metadata_tag ----------
+
+    #[test]
+    fn is_metadata_tag_accepts_every_listed_tag() {
+        for tag in [
+            "creator",
+            "title",
+            "subject",
+            "description",
+            "keywords",
+            "lastModifiedBy",
+            "created",
+            "modified",
+            "revision",
+            "category",
+            "Application",
+            "AppVersion",
+            "Company",
+            "Manager",
+            "TotalTime",
+            "Pages",
+            "Words",
+            "Characters",
+            "Paragraphs",
+            "Lines",
+            "initial-creator",
+            "creation-date",
+            "date",
+            "editing-cycles",
+            "editing-duration",
+            "generator",
+            "language",
+            "print-date",
+            "printed-by",
+            "identifier",
+            "rights",
+            "publisher",
+            "contributor",
+        ] {
+            assert!(is_metadata_tag(tag), "{tag} must be recognized");
+        }
+    }
+
+    #[test]
+    fn is_metadata_tag_rejects_random_strings() {
+        assert!(!is_metadata_tag(""));
+        assert!(!is_metadata_tag("unknown"));
+        assert!(!is_metadata_tag("body"));
+        assert!(!is_metadata_tag("p"));
+    }
+
+    #[test]
+    fn is_metadata_tag_is_case_sensitive() {
+        // Intentional: OOXML cores use PascalCase (`Application`,
+        // `Manager`) while OpenDocument uses lowercase (`creator`).
+        // Mismatched case is not a metadata tag.
+        assert!(is_metadata_tag("Application"));
+        assert!(!is_metadata_tag("APPLICATION"));
+        assert!(!is_metadata_tag("application"));
+    }
+
+    // ---------- is_xml_like ----------
+
+    #[test]
+    fn is_xml_like_recognizes_every_ooxml_odf_epub_extension() {
+        for ext in ["foo.xml", "word/_rels/document.xml.rels", "content.opf", "toc.ncx", "ch1.xhtml"] {
+            assert!(is_xml_like(ext), "{ext} should be xml-like");
+        }
+    }
+
+    #[test]
+    fn is_xml_like_rejects_binary_paths() {
+        assert!(!is_xml_like("image.jpg"));
+        assert!(!is_xml_like("video.mp4"));
+        assert!(!is_xml_like(""));
+    }
+
+    #[test]
+    fn is_xml_like_is_case_insensitive() {
+        assert!(is_xml_like("DOC.XML"));
+        assert!(is_xml_like("CONTENT.OPF"));
+    }
+
+    // ---------- strip_embedded_image ----------
+
+    #[test]
+    fn strip_embedded_image_returns_none_for_unparseable_bytes() {
+        assert!(strip_embedded_image(b"not an image", "image/jpeg").is_none());
+        assert!(strip_embedded_image(b"", "image/png").is_none());
+    }
+
+    // ---------- parse_xml_metadata on OOXML core.xml ----------
+
+    #[test]
+    fn parse_xml_metadata_handles_ooxml_core_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<cp:coreProperties
+    xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+    xmlns:dc="http://purl.org/dc/elements/1.1/"
+    xmlns:dcterms="http://purl.org/dc/terms/"
+    xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">
+  <dc:creator>Alice Test</dc:creator>
+  <cp:lastModifiedBy>Bob Edit</cp:lastModifiedBy>
+  <dcterms:created xsi:type="dcterms:W3CDTF">2024-01-01T00:00:00Z</dcterms:created>
+  <dcterms:modified xsi:type="dcterms:W3CDTF">2024-01-02T00:00:00Z</dcterms:modified>
+  <cp:revision>5</cp:revision>
+</cp:coreProperties>"#;
+        let items = parse_xml_metadata(xml);
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert!(keys.contains(&"creator"));
+        assert!(keys.contains(&"lastModifiedBy"));
+        assert!(keys.contains(&"created"));
+        assert!(keys.contains(&"modified"));
+        assert!(keys.contains(&"revision"));
+    }
+
+    // ---------- parse_xml_metadata on OpenDocument meta.xml ----------
+
+    #[test]
+    fn parse_xml_metadata_handles_odf_meta_xml() {
+        let xml = r#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                      xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0"
+                      xmlns:dc="http://purl.org/dc/elements/1.1/">
+  <office:meta>
+    <meta:initial-creator>Alice</meta:initial-creator>
+    <meta:creation-date>2024-01-01T00:00:00</meta:creation-date>
+    <meta:editing-cycles>17</meta:editing-cycles>
+    <meta:generator>LibreOffice</meta:generator>
+    <dc:creator>Bob</dc:creator>
+    <dc:date>2024-01-02T00:00:00</dc:date>
+  </office:meta>
+</office:document-meta>"#;
+        let items = parse_xml_metadata(xml);
+        let keys: Vec<&str> = items.iter().map(|i| i.key.as_str()).collect();
+        assert!(keys.contains(&"initial-creator"));
+        assert!(keys.contains(&"creation-date"));
+        assert!(keys.contains(&"editing-cycles"));
+        assert!(keys.contains(&"generator"));
+        assert!(keys.contains(&"creator"));
+    }
+}
