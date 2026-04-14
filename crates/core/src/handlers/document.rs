@@ -4,6 +4,7 @@ use std::path::Path;
 
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
+use img_parts::webp::WebP;
 use img_parts::{DynImage, ImageEXIF, ImageICC};
 use quick_xml::events::Event;
 use quick_xml::reader::Reader;
@@ -429,6 +430,7 @@ fn strip_embedded_image(data: &[u8], mime: &str) -> Option<Vec<u8>> {
     match mime {
         "image/jpeg" => strip_jpeg_extra_segments(&buf),
         "image/png" => strip_png_text_chunks(&buf),
+        "image/webp" => strip_webp_extra_chunks(&buf),
         _ => Some(buf),
     }
 }
@@ -460,6 +462,22 @@ fn strip_png_text_chunks(data: &[u8]) -> Option<Vec<u8>> {
     let mut buf = Vec::new();
     let mut cursor = Cursor::new(&mut buf);
     png.encoder().write_to(&mut cursor).ok()?;
+    Some(buf)
+}
+
+/// Strip the WebP `XMP ` RIFF chunk that `DynImage` can't clear
+/// (img-parts 0.4 has no WebP XMP setter). Without this, a document
+/// that embeds a WebP exported from Lightroom / Photoshop / Affinity
+/// still carries the XMP packet - `dc:creator`, `xmpMM:InstanceID`,
+/// GPS, etc. - into the cleaned archive.
+fn strip_webp_extra_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK_XMP: [u8; 4] = *b"XMP ";
+    let mut webp = WebP::from_bytes(data.to_vec().into()).ok()?;
+    webp.remove_chunks_by_id(CHUNK_XMP);
+
+    let mut buf = Vec::new();
+    let mut cursor = Cursor::new(&mut buf);
+    webp.encoder().write_to(&mut cursor).ok()?;
     Some(buf)
 }
 

@@ -4,6 +4,7 @@ use std::path::Path;
 
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
+use img_parts::webp::WebP;
 use img_parts::{DynImage, ImageEXIF, ImageICC};
 use little_exif::metadata::Metadata as ExifMetadata;
 
@@ -113,6 +114,7 @@ impl FormatHandler for ImageHandler {
                 }
             }
         } else {
+            let data_vec = data.clone();
             match DynImage::from_bytes(data.into()) {
                 Ok(Some(img)) => {
                     if img.icc_profile().is_some() {
@@ -131,6 +133,30 @@ impl FormatHandler for ImageHandler {
                 Ok(None) => {}
                 Err(e) => {
                     log::debug!("img-parts parse error for {}: {e}", path.display());
+                }
+            }
+
+            // WebP XMP packet is in a `XMP ` RIFF chunk that `DynImage`
+            // doesn't expose via `exif()` / `icc_profile()`. Pull it out
+            // directly via `WebP::from_bytes` so the reader surfaces the
+            // XMP fields the cleaner is about to strip.
+            if mime == "image/webp"
+                && let Ok(webp) = WebP::from_bytes(data_vec.into())
+            {
+                const CHUNK_XMP: [u8; 4] = *b"XMP ";
+                for chunk in webp.chunks_by_id(CHUNK_XMP) {
+                    let Some(body) = chunk.content().data() else {
+                        continue;
+                    };
+                    let parsed = super::xmp::parse_xmp_fields(body.as_ref());
+                    if parsed.is_empty() {
+                        items.push(MetadataItem {
+                            key: "XMP data".to_string(),
+                            value: "present".to_string(),
+                        });
+                    } else {
+                        items.extend(parsed);
+                    }
                 }
             }
         }
@@ -210,6 +236,13 @@ impl FormatHandler for ImageHandler {
                             "PNG post-strip failed; refusing to ship partially-stripped image"
                                 .to_string(),
                     })?
+                } else if mime == "image/webp" {
+                    strip_webp_extra_chunks(&buf).ok_or_else(|| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail:
+                            "WebP post-strip failed; refusing to ship partially-stripped image"
+                                .to_string(),
+                    })?
                 } else {
                     buf
                 };
@@ -285,6 +318,26 @@ fn strip_png_text_chunks(data: &[u8]) -> Option<Vec<u8>> {
 
     let mut buf = Vec::new();
     png.encoder()
+        .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
+        .ok()?;
+    Some(buf)
+}
+
+/// Strip WebP metadata chunks. img-parts 0.4's `DynImage::set_exif` and
+/// `set_icc_profile` clear the `EXIF` and `ICCP` RIFF chunks, but it
+/// has no setter for the `XMP ` chunk (`CHUNK_XMP` is declared in the
+/// crate but never referenced internally). A WebP exported from
+/// Lightroom / Photoshop / Affinity carries an Adobe XMP packet in
+/// that chunk with `dc:creator`, `xmpMM:InstanceID`, GPS, etc., which
+/// would otherwise pass through untouched. Parse the re-encoded buffer
+/// directly here and drop every `XMP ` chunk.
+fn strip_webp_extra_chunks(data: &[u8]) -> Option<Vec<u8>> {
+    const CHUNK_XMP: [u8; 4] = *b"XMP ";
+    let mut webp = WebP::from_bytes(data.to_vec().into()).ok()?;
+    webp.remove_chunks_by_id(CHUNK_XMP);
+
+    let mut buf = Vec::new();
+    webp.encoder()
         .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
         .ok()?;
     Some(buf)

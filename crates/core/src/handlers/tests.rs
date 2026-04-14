@@ -1269,3 +1269,172 @@ fn test_document_clean_rejects_non_utf8_non_stub_xml() {
         "error message should mention UTF-8, got: {msg}"
     );
 }
+
+// ===== WebP XMP chunk regression tests =====
+
+/// Build a minimum-viable WebP RIFF container with a trailing `XMP `
+/// chunk containing `xmp_body`. The VP8L chunk body is a placeholder -
+/// img-parts 0.4 treats it as opaque bytes for parse/encode, so a
+/// syntactically valid-but-semantically-nonsense body is enough to
+/// exercise the metadata code path without pulling in a real WebP
+/// encoder. Used by the two tests below.
+fn write_webp_with_xmp(path: &std::path::Path, xmp_body: &[u8]) {
+    let vp8l_body: &[u8] = &[0x2F, 0x00, 0x00, 0x00, 0x00, 0x00];
+
+    let mut inner = Vec::new();
+    inner.extend_from_slice(b"WEBP");
+
+    // VP8L chunk
+    inner.extend_from_slice(b"VP8L");
+    inner.extend_from_slice(&(u32::try_from(vp8l_body.len()).unwrap()).to_le_bytes());
+    inner.extend_from_slice(vp8l_body);
+    if vp8l_body.len() % 2 == 1 {
+        inner.push(0);
+    }
+
+    // XMP chunk
+    inner.extend_from_slice(b"XMP ");
+    inner.extend_from_slice(&(u32::try_from(xmp_body.len()).unwrap()).to_le_bytes());
+    inner.extend_from_slice(xmp_body);
+    if xmp_body.len() % 2 == 1 {
+        inner.push(0);
+    }
+
+    // RIFF wrapper: the size field is the number of bytes after it,
+    // which is 4 ("WEBP") + payload chunks. `inner` already starts
+    // with "WEBP" so `inner.len()` is the correct value.
+    let mut buf = Vec::new();
+    buf.extend_from_slice(b"RIFF");
+    buf.extend_from_slice(&(u32::try_from(inner.len()).unwrap()).to_le_bytes());
+    buf.extend_from_slice(&inner);
+
+    fs::write(path, buf).unwrap();
+}
+
+#[test]
+fn test_webp_xmp_chunk_is_stripped() {
+    // Regression for the img-parts 0.4 gap: `DynImage::set_exif` +
+    // `set_icc_profile` only clear WebP's EXIF and ICCP chunks; the
+    // XMP chunk is left intact. A WebP exported from Lightroom /
+    // Photoshop / Affinity carries its author, instance-id, GPS, etc.
+    // in that chunk and used to sail through `clean_metadata`.
+    let dir = TempDir::new().unwrap();
+    let dirty = dir.path().join("dirty.webp");
+    let cleaned = dir.path().join("clean.webp");
+
+    let xmp = br#"<?xpacket begin='' id=''?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">SECRET_XMP_PAYLOAD</dc:creator></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=''?>"#;
+    write_webp_with_xmp(&dirty, xmp);
+
+    // Sanity: the dirty fixture really does contain the payload.
+    let raw = fs::read(&dirty).unwrap();
+    assert!(
+        raw.windows(18).any(|w| w == b"SECRET_XMP_PAYLOAD"),
+        "fixture precondition: dirty WebP must contain the XMP payload"
+    );
+    assert!(
+        raw.windows(4).any(|w| w == b"XMP "),
+        "fixture precondition: dirty WebP must contain the XMP chunk id"
+    );
+
+    // Clean
+    let handler = crate::handlers::image::ImageHandler;
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // The chunk id and its body must both be gone from the cleaned
+    // output. The `XMP ` chunk id is unique to XMP in WebP so we can
+    // scan bytes directly without worrying about false positives.
+    let out = fs::read(&cleaned).unwrap();
+    assert!(
+        !out.windows(18).any(|w| w == b"SECRET_XMP_PAYLOAD"),
+        "WebP XMP payload survived clean"
+    );
+    assert!(
+        !out.windows(4).any(|w| w == b"XMP "),
+        "WebP XMP chunk id survived clean"
+    );
+    // The output must still be a structurally valid WebP.
+    assert!(out.starts_with(b"RIFF"));
+    assert_eq!(&out[8..12], b"WEBP");
+}
+
+#[test]
+fn test_webp_reader_surfaces_xmp_fields() {
+    // The reader must flag WebP XMP so the user sees what the cleaner
+    // is about to strip. The JPEG reader already does this via its
+    // APP1 walk; Bug 9's fix extends the same treatment to WebP.
+    let dir = TempDir::new().unwrap();
+    let dirty = dir.path().join("dirty.webp");
+
+    let xmp = br#"<?xpacket begin=''?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">webp-reader-author</dc:creator></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=''?>"#;
+    write_webp_with_xmp(&dirty, xmp);
+
+    let handler = crate::handlers::image::ImageHandler;
+    let meta = handler.read_metadata(&dirty).unwrap();
+    let dump = format!("{meta:?}");
+    assert!(
+        dump.contains("webp-reader-author"),
+        "WebP reader must surface dc:creator from XMP chunk, got: {dump}"
+    );
+}
+
+#[test]
+fn test_docx_embedded_webp_xmp_is_stripped() {
+    // Same bug vector, reached via the document handler's
+    // `strip_embedded_image` path. A DOCX that embeds a `.webp`
+    // inside `word/media/` must have the inner WebP's XMP chunk
+    // stripped exactly like the standalone image case.
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let dir = TempDir::new().unwrap();
+    let inner_webp = dir.path().join("inner.webp");
+    let xmp = br#"<?xpacket begin=''?><x:xmpmeta xmlns:x="adobe:ns:meta/"><rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"><rdf:Description><dc:creator xmlns:dc="http://purl.org/dc/elements/1.1/">DOCX_WEBP_SECRET</dc:creator></rdf:Description></rdf:RDF></x:xmpmeta><?xpacket end=''?>"#;
+    write_webp_with_xmp(&inner_webp, xmp);
+    let webp_bytes = fs::read(&inner_webp).unwrap();
+
+    let src = dir.path().join("dirty.docx");
+    let dst = dir.path().join("cleaned.docx");
+
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>")
+            .unwrap();
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
+            .unwrap();
+        writer.start_file("word/media/image1.webp", options).unwrap();
+        writer.write_all(&webp_bytes).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    // Pull the cleaned WebP back out of the archive and byte-scan it.
+    let cleaned_file = fs::File::open(&dst).unwrap();
+    let mut cleaned_zip = zip::ZipArchive::new(cleaned_file).unwrap();
+    let mut cleaned_webp = Vec::new();
+    {
+        use std::io::Read;
+        let mut entry = cleaned_zip.by_name("word/media/image1.webp").unwrap();
+        entry.read_to_end(&mut cleaned_webp).unwrap();
+    }
+
+    assert!(
+        !cleaned_webp.windows(16).any(|w| w == b"DOCX_WEBP_SECRET"),
+        "embedded WebP XMP payload survived docx clean"
+    );
+    assert!(
+        !cleaned_webp.windows(4).any(|w| w == b"XMP "),
+        "embedded WebP XMP chunk id survived docx clean"
+    );
+    // Output must still be a structurally valid WebP.
+    assert!(cleaned_webp.starts_with(b"RIFF"));
+    assert_eq!(&cleaned_webp[8..12], b"WEBP");
+}
