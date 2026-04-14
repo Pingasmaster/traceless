@@ -183,6 +183,14 @@ pub fn parse_iptc_8bim(bytes: &[u8]) -> Vec<MetadataItem> {
     // resource block.
     // Format: "8BIM" + u16 resource id + pascal string (padded to
     // even length) + u32 size + size bytes of IPTC data.
+    //
+    // `data_len` is attacker-controlled (read from a u32 header field)
+    // and can claim up to ~4 GiB. On 32-bit targets that's already
+    // usize::MAX, so every `data_offset + data_len` computation that
+    // we subsequently compare against `bytes.len()` must go through
+    // checked arithmetic, or the wraparound produces a small value
+    // that slips past the bounds check and panics inside the slice
+    // index a few lines later.
     let mut i = 0usize;
     while i + 12 <= bytes.len() {
         if &bytes[i..i + 4] != b"8BIM" {
@@ -195,7 +203,10 @@ pub fn parse_iptc_8bim(bytes: &[u8]) -> Vec<MetadataItem> {
         let name_field_len = 1 + name_len;
         let padded = name_field_len + (name_field_len & 1);
         let size_offset = i + 6 + padded;
-        if size_offset + 4 > bytes.len() {
+        let Some(data_offset) = size_offset.checked_add(4) else {
+            break;
+        };
+        if data_offset > bytes.len() {
             break;
         }
         let data_len = u32::from_be_bytes([
@@ -204,16 +215,20 @@ pub fn parse_iptc_8bim(bytes: &[u8]) -> Vec<MetadataItem> {
             bytes[size_offset + 2],
             bytes[size_offset + 3],
         ]) as usize;
-        let data_offset = size_offset + 4;
-        if data_offset + data_len > bytes.len() {
+        let Some(data_end) = data_offset.checked_add(data_len) else {
+            break;
+        };
+        if data_end > bytes.len() {
             break;
         }
         if resource_id == 0x0404 {
-            let iptc_data = &bytes[data_offset..data_offset + data_len];
+            let iptc_data = &bytes[data_offset..data_end];
             out.extend(parse_iim_stream(iptc_data));
         }
         // Advance past this resource (padded to even length).
-        let next = data_offset + data_len + (data_len & 1);
+        let Some(next) = data_end.checked_add(data_len & 1) else {
+            break;
+        };
         if next <= i {
             break;
         }
@@ -373,5 +388,52 @@ mod tests {
         assert!(dump.contains("Alice"), "{dump}");
         assert!(dump.contains("Caption"), "{dump}");
         assert!(dump.contains("vacation photo"), "{dump}");
+    }
+
+    #[test]
+    fn iptc_rejects_overflowing_data_len() {
+        // Regression: the 8BIM parser used to compute
+        // `data_offset + data_len` without overflow checking before
+        // comparing it against `bytes.len()`. On 32-bit targets an
+        // attacker-controlled `data_len` close to `u32::MAX` wraps
+        // past the check, after which the subsequent slice index
+        // panics. The parser must now break out cleanly with an
+        // empty result instead.
+        let mut app13 = Vec::new();
+        app13.extend_from_slice(b"8BIM");
+        app13.extend_from_slice(&0x0404u16.to_be_bytes()); // resource id
+        app13.push(0x00); // pascal string length
+        app13.push(0x00); // pad to even
+        app13.extend_from_slice(&u32::MAX.to_be_bytes());
+        // No following bytes: the header claims ~4 GiB of IPTC data
+        // but none is present. Must not panic.
+        let items = parse_iptc_8bim(&app13);
+        assert!(items.is_empty(), "overflowing 8BIM header must yield no items");
+    }
+
+    #[test]
+    fn iptc_rejects_overflowing_padding_advance() {
+        // A second overflow site: `next = data_end + (data_len & 1)`.
+        // Construct a valid-looking resource with a large but not
+        // `u32::MAX` `data_len` so the first bounds check passes,
+        // then verify the advance arithmetic doesn't panic. With the
+        // checked_add fix this resolves cleanly; without it, on a
+        // 32-bit target where data_end is near usize::MAX, the
+        // trailing `+ (data_len & 1)` would wrap and we'd loop with
+        // a garbage `next`.
+        let mut app13 = Vec::new();
+        app13.extend_from_slice(b"8BIM");
+        app13.extend_from_slice(&0x0404u16.to_be_bytes());
+        app13.push(0x00);
+        app13.push(0x00);
+        // Match `data_len` to the actual payload length so the first
+        // bounds check passes on 64-bit and we exercise the advance
+        // path. A single 0x1C byte that is not a valid IIM record is
+        // enough; `parse_iim_stream` will skip it.
+        let payload: &[u8] = &[0x1C];
+        app13.extend_from_slice(&(payload.len() as u32).to_be_bytes());
+        app13.extend_from_slice(payload);
+        let items = parse_iptc_8bim(&app13);
+        assert!(items.is_empty());
     }
 }
