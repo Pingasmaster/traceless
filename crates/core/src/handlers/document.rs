@@ -315,12 +315,22 @@ fn detect_kind<R: Read + std::io::Seek>(archive: &mut ZipArchive<R>) -> ArchiveK
         }
     }
 
+    // Priority: mimetype files are the most reliable discriminant, so
+    // they win whenever present. Between the structural markers, a
+    // `[Content_Types].xml` entry is OOXML-specific with no ODF analog,
+    // so it beats a bare `content.xml` (which legitimate OOXML never
+    // emits). A crafted hybrid archive that ships BOTH markers must
+    // therefore be routed through the OOXML cleaner or the OOXML-
+    // specific deep-clean (rsid / revisions / stub docProps) gets
+    // silently skipped.
     if has_mimetype_epub {
         ArchiveKind::Epub
-    } else if has_mimetype_odf || has_content_xml {
+    } else if has_mimetype_odf {
         ArchiveKind::Odf
     } else if has_content_types {
         ArchiveKind::Ooxml
+    } else if has_content_xml {
+        ArchiveKind::Odf
     } else {
         ArchiveKind::Generic
     }

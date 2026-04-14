@@ -2434,6 +2434,111 @@ fn unknown_policy_applies_to_tar_too() {
     assert_eq!(count, 0, "Omit policy should produce an empty tar");
 }
 
+#[test]
+fn ooxml_with_fake_content_xml_still_strips_author_and_rsid() {
+    // Round 17 regression: `DocumentHandler::detect_kind` used to
+    // route any archive containing a root `content.xml` member to
+    // `ArchiveKind::Odf`, even when `[Content_Types].xml` (the
+    // OOXML-specific marker) was also present. The OOXML deep-clean
+    // pipeline (rsid / revisions / comment refs / docProps stubs)
+    // was then silently skipped and `odf::clean_xml_member` passed
+    // every OOXML member through a plain attribute-sort, leaving
+    // dc:creator and w:rsidR intact.
+    //
+    // A crafted DOCX containing a zero-byte `content.xml` decoy is
+    // enough to trigger the mis-detection. The user clicks Clean,
+    // gets back a "cleaned" file, and the original author + RSID
+    // ride through verbatim.
+    //
+    // The fix reorders the priority chain so `has_content_types`
+    // beats `has_content_xml` when no mimetype file is present.
+    use std::io::{Read as _, Write as _};
+    use zip::write::SimpleFileOptions;
+
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("hybrid.docx");
+    let dst = dir.path().join("clean.docx");
+
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = zip::ZipWriter::new(file);
+        let opts = SimpleFileOptions::default();
+
+        // Decoy ODF marker: a minimal `content.xml` at the archive
+        // root. Legitimate OOXML never emits this.
+        writer.start_file("content.xml", opts).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\"?><fake/>")
+            .unwrap();
+
+        // Real OOXML marker.
+        writer.start_file("[Content_Types].xml", opts).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\"?><Types/>")
+            .unwrap();
+
+        // OOXML member carrying an rsid attribute, which only the
+        // OOXML deep-clean pipeline knows how to strip.
+        writer.start_file("word/document.xml", opts).unwrap();
+        writer
+            .write_all(
+                b"<?xml version=\"1.0\"?><w:document xmlns:w=\"w\">\
+                  <w:p w:rsidR=\"00F12345\"><w:t>hello</w:t></w:p>\
+                  </w:document>",
+            )
+            .unwrap();
+
+        // OOXML docProps/core.xml with an author leak. The OOXML
+        // dispatcher replaces this with `CORE_STUB` wholesale when
+        // kind == Ooxml; the ODF cleaner just sorts attributes and
+        // leaves the author intact.
+        writer.start_file("docProps/core.xml", opts).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?><cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties" xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:creator>SECRET-AUTHOR</dc:creator></cp:coreProperties>"#,
+            )
+            .unwrap();
+
+        writer.finish().unwrap();
+    }
+
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    // Read each cleaned member back via the zip crate. Raw byte
+    // search on the archive would miss compressed payloads; we need
+    // the decompressed content.
+    let f = fs::File::open(&dst).unwrap();
+    let mut arc = zip::ZipArchive::new(f).unwrap();
+    let mut core_bytes = Vec::new();
+    let mut doc_bytes = Vec::new();
+    for i in 0..arc.len() {
+        let mut e = arc.by_index(i).unwrap();
+        let name = e.name().to_string();
+        let mut body = Vec::new();
+        e.read_to_end(&mut body).unwrap();
+        if name == "docProps/core.xml" {
+            core_bytes = body;
+        } else if name == "word/document.xml" {
+            doc_bytes = body;
+        }
+    }
+
+    assert!(
+        find_bytes(&core_bytes, b"SECRET-AUTHOR").is_none(),
+        "core.xml must not leak dc:creator after OOXML routing, got: {}",
+        String::from_utf8_lossy(&core_bytes)
+    );
+    assert!(
+        find_bytes(&doc_bytes, b"rsidR").is_none(),
+        "word/document.xml must have rsid attributes stripped, got: {}",
+        String::from_utf8_lossy(&doc_bytes)
+    );
+}
+
 // ================================================================
 // §27. Small helpers
 // ================================================================

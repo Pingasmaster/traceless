@@ -214,18 +214,17 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
 
         i += 1; // consume `>`
 
-        // `<script>`, `<style>`, and `<textarea>` are HTML raw-text /
-        // escapable-raw-text elements per HTML5 §12.2.5: their content
-        // is consumed verbatim until the matching closing tag, and
-        // `<`, `<!--`, etc. inside the body are NOT tags. Without this
-        // branch the generic tokenizer re-parses JavaScript / CSS /
-        // textarea string bytes as HTML, and the cleaner then drops
-        // fake `<meta>` / `<!-- -->` / `<title>` spans out of the
-        // body, producing broken output. `<title>` is also escapable
-        // raw text per spec but its current `title_depth` path in
-        // `clean_html` already produces the mat2-parity "blank the
-        // title body" behaviour, so we deliberately leave it alone
-        // and don't add a fourth arm here.
+        // `<script>`, `<style>`, `<textarea>`, and `<title>` are HTML
+        // raw-text / escapable-raw-text elements per HTML5 §12.2.5:
+        // their content is consumed verbatim until the matching closing
+        // tag, and `<`, `<!--`, etc. inside the body are NOT tags.
+        // Without the rawtext branch the generic tokenizer re-parses
+        // JavaScript / CSS / textarea / title string bytes as HTML,
+        // and a literal `<` inside the body is misinterpreted as the
+        // start of a new opening tag - which for `<title>Alice < Bob</title>`
+        // consumes the real `</title>` as part of a bogus empty-name
+        // tag, leaks the `< Bob` suffix through the cleaner, and hides
+        // the title from the reader entirely.
         let rawtext_needle: Option<&[u8]> =
             if !self_closing && local_name == "script" {
                 Some(b"script")
@@ -233,6 +232,8 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
                 Some(b"style")
             } else if !self_closing && local_name == "textarea" {
                 Some(b"textarea")
+            } else if !self_closing && local_name == "title" {
+                Some(b"title")
             } else {
                 None
             };
@@ -809,5 +810,55 @@ End of draft.</textarea></form></body></html>"#;
         let out = fs::read_to_string(&dst).unwrap();
         assert!(out.contains("pre <meta> post"));
         assert!(out.contains("<p>after</p>"));
+    }
+
+    #[test]
+    fn html_clean_blanks_title_containing_left_angle() {
+        // Round 17 regression: `<title>` is HTML5 escapable raw text.
+        // A literal `<` inside the title body used to make the generic
+        // tokenizer consume the real `</title>` as part of a bogus
+        // empty-name opening tag, which then rode through the
+        // cleaner's `_ => out.push_str(raw)` arm verbatim - leaking
+        // the portion of the body after the `<`. The tokenizer now
+        // treats `title` as rawtext, so the entire body is emitted as
+        // a single `Text` event and `clean_html`'s `title_depth` path
+        // blanks it cleanly.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        fs::write(&src, "<title>Alice < Bob</title>").unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            !out.contains("Bob"),
+            "title body with `<` inside must be fully blanked, got: {out}"
+        );
+        assert!(
+            !out.contains("Alice"),
+            "leading title body must also be blanked, got: {out}"
+        );
+        assert!(out.contains("<title>"));
+        assert!(out.contains("</title>"));
+    }
+
+    #[test]
+    fn html_read_surfaces_title_containing_left_angle() {
+        // Reader side of the same regression: before the fix, a
+        // mis-parsed title left `extract_html_metadata` in `in_title`
+        // state with no matching `Close(title)` event, so the
+        // accumulated title text was never pushed into the metadata
+        // set and the user saw "no metadata" for a file that actually
+        // leaked a title.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        fs::write(&src, "<title>Alice < Bob</title>").unwrap();
+        let h = HtmlHandler;
+        let meta = h.read_metadata(&src).unwrap();
+        let dump = format!("{meta:?}");
+        assert!(
+            dump.contains("Alice < Bob") || dump.contains("Alice &lt; Bob"),
+            "reader must surface the full title body, got: {dump}"
+        );
     }
 }
