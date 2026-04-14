@@ -598,6 +598,71 @@ fn epub_round_trip_regenerates_uuid_and_drops_junk() {
 }
 
 #[test]
+fn epub_ops_body_meta_is_stripped() {
+    // mat2 parity: the body of every OPS xhtml content file must go
+    // through the HTML blocklist, not just the <head>. Before the
+    // two-pass clean a `<meta name="generator" content="Calibre">`
+    // dropped into the body survived because `clean_head_only` only
+    // touched the `<head>` element.
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty-body.epub");
+    let cleaned = dir.path().join("cleaned-body.epub");
+
+    {
+        let file = fs::File::create(&dirty).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = SimpleFileOptions::default();
+
+        writer.start_file("mimetype", stored).unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+
+        writer.start_file("META-INF/container.xml", options).unwrap();
+        writer
+            .write_all(br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#)
+            .unwrap();
+
+        writer.start_file("OPS/content.opf", options).unwrap();
+        writer
+            .write_all(br#"<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf" version="3.0"><metadata xmlns:dc="http://purl.org/dc/elements/1.1/"><dc:identifier>x</dc:identifier><dc:language>en</dc:language><dc:title>t</dc:title></metadata><manifest><item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="ch1"/></spine></package>"#)
+            .unwrap();
+
+        writer.start_file("OPS/chapter1.xhtml", options).unwrap();
+        writer
+            .write_all(br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><title>Chapter</title></head><body><meta name="generator" content="OPS_BODY_SECRET_CALIBRE"/><script>var leak="OPS_BODY_SCRIPT_LEAK";</script><p>visible chapter text</p></body></html>"#)
+            .unwrap();
+
+        writer.finish().unwrap();
+    }
+
+    let handler = get_handler_for_mime("application/epub+zip").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let chapter =
+        String::from_utf8(read_zip_entry(&cleaned, "OPS/chapter1.xhtml").unwrap()).unwrap();
+    assert!(
+        !chapter.contains("OPS_BODY_SECRET_CALIBRE"),
+        "body <meta> survived clean: {chapter}"
+    );
+    assert!(
+        !chapter.contains("OPS_BODY_SCRIPT_LEAK"),
+        "body <script> survived clean: {chapter}"
+    );
+    assert!(
+        chapter.contains("visible chapter text"),
+        "body text lost during HTML clean: {chapter}"
+    );
+}
+
+#[test]
 fn epub_rejects_encrypted_archive() {
     let dir = tempfile::tempdir().unwrap();
     let dirty = dir.path().join("drm.epub");
@@ -637,6 +702,15 @@ fn wav_round_trip() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
     assert!(after.is_empty(), "cleaned WAV should have no metadata: {after:?}");
+
+    // Ground-truth check via ffprobe (independent parser from lofty).
+    if have_ffprobe() {
+        let post = ffprobe_user_tags(&cleaned);
+        assert!(
+            post.is_empty(),
+            "ffprobe still reports user tags on cleaned WAV: {post:?}"
+        );
+    }
 }
 
 #[test]
@@ -660,6 +734,14 @@ fn mp3_round_trip() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
     assert!(after.is_empty(), "cleaned MP3 should have no metadata: {after:?}");
+
+    if have_ffprobe() {
+        let post = ffprobe_user_tags(&cleaned);
+        assert!(
+            post.is_empty(),
+            "ffprobe still reports user tags on cleaned MP3: {post:?}"
+        );
+    }
 }
 
 #[test]
@@ -685,6 +767,14 @@ fn flac_round_trip() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
     assert!(after.is_empty(), "cleaned FLAC should have no metadata: {after:?}");
+
+    if have_ffprobe() {
+        let post = ffprobe_user_tags(&cleaned);
+        assert!(
+            post.is_empty(),
+            "ffprobe still reports user tags on cleaned FLAC: {post:?}"
+        );
+    }
 }
 
 #[test]
@@ -708,6 +798,20 @@ fn ogg_round_trip() {
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
     assert!(after.is_empty(), "cleaned OGG should have no metadata: {after:?}");
+
+    // OGG vendor is force-preserved by lofty; ffprobe may still
+    // report `encoder` for native OGG. Filter it out of the ground
+    // truth check and only fail on user tags (title/artist/etc).
+    if have_ffprobe() {
+        let post: Vec<_> = ffprobe_user_tags(&cleaned)
+            .into_iter()
+            .filter(|(k, _)| !k.eq_ignore_ascii_case("encoder"))
+            .collect();
+        assert!(
+            post.is_empty(),
+            "ffprobe still reports user tags on cleaned OGG: {post:?}"
+        );
+    }
 }
 
 #[test]
@@ -718,6 +822,49 @@ fn audio_rejects_non_audio() {
     fs::write(&path, b"plain text, not an MP3").unwrap();
     let handler = get_handler_for_mime("audio/mpeg").unwrap();
     assert!(handler.read_metadata(&path).is_err());
+}
+
+#[test]
+fn m4a_audio_round_trip_ffprobe_reports_no_user_tags() {
+    // Ground-truth check: lofty's reader is used by the AudioHandler
+    // for both pre- and post-clean metadata inspection. If lofty's
+    // writer silently leaves non-ilst atoms in place (udta/xtra/keys/
+    // freeform ©xyz GPS), a same-reader round-trip check is blind to
+    // the leak. ffprobe is an independent parser; anything it still
+    // surfaces under `format.tags.*` or `streams.stream.N.tags.*`
+    // after cleaning is a real residual.
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.m4a");
+    let cleaned = dir.path().join("cleaned.m4a");
+    if make_dirty_m4a(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg failed to synthesize M4A");
+        return;
+    }
+
+    // Pre-condition: ffprobe must see at least one of the injected
+    // tags so we know the fixture actually contains a leak to strip.
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(k, v)| k.eq_ignore_ascii_case("title") && v.contains("secret-m4a-title")),
+        "dirty M4A should report title via ffprobe: {pre_tags:?}"
+    );
+
+    let handler = get_handler_for_mime("audio/mp4")
+        .or_else(|| get_handler_for_mime("audio/m4a"))
+        .expect("audio/mp4 handler must exist");
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let post_tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        post_tags.is_empty(),
+        "M4A post-clean still reports user tags via ffprobe: {post_tags:?}"
+    );
 }
 
 // ================================================================
@@ -1911,14 +2058,18 @@ fn html_xhtml_self_closing_meta_is_dropped() {
     let dst = dir.path().join("clean.xhtml");
     fs::write(
         &src,
-        br#"<?xml version="1.0"?><html><head><meta name="author" content="secret"/><link rel="stylesheet"/></head><body/></html>"#,
+        br#"<?xml version="1.0"?><html><head><meta name="author" content="secret"/><link rel="stylesheet"/><br/></head><body/></html>"#,
     )
     .unwrap();
     let handler = get_handler_for_mime("application/xhtml+xml").unwrap();
     handler.clean_metadata(&src, &dst).unwrap();
     let out = fs::read_to_string(&dst).unwrap();
     assert!(!out.contains("secret"));
-    assert!(out.contains("<link"), "unrelated self-closing tag survived");
+    // `<link>` is now on the blocklist alongside `<meta>`, so it
+    // must be dropped. An unrelated self-closing tag like `<br/>`
+    // stays as proof the cleaner only drops blocklist tags.
+    assert!(!out.contains("<link"), "<link> must be stripped: {out}");
+    assert!(out.contains("<br"), "unrelated self-closing tag dropped: {out}");
     assert!(out.contains("<?xml"));
 }
 
@@ -2121,6 +2272,60 @@ fn tar_xz_round_trip_cleans_embedded_image() {
     assert_no_exif_or_valid_jpeg(
         &probe,
         "embedded JPEG inside .tar.xz must be stripped",
+    );
+}
+
+#[test]
+fn tar_zst_round_trip_cleans_embedded_image() {
+    use tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
+
+    let dir = tempfile::tempdir().unwrap();
+    let jpeg = dir.path().join("inner.jpg");
+    make_dirty_jpeg(&jpeg);
+    let jpeg_bytes = fs::read(&jpeg).unwrap();
+
+    let src = dir.path().join("dirty.tar.zst");
+    let dst = dir.path().join("clean.tar.zst");
+
+    {
+        let file = fs::File::create(&src).unwrap();
+        let enc = zstd::stream::write::Encoder::new(file, 3).unwrap().auto_finish();
+        let mut builder = TarBuilder::new(enc);
+        let mut header = TarHeader::new_gnu();
+        header.set_path("photo.jpg").unwrap();
+        header.set_size(jpeg_bytes.len() as u64);
+        header.set_mode(0o644);
+        header.set_entry_type(EntryType::Regular);
+        header.set_cksum();
+        builder.append(&header, jpeg_bytes.as_slice()).unwrap();
+        builder.into_inner().unwrap();
+    }
+
+    // mime_guess 2.0.5 doesn't know `.zst` at all, so we dispatch by
+    // the canonical `application/zstd` MIME directly. A GTK/Qt file
+    // picker that wants to route `.tar.zst` files needs to plumb the
+    // same MIME through detect_mime; that's outside the scope of the
+    // round-trip guarantee this test checks.
+    let handler = get_handler_for_mime("application/zstd")
+        .expect("application/zstd must route to ArchiveHandler");
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    let f = fs::File::open(&dst).unwrap();
+    let dec = zstd::stream::read::Decoder::new(f).unwrap();
+    let mut archive = tar::Archive::new(dec);
+    let mut inner_bytes = Vec::new();
+    for entry in archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        if entry.path().unwrap().to_string_lossy() == "photo.jpg" {
+            entry.read_to_end(&mut inner_bytes).unwrap();
+            break;
+        }
+    }
+    let probe = dir.path().join("probe.jpg");
+    fs::write(&probe, &inner_bytes).unwrap();
+    assert_no_exif_or_valid_jpeg(
+        &probe,
+        "embedded JPEG inside .tar.zst must be stripped",
     );
 }
 

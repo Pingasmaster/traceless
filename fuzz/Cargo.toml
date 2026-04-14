@@ -121,3 +121,99 @@ test = false
 doc = false
 doctest = false
 bench = false
+
+[[bin]]
+name = "handler_tarbz2"
+path = "fuzz_targets/handler_tarbz2.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_tarxz"
+path = "fuzz_targets/handler_tarxz.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_tarzst"
+path = "fuzz_targets/handler_tarzst.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_mp3"
+path = "fuzz_targets/handler_mp3.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_flac"
+path = "fuzz_targets/handler_flac.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_ogg"
+path = "fuzz_targets/handler_ogg.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_wav"
+path = "fuzz_targets/handler_wav.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_m4a"
+path = "fuzz_targets/handler_m4a.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_tiff"
+path = "fuzz_targets/handler_tiff.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_docx"
+path = "fuzz_targets/handler_docx.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_odt"
+path = "fuzz_targets/handler_odt.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_epub"
+path = "fuzz_targets/handler_epub.rs"
+test = false
+doc = false
+doctest = false
+bench = false

@@ -50,12 +50,13 @@ pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
         "text/css" => Some(Box::new(CssHandler)),
         "text/html" | "application/xhtml+xml" => Some(Box::new(HtmlHandler)),
         "application/x-bittorrent" => Some(Box::new(TorrentHandler)),
-        // NB: `mime_guess` maps `.tar.gz` / `.tar.bz2` / `.tar.xz` to
-        // `application/gzip` / `application/x-bzip2` / `application/x-xz`
-        // respectively, so those MIME types *are* the entry point for real
-        // tar-bundled archives. A plain compressed file (e.g. `foo.txt.gz`)
-        // reaches the same handler, where `ArchiveFormat::detect` rejects it
-        // with a specific "plain compressed" error.
+        // NB: `mime_guess` maps `.tar.gz` / `.tar.bz2` / `.tar.xz` /
+        // `.tar.zst` to `application/gzip` / `application/x-bzip2` /
+        // `application/x-xz` / `application/zstd` respectively, so
+        // those MIME types *are* the entry point for real tar-bundled
+        // archives. A plain compressed file (e.g. `foo.txt.gz`)
+        // reaches the same handler, where `ArchiveFormat::detect`
+        // rejects it with a specific "plain compressed" error.
         "application/zip"
         | "application/x-tar"
         | "application/gzip"
@@ -64,7 +65,9 @@ pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
         | "application/x-bzip2"
         | "application/x-bzip-compressed-tar"
         | "application/x-gtar"
-        | "application/x-xz" => Some(Box::new(ArchiveHandler)),
+        | "application/x-xz"
+        | "application/zstd"
+        | "application/x-zstd" => Some(Box::new(ArchiveHandler)),
         _ => None,
     }
 }

@@ -61,6 +61,16 @@ const NAMES_KEYS_TO_STRIP: &[&[u8]] = &[
     b"Renditions",
 ];
 
+/// Where the catalog `/Names` dictionary lives. ISO 32000-1 allows the
+/// entry to be either an indirect reference to a dictionary object or a
+/// direct dictionary embedded in the catalog itself; the cleaner must
+/// handle both or it silently leaks the subtree on the direct-dict path.
+#[derive(Clone, Copy)]
+enum NamesLoc {
+    Indirect(ObjectId),
+    Direct,
+}
+
 /// Per-page keys to remove. `/Annots` holds sticky notes, review comments,
 /// stamp authors; per-page `/Metadata` is a full XMP packet; `/PieceInfo`
 /// mirrors the catalog one.
@@ -275,26 +285,63 @@ impl FormatHandler for PdfHandler {
         }
 
         // --- 4. /Names subtree: strip EmbeddedFiles, JavaScript, etc. ------
-        let names_id = doc
-            .catalog()
-            .ok()
-            .and_then(|c| c.get(b"Names").ok().and_then(|o| o.as_reference().ok()));
-        if let Some(names_id) = names_id {
+        // ISO 32000-1 §7.11 allows /Names to be either an indirect
+        // reference OR a direct dictionary embedded in the catalog.
+        // Most producers emit an indirect ref, but a crafted fixture
+        // (or a hand-written PDF) can put the dict inline and used to
+        // slip its children past the stripper.
+        let names_loc: Option<NamesLoc> = doc.catalog().ok().and_then(|c| {
+            match c.get(b"Names") {
+                Ok(Object::Reference(id)) => Some(NamesLoc::Indirect(*id)),
+                Ok(Object::Dictionary(_)) => Some(NamesLoc::Direct),
+                _ => None,
+            }
+        });
+        if let Some(loc) = names_loc {
             let mut child_ids_to_delete: Vec<ObjectId> = Vec::new();
-            if let Ok(names_dict) = doc.get_dictionary(names_id) {
-                for key in NAMES_KEYS_TO_STRIP {
-                    if let Ok(obj) = names_dict.get(key)
-                        && let Ok(id) = obj.as_reference()
-                    {
-                        child_ids_to_delete.push(id);
+
+            // Phase 1: read-only scan for indirect children we orphan.
+            {
+                let names_dict_ref: Option<&lopdf::Dictionary> = match loc {
+                    NamesLoc::Indirect(id) => doc.get_dictionary(id).ok(),
+                    NamesLoc::Direct => {
+                        doc.catalog().ok().and_then(|c| match c.get(b"Names") {
+                            Ok(Object::Dictionary(d)) => Some(d),
+                            _ => None,
+                        })
+                    }
+                };
+                if let Some(nd) = names_dict_ref {
+                    for key in NAMES_KEYS_TO_STRIP {
+                        if let Ok(obj) = nd.get(key)
+                            && let Ok(id) = obj.as_reference()
+                        {
+                            child_ids_to_delete.push(id);
+                        }
                     }
                 }
             }
-            if let Ok(names_dict) = doc.get_dictionary_mut(names_id) {
-                for key in NAMES_KEYS_TO_STRIP {
-                    names_dict.remove(key);
+
+            // Phase 2: prune the Names dict in place at its location.
+            match loc {
+                NamesLoc::Indirect(id) => {
+                    if let Ok(nd) = doc.get_dictionary_mut(id) {
+                        for key in NAMES_KEYS_TO_STRIP {
+                            nd.remove(key);
+                        }
+                    }
+                }
+                NamesLoc::Direct => {
+                    if let Ok(catalog) = doc.catalog_mut()
+                        && let Ok(Object::Dictionary(nd)) = catalog.get_mut(b"Names")
+                    {
+                        for key in NAMES_KEYS_TO_STRIP {
+                            nd.remove(key);
+                        }
+                    }
                 }
             }
+
             for id in child_ids_to_delete {
                 doc.delete_object(id);
             }
@@ -538,6 +585,146 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
         }
+    }
+
+    /// Build a PDF whose catalog has `/Names` as an **indirect
+    /// reference** to a dictionary object containing every key in
+    /// `NAMES_KEYS_TO_STRIP`. The cleaner must delete all of them.
+    fn make_pdf_with_names_indirect(path: &std::path::Path) {
+        let mut doc = PdfDoc::with_version("1.7");
+
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+
+        let mut names_dict = Dictionary::new();
+        for key in NAMES_KEYS_TO_STRIP {
+            names_dict.set(
+                std::str::from_utf8(key).unwrap(),
+                Object::string_literal("leak"),
+            );
+        }
+        let names_id = doc.add_object(Object::Dictionary(names_dict));
+
+        let catalog = dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+            "Names" => Object::Reference(names_id),
+        };
+        let catalog_id = doc.add_object(catalog);
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(path).unwrap();
+    }
+
+    /// Build a PDF whose catalog has `/Names` as a **direct dictionary**
+    /// (not an indirect reference). Before the NamesLoc fix this path
+    /// was silently skipped by the cleaner because `as_reference()`
+    /// failed, leaving /EmbeddedFiles, /JavaScript, etc. intact.
+    fn make_pdf_with_names_direct(path: &std::path::Path) {
+        let mut doc = PdfDoc::with_version("1.7");
+
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+            }),
+        );
+
+        let mut names_dict = Dictionary::new();
+        for key in NAMES_KEYS_TO_STRIP {
+            names_dict.set(
+                std::str::from_utf8(key).unwrap(),
+                Object::string_literal("leak"),
+            );
+        }
+
+        let catalog = dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+            "Names" => Object::Dictionary(names_dict),
+        };
+        let catalog_id = doc.add_object(catalog);
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(path).unwrap();
+    }
+
+    fn assert_names_children_gone(path: &std::path::Path) {
+        let reloaded = reload_catalog(path);
+        let catalog = reloaded.catalog().unwrap();
+        let Ok(names_obj) = catalog.get(b"Names") else {
+            // Whole /Names entry may have been pruned along with its
+            // orphaned children; that's an acceptable stronger result.
+            return;
+        };
+        let nd: &Dictionary = match names_obj {
+            Object::Reference(id) => reloaded
+                .get_dictionary(*id)
+                .expect("indirect /Names must resolve"),
+            Object::Dictionary(d) => d,
+            other => panic!("unexpected /Names variant: {other:?}"),
+        };
+        for key in NAMES_KEYS_TO_STRIP {
+            assert!(
+                nd.get(key).is_err(),
+                "/Names child {} must be removed",
+                String::from_utf8_lossy(key)
+            );
+        }
+    }
+
+    #[test]
+    fn every_names_key_in_strip_list_is_removed_indirect() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+        make_pdf_with_names_indirect(&src);
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        assert_names_children_gone(&dst);
+    }
+
+    #[test]
+    fn every_names_key_in_strip_list_is_removed_direct() {
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+        make_pdf_with_names_direct(&src);
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+        assert_names_children_gone(&dst);
     }
 
     #[test]

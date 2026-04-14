@@ -93,16 +93,64 @@ impl FileStore {
 
     /// Add files and start background metadata checking.
     /// Returns the indices of the newly added files.
+    ///
+    /// Two protective filters run before enqueuing any worker:
+    ///
+    /// 1. **Symlinks** are rejected up-front with a terminal
+    ///    `FileError` event so the user sees why nothing happened.
+    ///    mat2 refuses symlinks for the same reason: following one
+    ///    can write to a target outside the trust boundary the user
+    ///    thought they were cleaning. `collect_files_from_dir`
+    ///    already skips symlinks during directory recursion; this
+    ///    guard mirrors the same policy for paths handed in directly.
+    ///
+    /// 2. **Duplicates** are collapsed by canonical path. A user who
+    ///    drags the same file twice (a GTK file-chooser quirk with
+    ///    multi-select, or a drag that picks up the same inode via
+    ///    two different relative paths) would otherwise get two
+    ///    workers racing to rename onto the same destination.
     pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: &Sender<FileStoreEvent>) -> Vec<usize> {
         let mut indices = Vec::new();
-        let mut ids = Vec::with_capacity(paths.len());
+        let mut ids_paths: Vec<(FileId, PathBuf)> = Vec::new();
 
-        for path in &paths {
+        // Canonical paths already present in the store (from any
+        // previous add_files call) seed the dedup set so a second
+        // drag of the same file is rejected even across batches.
+        let mut seen: std::collections::HashSet<PathBuf> = self
+            .files
+            .iter()
+            .filter_map(|f| fs::canonicalize(&f.path).ok())
+            .collect();
+
+        for path in paths {
+            if let Ok(md) = fs::symlink_metadata(&path)
+                && md.file_type().is_symlink()
+            {
+                let id = next_file_id();
+                let entry = FileEntry::new(id, &path);
+                self.files.push(entry);
+                indices.push(self.files.len() - 1);
+                let _ = tx.send_blocking(FileStoreEvent::FileError {
+                    id,
+                    state: FileState::ErrorWhileCheckingMetadata,
+                    message: format!(
+                        "refusing to process symlink {}; pass the target file directly",
+                        path.display()
+                    ),
+                });
+                continue;
+            }
+
+            let canonical = fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+            if !seen.insert(canonical) {
+                continue;
+            }
+
             let id = next_file_id();
-            let entry = FileEntry::new(id, path);
+            let entry = FileEntry::new(id, &path);
             self.files.push(entry);
             indices.push(self.files.len() - 1);
-            ids.push(id);
+            ids_paths.push((id, path));
         }
 
         // Submit per-file metadata scans to the shared worker pool.
@@ -115,7 +163,7 @@ impl FileStore {
         // `catch_unwind` so a handler panic mid-scan still produces
         // a terminal `FileError` event, instead of leaving the file
         // stuck in `CheckingMetadata` forever.
-        for (path, id) in paths.into_iter().zip(ids) {
+        for (id, path) in ids_paths {
             let tx = tx.clone();
             worker_pool::submit(move || {
                 run_job_with_terminal_error(
@@ -553,6 +601,90 @@ mod tests {
                 panic!("wrapper emitted a spurious error on a successful job");
             }
         }
+    }
+
+    #[test]
+    fn add_files_rejects_top_level_symlink_with_terminal_error() {
+        use crate::file_store::FileStore;
+        use std::os::unix::fs::symlink;
+
+        let dir = tempfile::tempdir().unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, b"hello").unwrap();
+        let link = dir.path().join("link.txt");
+        symlink(&target, &link).unwrap();
+
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        let mut store = FileStore::new();
+        let indices = store.add_files(vec![link], &tx);
+
+        // The symlink still gets an entry so the UI can display the
+        // rejection, but the worker never runs.
+        assert_eq!(indices.len(), 1, "symlink must still take a row");
+        drop(tx);
+
+        let mut saw_symlink_rejection = false;
+        while let Ok(event) = rx.try_recv() {
+            if let FileStoreEvent::FileError {
+                state, message, ..
+            } = event
+            {
+                assert_eq!(state, FileState::ErrorWhileCheckingMetadata);
+                assert!(
+                    message.contains("symlink"),
+                    "rejection must mention symlink, got: {message}"
+                );
+                saw_symlink_rejection = true;
+            }
+        }
+        assert!(
+            saw_symlink_rejection,
+            "expected a FileError rejecting the top-level symlink"
+        );
+    }
+
+    #[test]
+    fn add_files_dedups_duplicate_paths_in_same_batch() {
+        use crate::file_store::FileStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("note.txt");
+        std::fs::write(&src, b"one\n").unwrap();
+
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        let mut store = FileStore::new();
+        let indices = store.add_files(vec![src.clone(), src.clone(), src], &tx);
+        drop(tx);
+        while rx.try_recv().is_ok() {}
+
+        assert_eq!(
+            indices.len(),
+            1,
+            "the same path dragged three times must collapse to one entry"
+        );
+        assert_eq!(store.len(), 1);
+    }
+
+    #[test]
+    fn add_files_dedups_across_batches() {
+        use crate::file_store::FileStore;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("note.txt");
+        std::fs::write(&src, b"one\n").unwrap();
+
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        let mut store = FileStore::new();
+        let _ = store.add_files(vec![src.clone()], &tx);
+        let second = store.add_files(vec![src], &tx);
+        drop(tx);
+        while rx.try_recv().is_ok() {}
+
+        assert!(
+            second.is_empty(),
+            "re-adding an already-present file must produce no new rows"
+        );
+        assert_eq!(store.len(), 1);
     }
 
     #[test]

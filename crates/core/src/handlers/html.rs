@@ -18,6 +18,7 @@
 //! - We do *not* apply entity escaping — we pass text through verbatim
 //!   so hand-written entities round-trip intact.
 
+use std::borrow::Cow;
 use std::fs;
 use std::path::Path;
 
@@ -441,41 +442,127 @@ fn parse_attrs(tag_raw: &str) -> Vec<(String, String)> {
 
 // ---------- Cleaner ----------
 
-/// Drop every `<meta>` element and blank every `<title>` body. Leaves
-/// all other structure intact. Comments are also dropped because mat2
-/// blanks them too.
-fn clean_html(src: &str) -> String {
+/// Tags we drop entirely from cleaned HTML output. Matches mat2's
+/// `HTMLParser.tags_blocklist` in `libmat2/web.py` plus the content
+/// frames `<object>`, `<embed>`, `<iframe>` which can leak via their
+/// attributes or child documents.
+///
+/// - `meta`, `link`, `base`: void head metadata (`<link rel="author">`,
+///   `<link rel="canonical">`, `<base href>` all fingerprint).
+/// - `script`, `style`, `noscript`: raw-text containers carrying code,
+///   fonts, inline URLs.
+/// - `iframe`, `object`, `embed`: external resource frames.
+fn is_drop_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "meta"
+            | "link"
+            | "base"
+            | "script"
+            | "style"
+            | "noscript"
+            | "iframe"
+            | "object"
+            | "embed"
+    )
+}
+
+/// HTML5 void elements per WHATWG §12.1.2. A void element has no
+/// content and no closing tag, so the cleaner must not try to push
+/// it onto the drop-stack.
+fn is_void_tag(name: &str) -> bool {
+    matches!(
+        name,
+        "area"
+            | "base"
+            | "br"
+            | "col"
+            | "embed"
+            | "hr"
+            | "img"
+            | "input"
+            | "link"
+            | "meta"
+            | "param"
+            | "source"
+            | "track"
+            | "wbr"
+    )
+}
+
+/// Drop every metadata-bearing element and blank every `<title>` body.
+/// Comments are also dropped because mat2 blanks them too.
+///
+/// Element drops are stack-aware: `<iframe>`, `<object>`, `<script>`,
+/// `<style>`, `<noscript>` and friends can be arbitrarily nested, and
+/// every token between the open and the matching close (including
+/// nested same-name opens) is elided. Void drop tags (`<meta>`,
+/// `<link>`, `<base>`, `<embed>`) are simply skipped once.
+///
+/// Every surviving open tag has its inline `on*` event handlers
+/// stripped so they don't leak fingerprints or cross-site tracking.
+#[must_use]
+pub(crate) fn clean_html(src: &str) -> String {
     let tokens = tokenize(src);
     let mut out = String::with_capacity(src.len());
     let mut title_depth: usize = 0;
+    // Stack of currently-open drop-element names. While non-empty
+    // every token is silently consumed until the matching close pops
+    // the stack back to empty.
+    let mut drop_stack: Vec<String> = Vec::new();
 
     for tok in tokens {
+        if let Some(top) = drop_stack.last().cloned() {
+            match &tok {
+                Token::Open {
+                    local_name,
+                    self_closing,
+                    ..
+                } => {
+                    if *local_name == top && !*self_closing {
+                        drop_stack.push(local_name.clone());
+                    }
+                }
+                Token::Close { local_name, .. } => {
+                    if *local_name == top {
+                        drop_stack.pop();
+                    }
+                }
+                _ => {}
+            }
+            continue;
+        }
+
         match tok {
             Token::Open {
                 raw,
                 local_name,
                 self_closing,
-            } => match local_name.as_str() {
-                "meta" => {} // drop entirely
-                "title" => {
-                    // Re-emit the opening tag verbatim but skip any
-                    // text until the matching </title>. If the tag is
-                    // self-closing we still emit it.
-                    out.push_str(raw);
-                    if !self_closing {
-                        title_depth += 1;
+            } => {
+                if is_drop_tag(&local_name) {
+                    if !self_closing && !is_void_tag(&local_name) {
+                        drop_stack.push(local_name);
                     }
+                    continue;
                 }
-                _ => out.push_str(raw),
-            },
+                match local_name.as_str() {
+                    "title" => {
+                        out.push_str(&strip_on_handlers(raw));
+                        if !self_closing {
+                            title_depth += 1;
+                        }
+                    }
+                    _ => out.push_str(&strip_on_handlers(raw)),
+                }
+            }
             Token::Close { raw, local_name } => {
+                if is_drop_tag(&local_name) {
+                    // Stray closer for a drop tag (mismatched open or
+                    // invalid HTML). Silently elide.
+                    continue;
+                }
                 if local_name == "title" && title_depth > 0 {
                     title_depth -= 1;
-                }
-                if local_name == "meta" {
-                    // Drop any stray `</meta>` (invalid HTML but
-                    // sometimes present)
-                    continue;
                 }
                 out.push_str(raw);
             }
@@ -490,6 +577,124 @@ fn clean_html(src: &str) -> String {
     }
 
     out
+}
+
+/// Strip every `on*` event-handler attribute from the raw bytes of
+/// an opening tag, preserving every other attribute verbatim. Returns
+/// borrowed bytes when no `on*` attribute is present so untouched
+/// tags cost nothing beyond the fast-path scan.
+fn strip_on_handlers(raw: &str) -> Cow<'_, str> {
+    if !contains_on_attribute(raw) {
+        return Cow::Borrowed(raw);
+    }
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    let mut out = String::with_capacity(len);
+
+    // Copy `<tagname` verbatim.
+    let mut i = 0usize;
+    while i < len
+        && !bytes[i].is_ascii_whitespace()
+        && bytes[i] != b'>'
+        && bytes[i] != b'/'
+    {
+        i += 1;
+    }
+    out.push_str(&raw[..i]);
+
+    while i < len {
+        let ws_start = i;
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let ws = &raw[ws_start..i];
+        if i >= len || bytes[i] == b'>' || bytes[i] == b'/' {
+            out.push_str(ws);
+            out.push_str(&raw[i..]);
+            return Cow::Owned(out);
+        }
+        let key_start = i;
+        while i < len
+            && bytes[i] != b'='
+            && !bytes[i].is_ascii_whitespace()
+            && bytes[i] != b'>'
+            && bytes[i] != b'/'
+        {
+            i += 1;
+        }
+        let key_end = i;
+        let key_lower = raw[key_start..key_end].to_ascii_lowercase();
+
+        // Skip optional whitespace before `=`.
+        while i < len && bytes[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        let attr_has_value = i < len && bytes[i] == b'=';
+        if attr_has_value {
+            i += 1;
+            while i < len && bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
+            if i < len && (bytes[i] == b'"' || bytes[i] == b'\'') {
+                let quote = bytes[i];
+                i += 1;
+                while i < len && bytes[i] != quote {
+                    i += 1;
+                }
+                if i < len {
+                    i += 1;
+                }
+            } else {
+                while i < len
+                    && !bytes[i].is_ascii_whitespace()
+                    && bytes[i] != b'>'
+                    && bytes[i] != b'/'
+                {
+                    i += 1;
+                }
+            }
+        }
+        let attr_end = i;
+
+        let is_event_handler = key_lower.len() > 2
+            && &key_lower.as_bytes()[..2] == b"on"
+            && key_lower.as_bytes()[2].is_ascii_alphabetic();
+        if !is_event_handler {
+            out.push_str(ws);
+            out.push_str(&raw[key_start..attr_end]);
+        }
+        // Dropped `on*`: do not copy the leading whitespace so we
+        // don't leave a double-space artifact mid-tag.
+    }
+    Cow::Owned(out)
+}
+
+/// Fast-path probe: returns true if the raw tag source contains any
+/// attribute whose name starts with `on` (case-insensitive) followed
+/// by an alpha character. When this returns false we can hand the
+/// caller back a borrowed slice with no allocation.
+fn contains_on_attribute(raw: &str) -> bool {
+    let bytes = raw.as_bytes();
+    let len = bytes.len();
+    if len < 4 {
+        return false;
+    }
+    let mut i = 0usize;
+    while i + 3 < len {
+        if bytes[i].is_ascii_whitespace() {
+            let c0 = bytes[i + 1];
+            let c1 = bytes[i + 2];
+            let c2 = bytes[i + 3];
+            if (c0 == b'o' || c0 == b'O')
+                && (c1 == b'n' || c1 == b'N')
+                && c2.is_ascii_alphabetic()
+            {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
 }
 
 #[cfg(test)]
@@ -599,57 +804,98 @@ mod tests {
     }
 
     #[test]
-    fn html_clean_preserves_script_literal_meta_and_comment() {
-        // HTML "raw text" elements: a `<meta>` or `<!--...-->` that
-        // appears inside a `<script>` body is part of a JavaScript
-        // string literal, not a real HTML element. Without the
-        // rawtext-aware tokenizer the cleaner drops these and
-        // produces broken JS.
+    fn html_clean_drops_script_and_style_elements() {
+        // mat2 parity: `<script>` and `<style>` are in the drop
+        // blocklist. The rawtext tokenizer still consumes their body
+        // as a single Text token, and the new drop-stack rule then
+        // elides that body along with the open/close pair so no
+        // script bytes survive into the cleaned output.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         let dst = dir.path().join("clean.html");
-        let input = r#"<html><head><script>var s = "<meta name='x' content='y'>";
-var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
+        let input = r#"<html><head><script>var secret = "leak-from-script";</script><style>.x { content: "leak-from-style"; }</style></head><body><p>visible</p></body></html>"#;
         fs::write(&src, input).unwrap();
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(
-            out.contains("<meta name='x' content='y'>"),
-            "script literal HTML must round-trip verbatim, got: {out}"
-        );
-        assert!(
-            out.contains("<!--nope-->"),
-            "script literal comment must round-trip verbatim, got: {out}"
-        );
-        assert!(out.contains("</script>"));
-        assert!(out.contains("ok"));
+        assert!(!out.contains("<script"), "<script> tag survived: {out}");
+        assert!(!out.contains("</script"), "</script> tag survived: {out}");
+        assert!(!out.contains("leak-from-script"), "script body survived: {out}");
+        assert!(!out.contains("<style"), "<style> tag survived: {out}");
+        assert!(!out.contains("</style"), "</style> tag survived: {out}");
+        assert!(!out.contains("leak-from-style"), "style body survived: {out}");
+        assert!(out.contains("<p>visible</p>"), "body content must survive: {out}");
     }
 
     #[test]
-    fn html_clean_preserves_style_literal_content() {
-        // `<style>` is also a raw-text element. A `content:` value with
-        // angle brackets must pass through untouched.
+    fn html_clean_drops_link_base_and_frames() {
+        // mat2 blocklist: <link>, <base>, <iframe>, <object>, <embed>,
+        // <noscript>. All must vanish, including any nested content
+        // inside the containers.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         let dst = dir.path().join("clean.html");
-        let input = r#"<html><head><style>.x::before { content: "<meta>"; }</style></head><body/></html>"#;
+        let input = r#"<html><head>
+<link rel="author" href="https://example.invalid/me">
+<link rel="canonical" href="https://example.invalid/canonical">
+<base href="https://example.invalid/">
+</head><body>
+<iframe src="https://tracker.invalid/"><p>inside iframe</p></iframe>
+<object data="leak.swf"><param name="secret" value="leak"/></object>
+<embed src="leak.mov"/>
+<noscript>noscript content</noscript>
+<p>survivor</p>
+</body></html>"#;
         fs::write(&src, input).unwrap();
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(
-            out.contains(r#"content: "<meta>""#),
-            "style literal must round-trip verbatim, got: {out}"
-        );
-        assert!(out.contains("</style>"));
+        assert!(!out.contains("<link"), "<link> survived: {out}");
+        assert!(!out.contains("<base"), "<base> survived: {out}");
+        assert!(!out.contains("<iframe"), "<iframe> survived: {out}");
+        assert!(!out.contains("</iframe"), "</iframe> survived: {out}");
+        assert!(!out.contains("inside iframe"), "iframe body survived: {out}");
+        assert!(!out.contains("<object"), "<object> survived: {out}");
+        assert!(!out.contains("<param"), "object param survived: {out}");
+        assert!(!out.contains("secret"), "object secret survived: {out}");
+        assert!(!out.contains("<embed"), "<embed> survived: {out}");
+        assert!(!out.contains("<noscript"), "<noscript> survived: {out}");
+        assert!(!out.contains("noscript content"), "noscript body survived: {out}");
+        assert!(out.contains("<p>survivor</p>"), "body content must survive: {out}");
+    }
+
+    #[test]
+    fn html_clean_strips_on_event_handlers() {
+        // mat2 parity: inline on* event handlers are fingerprinting
+        // and user-tracking vectors. Strip every on* attribute from
+        // every surviving element while keeping non-on attributes
+        // (class, id, href, data-*) intact.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        let dst = dir.path().join("clean.html");
+        let input = r#"<html><body><div onclick="track()" class="a" data-x="keep"><a href="/x" ONLOAD="track()" onerror='track()'>link</a></div></body></html>"#;
+        fs::write(&src, input).unwrap();
+        let h = HtmlHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(!out.contains("onclick"), "onclick survived: {out}");
+        assert!(!out.contains("ONLOAD"), "ONLOAD survived: {out}");
+        assert!(!out.contains("onerror"), "onerror survived: {out}");
+        assert!(!out.contains("track()"), "handler body survived: {out}");
+        assert!(out.contains(r#"class="a""#), "class must survive: {out}");
+        assert!(out.contains(r#"data-x="keep""#), "data-* must survive: {out}");
+        assert!(out.contains(r#"href="/x""#), "href must survive: {out}");
+        assert!(out.contains(">link</a>"), "body text must survive: {out}");
     }
 
     #[test]
     fn html_reader_ignores_meta_inside_script_body() {
         // The reader shares the same tokenizer. A `<meta>` embedded as
         // a JavaScript string literal must not be surfaced as real
-        // metadata the user sees.
+        // metadata the user sees. (The cleaner now drops the whole
+        // script element, but the reader still has to ignore the
+        // literal so the "before cleaning" UI doesn't alarm users
+        // about code inside a script body.)
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         fs::write(
@@ -667,31 +913,32 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
     }
 
     #[test]
-    fn html_clean_script_unterminated_at_eof_preserved() {
-        // Unterminated `<script>` bodies at EOF are legal HTML - the
-        // raw-text body simply runs to the end of the input. The
-        // cleaner must keep the whole tail verbatim instead of dropping
-        // fake inner tags.
+    fn html_clean_script_unterminated_at_eof_dropped() {
+        // An unterminated `<script>` at EOF: the rawtext tokenizer
+        // treats the tail to EOF as the script body, and the cleaner
+        // drops the entire element including that body. This used to
+        // be a "preserve verbatim" test before script landed on the
+        // blocklist.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         let dst = dir.path().join("clean.html");
         fs::write(
             &src,
-            r#"<html><body><script>var s = "<meta>"; // no close"#,
+            r#"<html><body><p>keep</p><script>var s = "<meta>"; // no close"#,
         )
         .unwrap();
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(
-            out.contains(r#"var s = "<meta>"; // no close"#),
-            "unterminated script body must round-trip: {out}"
-        );
+        assert!(out.contains("<p>keep</p>"), "body prefix must survive: {out}");
+        assert!(!out.contains("<script"), "<script> survived: {out}");
+        assert!(!out.contains("var s"), "script body survived: {out}");
     }
 
     #[test]
-    fn html_clean_script_close_tag_case_insensitive() {
-        // The raw-text scanner must match `</SCRIPT>` in any case.
+    fn html_clean_script_close_tag_case_insensitive_dropped() {
+        // The raw-text scanner matches `</SCRIPT>` in any case, and the
+        // drop pass then elides the whole element.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         let dst = dir.path().join("clean.html");
@@ -703,16 +950,18 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(out.contains(r#"var s = "<meta>";"#));
-        assert!(out.contains("<p>after</p>"));
+        assert!(!out.contains("<SCRIPT"), "<SCRIPT> survived: {out}");
+        assert!(!out.contains("var s"), "script body survived: {out}");
+        assert!(out.contains("<p>after</p>"), "post-script text must survive: {out}");
     }
 
     #[test]
     fn html_clean_script_unterminated_close_at_eof_no_panic() {
         // Regression: an input whose tail is exactly `</script` (no
         // terminator byte after the name) used to panic inside
-        // `find_rawtext_close` with an out-of-bounds read. The partial
-        // close must now be treated as part of the script body.
+        // `find_rawtext_close` with an out-of-bounds read. The whole
+        // element is now dropped, so the output must not panic and
+        // must not contain any script bytes.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("page.html");
         let dst = dir.path().join("clean.html");
@@ -720,10 +969,7 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(
-            out.contains("</script"),
-            "partial close at EOF must round-trip verbatim, got: {out}"
-        );
+        assert!(!out.contains("script"), "script bytes survived: {out}");
     }
 
     #[test]
@@ -736,10 +982,7 @@ var c = "<!--nope-->";</script></head><body>ok</body></html>"#;
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(
-            out.contains("</style"),
-            "partial close at EOF must round-trip verbatim, got: {out}"
-        );
+        assert!(!out.contains("style"), "style bytes survived: {out}");
     }
 
     #[test]

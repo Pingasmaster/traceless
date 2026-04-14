@@ -421,8 +421,21 @@ fn clean_entry(
         ArchiveKind::Epub => {
             if epub::is_opf_path(entry_name) {
                 epub::clean_opf(xml)
-            } else if epub::is_ncx_path(entry_name) || epub::is_ops_xml_path(entry_name) {
+            } else if epub::is_ncx_path(entry_name) {
+                // NCX is an XML navigation file, not xhtml. Blank its
+                // <head> but don't run the HTML blocklist over it.
                 epub::clean_head_only(xml)
+            } else if epub::is_ops_xml_path(entry_name) {
+                // OPS content files are xhtml. Blank the <head> first
+                // (required by EPUB spec to keep the <head> element
+                // present even if empty), then run the full HTML
+                // blocklist over the result so body-level <meta>,
+                // <script>, <style>, <link>, <iframe>, etc. vanish.
+                // Before this two-pass cleanup a `<meta name="generator"
+                // content="Calibre">` dropped into the body of an OPS
+                // file survived the clean.
+                let head_blanked = epub::clean_head_only(xml);
+                crate::handlers::html::clean_html(&head_blanked)
             } else {
                 xml.to_string()
             }
@@ -446,29 +459,66 @@ fn is_xml_like(name: &str) -> bool {
 /// (EXIF/ICC/XMP/IPTC/text-chunks/time-chunks), re-encode, return the
 /// new bytes. Returns `None` if the image can't be parsed so the caller
 /// can fall back to the original bytes.
+///
+/// JPEG/PNG/WebP take an in-memory fast path via `img-parts`. Every
+/// other format (GIF, TIFF, BMP, SVG, HEIC/HEIF, JXL) round-trips
+/// through the matching registered handler via a temp file because
+/// those handlers consume filesystem paths - little_exif operates on
+/// paths, and the GIF / SVG handlers pull bytes from disk. Skipping
+/// this round-trip (as the handler used to) leaks EXIF/XMP out of any
+/// non-JPEG/PNG/WebP image embedded inside a DOCX/ODT/EPUB/etc.
 fn strip_embedded_image(data: &[u8], mime: &str) -> Option<Vec<u8>> {
-    // Fast path: img-parts handles JPEG/PNG/WEBP via DynImage.
-    let Ok(Some(mut img)) = DynImage::from_bytes(data.to_vec().into()) else {
-        return None;
-    };
-    img.set_exif(None);
-    img.set_icc_profile(None);
+    if matches!(mime, "image/jpeg" | "image/png" | "image/webp") {
+        let Ok(Some(mut img)) = DynImage::from_bytes(data.to_vec().into()) else {
+            return None;
+        };
+        img.set_exif(None);
+        img.set_icc_profile(None);
 
-    let mut buf = Vec::new();
-    let mut cursor = Cursor::new(&mut buf);
-    img.encoder().write_to(&mut cursor).ok()?;
+        let mut buf = Vec::new();
+        let mut cursor = Cursor::new(&mut buf);
+        img.encoder().write_to(&mut cursor).ok()?;
 
-    // Format-specific post-pass to remove what img-parts doesn't expose.
-    // If the post-pass parser fails (our own img-parts output did not
-    // re-parse cleanly), return None so `clean_entry` propagates a
-    // specific error rather than silently shipping partially-stripped
-    // bytes that may still carry XMP / IPTC / COM / text chunks.
-    match mime {
-        "image/jpeg" => strip_jpeg_extra_segments(&buf),
-        "image/png" => strip_png_text_chunks(&buf),
-        "image/webp" => strip_webp_extra_chunks(&buf),
-        _ => Some(buf),
+        // Format-specific post-pass to remove what img-parts doesn't
+        // expose. If the post-pass parser fails (our own img-parts
+        // output did not re-parse cleanly), return None so
+        // `clean_entry` propagates a specific error rather than
+        // silently shipping partially-stripped bytes that may still
+        // carry XMP / IPTC / COM / text chunks.
+        return match mime {
+            "image/jpeg" => strip_jpeg_extra_segments(&buf),
+            "image/png" => strip_png_text_chunks(&buf),
+            "image/webp" => strip_webp_extra_chunks(&buf),
+            _ => Some(buf),
+        };
     }
+
+    strip_embedded_via_handler(data, mime)
+}
+
+/// Round-trip an embedded image through its registered handler via
+/// two private tempfiles. Returns `None` on any I/O or parse failure
+/// so the caller surfaces a terminal `CleanEntryError` instead of
+/// shipping dirty bytes.
+fn strip_embedded_via_handler(data: &[u8], mime: &str) -> Option<Vec<u8>> {
+    let ext = zip_util::embedded_media_extension(mime)?;
+    let handler = crate::format_support::get_handler_for_mime(mime)?;
+
+    let tmp_in = tempfile::Builder::new()
+        .prefix("traceless-embed-in-")
+        .suffix(&format!(".{ext}"))
+        .tempfile()
+        .ok()?;
+    std::fs::write(tmp_in.path(), data).ok()?;
+
+    let tmp_out = tempfile::Builder::new()
+        .prefix("traceless-embed-out-")
+        .suffix(&format!(".{ext}"))
+        .tempfile()
+        .ok()?;
+
+    handler.clean_metadata(tmp_in.path(), tmp_out.path()).ok()?;
+    std::fs::read(tmp_out.path()).ok()
 }
 
 fn strip_jpeg_extra_segments(data: &[u8]) -> Option<Vec<u8>> {

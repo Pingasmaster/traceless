@@ -1608,3 +1608,89 @@ fn test_file_store_handles_large_batch_without_panic() {
         "every file must reach a terminal state"
     );
 }
+
+/// Build a minimum-viable GIF89a with a Comment Extension carrying a
+/// known-leak payload. Used to prove the DocumentHandler reaches the
+/// embedded-image path for GIFs, not just JPEG/PNG/WebP.
+fn build_dirty_gif(secret: &[u8]) -> Vec<u8> {
+    let mut gif = Vec::new();
+    gif.extend_from_slice(b"GIF89a");
+    gif.extend_from_slice(&[
+        0x01, 0x00, // width 1
+        0x01, 0x00, // height 1
+        0x00, // packed (no GCT)
+        0x00, // bg color index
+        0x00, // pixel aspect ratio
+    ]);
+    // Comment extension
+    gif.extend_from_slice(&[0x21, 0xFE]);
+    gif.push(secret.len() as u8);
+    gif.extend_from_slice(secret);
+    gif.push(0x00);
+    // Image descriptor: 1x1 at (0,0), no LCT
+    gif.extend_from_slice(&[0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+    gif.push(0x02); // LZW min code size
+    gif.push(0x02); // sub-block length
+    gif.push(0x44);
+    gif.push(0x01);
+    gif.push(0x00); // sub-block terminator
+    gif.push(0x3B); // trailer
+    gif
+}
+
+#[test]
+fn test_docx_embedded_gif_comment_is_stripped() {
+    // Regression: before the is_cleanable_media extension, embedded
+    // GIF files in OOXML / ODF / EPUB archives were copied through
+    // verbatim because only jpg/png/webp routed to strip_embedded_image.
+    // A GIF carrying a Comment Extension leaked its payload into the
+    // cleaned archive.
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let dir = TempDir::new().unwrap();
+    let src = dir.path().join("dirty.docx");
+    let dst = dir.path().join("cleaned.docx");
+
+    let dirty_gif = build_dirty_gif(b"DOCX_GIF_SECRET_COMMENT");
+
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>")
+            .unwrap();
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
+            .unwrap();
+        writer.start_file("word/media/image1.gif", options).unwrap();
+        writer.write_all(&dirty_gif).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = crate::handlers::document::DocumentHandler;
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    let cleaned_file = fs::File::open(&dst).unwrap();
+    let mut cleaned_zip = zip::ZipArchive::new(cleaned_file).unwrap();
+    let mut cleaned_gif = Vec::new();
+    {
+        use std::io::Read;
+        let mut entry = cleaned_zip.by_name("word/media/image1.gif").unwrap();
+        entry.read_to_end(&mut cleaned_gif).unwrap();
+    }
+
+    assert!(
+        cleaned_gif.starts_with(b"GIF8"),
+        "cleaned entry must still be a valid GIF"
+    );
+    assert!(
+        !cleaned_gif
+            .windows(b"DOCX_GIF_SECRET_COMMENT".len())
+            .any(|w| w == b"DOCX_GIF_SECRET_COMMENT"),
+        "embedded GIF comment payload survived docx clean"
+    );
+}

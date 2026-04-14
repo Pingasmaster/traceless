@@ -1,4 +1,5 @@
 use std::path::Path;
+use std::process::Command;
 
 use lofty::file::TaggedFileExt;
 use lofty::tag::{ItemKey, TagType};
@@ -93,6 +94,26 @@ impl FormatHandler for AudioHandler {
         path: &Path,
         output_path: &Path,
     ) -> Result<(), CoreError> {
+        // M4A / MP4-audio containers carry metadata in two separate
+        // places: the iTunes `ilst` atom tree (which lofty handles
+        // cleanly) and user-data atoms outside `ilst` like
+        // `moov/udta/meta/keys`, freeform `©xyz` GPS, chapter tracks,
+        // and MP4 brands. Lofty only strips `ilst` tags via
+        // `TagType::remove_from_path`, so a GPS tag injected via
+        // ffmpeg's `-metadata location=` survives the lofty-only
+        // clean. Route these formats through the same ffmpeg
+        // incantation the video handler uses so every non-codec
+        // atom is discarded. Lofty still owns the reader path for
+        // these formats because its picture-scanning surface is
+        // richer than ffprobe's.
+        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        if matches!(
+            mime.as_ref(),
+            "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac"
+        ) {
+            return clean_via_ffmpeg(path, output_path);
+        }
+
         // Copy original to output first so lofty parses a file with the
         // correct extension (see file_store::make_temp_path).
         std::fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
@@ -201,6 +222,60 @@ fn probe_picture_metadata(
         }
     }
     if out.is_empty() { None } else { Some(out) }
+}
+
+/// Shell out to ffmpeg to strip every non-codec atom from an M4A /
+/// MP4-audio container. This mirrors `VideoHandler::clean_metadata`:
+/// `-c copy` keeps the streams bit-exact, `-map_metadata -1 -map_chapters -1`
+/// drops every format- and stream-level tag, `+bitexact` prevents
+/// ffmpeg from re-stamping its own `encoder=Lavf...` fingerprint, and
+/// `-disposition 0` clears the per-stream disposition flags mat2
+/// also strips.
+fn clean_via_ffmpeg(path: &Path, output_path: &Path) -> Result<(), CoreError> {
+    match Command::new("ffmpeg").arg("-version").output() {
+        Ok(o) if o.status.success() => {}
+        _ => {
+            return Err(CoreError::ToolNotFound {
+                tool: "ffmpeg".to_string(),
+            });
+        }
+    }
+    let output = Command::new("ffmpeg")
+        .arg("-y")
+        .arg("-i")
+        .arg(path)
+        .arg("-map")
+        .arg("0")
+        .arg("-c")
+        .arg("copy")
+        .arg("-map_metadata")
+        .arg("-1")
+        .arg("-map_chapters")
+        .arg("-1")
+        .arg("-disposition")
+        .arg("0")
+        .arg("-fflags")
+        .arg("+bitexact")
+        .arg("-flags:v")
+        .arg("+bitexact")
+        .arg("-flags:a")
+        .arg("+bitexact")
+        .arg("-loglevel")
+        .arg("error")
+        .arg("-hide_banner")
+        .arg(output_path)
+        .output()
+        .map_err(|e| CoreError::ToolFailed {
+            tool: "ffmpeg".to_string(),
+            detail: format!("Failed to run ffmpeg: {e}"),
+        })?;
+    if !output.status.success() {
+        return Err(CoreError::ToolFailed {
+            tool: "ffmpeg".to_string(),
+            detail: format!("ffmpeg failed: {}", String::from_utf8_lossy(&output.stderr)),
+        });
+    }
+    Ok(())
 }
 
 /// Rewrite a FLAC file's VorbisComments block with an empty vendor

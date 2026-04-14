@@ -1,4 +1,5 @@
-//! Generic archive cleaner: plain ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ.
+//! Generic archive cleaner: plain ZIP, TAR, TAR.GZ, TAR.BZ2, TAR.XZ,
+//! TAR.ZST.
 //!
 //! Unlike the office-document handler (which knows the specific layout
 //! of DOCX/ODT/EPUB), this one has to assume arbitrary contents. For
@@ -37,6 +38,7 @@ enum ArchiveFormat {
     TarGz,
     TarBz2,
     TarXz,
+    TarZst,
 }
 
 /// Result of probing an archive filename for a supported format.
@@ -68,6 +70,8 @@ impl ArchiveFormat {
             (".tbz", ArchiveFormat::TarBz2),
             (".tar.xz", ArchiveFormat::TarXz),
             (".txz", ArchiveFormat::TarXz),
+            (".tar.zst", ArchiveFormat::TarZst),
+            (".tzst", ArchiveFormat::TarZst),
             (".tar", ArchiveFormat::Tar),
             (".zip", ArchiveFormat::Zip),
         ];
@@ -75,6 +79,7 @@ impl ArchiveFormat {
             (".gz", "gzip"),
             (".bz2", "bzip2"),
             (".xz", "xz"),
+            (".zst", "zstd"),
         ];
 
         let Some(name) = path.file_name() else {
@@ -442,6 +447,14 @@ fn open_tar(path: &Path, fmt: ArchiveFormat) -> Result<Box<dyn Read>, CoreError>
         ArchiveFormat::TarGz => Box::new(GzDecoder::new(BufReader::new(f))),
         ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::new(f))),
         ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::new(f))),
+        ArchiveFormat::TarZst => Box::new(
+            zstd::stream::read::Decoder::new(BufReader::new(f)).map_err(|e| {
+                CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("zstd decoder: {e}"),
+                }
+            })?,
+        ),
         ArchiveFormat::Zip => unreachable!(),
     };
     Ok(reader)
@@ -733,6 +746,14 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
             Box::new(bzip2::write::BzEncoder::new(buf_out, bzip2::Compression::default()))
         }
         ArchiveFormat::TarXz => Box::new(xz2::write::XzEncoder::new(buf_out, 6)),
+        ArchiveFormat::TarZst => Box::new(
+            zstd::stream::write::Encoder::new(buf_out, 3)
+                .map_err(|e| CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!("zstd encoder: {e}"),
+                })?
+                .auto_finish(),
+        ),
         ArchiveFormat::Zip => unreachable!(),
     };
 

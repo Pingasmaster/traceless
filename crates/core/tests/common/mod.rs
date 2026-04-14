@@ -684,6 +684,92 @@ pub fn make_dirty_aiff(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Run ffprobe on `path` and return every (key, value) pair ffprobe
+/// reports under a `.tags.` section, for both `format.tags.*` and
+/// each `streams.stream.N.tags.*`. Used by the audio/video round-trip
+/// tests as a ground-truth check that is independent of lofty /
+/// our own readers: if ffprobe says a tag is gone, it really is gone.
+///
+/// A small allowlist of codec-structural tags (`language`,
+/// `handler_name`, `vendor_id`) is filtered out because ffmpeg emits
+/// these from stream codec context, not user metadata, and cleaning
+/// them would require re-encoding.
+pub fn ffprobe_user_tags(path: &Path) -> Vec<(String, String)> {
+    let Ok(output) = Command::new("ffprobe")
+        .args([
+            "-v",
+            "error",
+            "-print_format",
+            "flat",
+            "-show_format",
+            "-show_streams",
+        ])
+        .arg(path)
+        .output()
+    else {
+        return Vec::new();
+    };
+    if !output.status.success() {
+        return Vec::new();
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let mut out = Vec::new();
+    for line in stdout.lines() {
+        let Some(idx) = line.find(".tags.") else {
+            continue;
+        };
+        let after = &line[idx + ".tags.".len()..];
+        let Some(eq) = after.find('=') else {
+            continue;
+        };
+        let key = &after[..eq];
+        // Structural / container-level tags ffmpeg always emits
+        // regardless of our `-map_metadata -1` clean. These are codec
+        // or ISO-BMFF brand fields, not user metadata.
+        if matches!(
+            key,
+            "language"
+                | "handler_name"
+                | "vendor_id"
+                | "major_brand"
+                | "minor_version"
+                | "compatible_brands"
+        ) {
+            continue;
+        }
+        let value = after[eq + 1..].trim_matches('"').to_string();
+        out.push((key.to_string(), value));
+    }
+    out
+}
+
+/// Synthesize a silent M4A via ffmpeg and inject iTunes-style metadata
+/// including a `location` tag that ends up in the udta/meta atom tree.
+/// This is the round-trip fixture for the audio-handler M4A path,
+/// specifically to prove that non-`ilst` atoms ffmpeg writes are still
+/// scrubbed after the clean.
+pub fn make_dirty_m4a(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "aac",
+            "-metadata",
+            "title=secret-m4a-title",
+            "-metadata",
+            "artist=secret-m4a-artist",
+            "-metadata",
+            "location=+40.7128-074.0060/",
+        ],
+    )
+}
+
 pub fn make_dirty_mp4(path: &Path) -> std::io::Result<()> {
     ffmpeg_synthesize(
         path,

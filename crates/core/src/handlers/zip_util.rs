@@ -126,6 +126,12 @@ pub fn is_office_junk_path(name: &str) -> bool {
 /// Common image extensions embedded inside office archives. Members
 /// matching these should be cleaned through the image handler so the
 /// camera EXIF / GPS inside them is removed too.
+///
+/// JPEG, PNG and WebP are handled in-memory via `img-parts` in the
+/// fast path. Everything else round-trips through the appropriate
+/// registered `FormatHandler` via a temp file because the underlying
+/// libraries (little_exif, GifHandler, SvgHandler, HarmlessHandler)
+/// operate on filesystem paths rather than `&[u8]`.
 #[must_use]
 pub fn is_cleanable_media(name: &str) -> Option<&'static str> {
     let lower = name.to_ascii_lowercase();
@@ -135,8 +141,43 @@ pub fn is_cleanable_media(name: &str) -> Option<&'static str> {
         Some("image/png")
     } else if lower.ends_with(".webp") {
         Some("image/webp")
+    } else if lower.ends_with(".gif") {
+        Some("image/gif")
+    } else if lower.ends_with(".tif") || lower.ends_with(".tiff") {
+        Some("image/tiff")
+    } else if lower.ends_with(".bmp") {
+        Some("image/bmp")
+    } else if lower.ends_with(".svg") {
+        Some("image/svg+xml")
+    } else if lower.ends_with(".heic") {
+        Some("image/heic")
+    } else if lower.ends_with(".heif") {
+        Some("image/heif")
+    } else if lower.ends_with(".jxl") {
+        Some("image/jxl")
     } else {
         None
+    }
+}
+
+/// Map an embedded-media MIME type back to the file extension the
+/// temp-file round-trip needs, so handlers that detect format by
+/// extension (the ImageHandler does this via mime_guess) route
+/// correctly when we hand them the temp path.
+#[must_use]
+pub fn embedded_media_extension(mime: &str) -> Option<&'static str> {
+    match mime {
+        "image/jpeg" => Some("jpg"),
+        "image/png" => Some("png"),
+        "image/webp" => Some("webp"),
+        "image/gif" => Some("gif"),
+        "image/tiff" => Some("tiff"),
+        "image/bmp" => Some("bmp"),
+        "image/svg+xml" => Some("svg"),
+        "image/heic" => Some("heic"),
+        "image/heif" => Some("heif"),
+        "image/jxl" => Some("jxl"),
+        _ => None,
     }
 }
 
@@ -173,6 +214,36 @@ mod tests {
         assert_eq!(is_cleanable_media("word/media/image1.jpg"), Some("image/jpeg"));
         assert_eq!(is_cleanable_media("word/media/image2.PNG"), Some("image/png"));
         assert_eq!(is_cleanable_media("OPS/images/cover.webp"), Some("image/webp"));
+        assert_eq!(is_cleanable_media("word/media/photo.GIF"), Some("image/gif"));
+        assert_eq!(is_cleanable_media("xl/media/scan.TIFF"), Some("image/tiff"));
+        assert_eq!(is_cleanable_media("xl/media/scan.tif"), Some("image/tiff"));
+        assert_eq!(is_cleanable_media("ppt/media/diagram.bmp"), Some("image/bmp"));
+        assert_eq!(is_cleanable_media("OPS/images/vector.svg"), Some("image/svg+xml"));
+        assert_eq!(is_cleanable_media("word/media/cover.heic"), Some("image/heic"));
+        assert_eq!(is_cleanable_media("word/media/cover.heif"), Some("image/heif"));
+        assert_eq!(is_cleanable_media("word/media/cover.JXL"), Some("image/jxl"));
         assert_eq!(is_cleanable_media("word/document.xml"), None);
+    }
+
+    #[test]
+    fn embedded_media_extension_maps_every_cleanable_mime() {
+        for mime in [
+            "image/jpeg",
+            "image/png",
+            "image/webp",
+            "image/gif",
+            "image/tiff",
+            "image/bmp",
+            "image/svg+xml",
+            "image/heic",
+            "image/heif",
+            "image/jxl",
+        ] {
+            assert!(
+                embedded_media_extension(mime).is_some(),
+                "every cleanable-media MIME must map back to an extension: {mime}"
+            );
+        }
+        assert_eq!(embedded_media_extension("application/octet-stream"), None);
     }
 }
