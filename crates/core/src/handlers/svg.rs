@@ -123,10 +123,21 @@ fn is_url_attribute(local: &str) -> bool {
 
 /// True if the (trimmed, ASCII-lowercased) attribute value names a
 /// `javascript:` pseudo-URI.
+///
+/// Operates on the byte slice rather than slicing the `&str`, because
+/// slicing a `&str` at byte 11 panics when byte 11 is not a UTF-8
+/// char boundary. A value like `"javascrip☃"` (9 ASCII bytes plus the
+/// 3-byte snowman) has its 11th byte in the middle of `☃`, which
+/// would otherwise crash the worker on an adversarial SVG. The byte
+/// slice is always indexable, and the comparison is ASCII-only so a
+/// plain `eq_ignore_ascii_case` on the bytes is both correct and
+/// fast.
 fn is_javascript_uri(value: &str) -> bool {
-    let trimmed = value.trim_start();
-    trimmed.len() >= "javascript:".len()
-        && trimmed[.."javascript:".len()].eq_ignore_ascii_case("javascript:")
+    const PREFIX: &[u8] = b"javascript:";
+    let trimmed = value.trim_start().as_bytes();
+    trimmed
+        .get(..PREFIX.len())
+        .is_some_and(|p| p.eq_ignore_ascii_case(PREFIX))
 }
 
 impl FormatHandler for SvgHandler {
@@ -569,5 +580,56 @@ mod tests {
         }
         // Structural content survives
         assert!(out.contains("<rect"), "shapes must survive: {out}");
+    }
+
+    #[test]
+    fn is_javascript_uri_does_not_panic_on_mid_char_boundary() {
+        // Regression: the old implementation did
+        // `trimmed[.."javascript:".len()]` which slices a `&str` at
+        // byte index 11. If the 11th byte is a UTF-8 continuation
+        // byte (e.g. the second byte of a 3-byte snowman that starts
+        // at byte 9), the slice panics with "byte index 11 is not a
+        // char boundary". A crafted SVG attribute value would then
+        // panic the worker thread; `run_job_with_terminal_error` now
+        // catches this, but a handler should never panic on valid
+        // UTF-8 input in the first place.
+        let value = "javascrip\u{2603}"; // 9 ASCII bytes + 3-byte snowman
+        assert_eq!(value.len(), 12);
+        // Must not panic.
+        assert!(!is_javascript_uri(value));
+
+        // Also confirm the happy path still matches.
+        assert!(is_javascript_uri("javascript:alert(1)"));
+        assert!(is_javascript_uri("JavaScript:alert(1)"));
+        assert!(is_javascript_uri("  javascript:alert(1)")); // leading whitespace
+        // And a non-matching prefix of the same length is still rejected.
+        assert!(!is_javascript_uri("javascrunt:"));
+        // An empty value is rejected without panicking.
+        assert!(!is_javascript_uri(""));
+        // A value too short for the prefix is rejected.
+        assert!(!is_javascript_uri("java"));
+    }
+
+    #[test]
+    fn svg_clean_with_multibyte_href_does_not_panic() {
+        // End-to-end: a real SVG whose `href` attribute is the
+        // multibyte-boundary panic reproducer. The cleaner must
+        // process this without panicking and emit something that
+        // contains neither the script tag nor any JavaScript-uri
+        // residue.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("multibyte.svg");
+        let dst = dir.path().join("clean.svg");
+        let xml = r#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+  <a href="javascrip☃">
+    <text>click</text>
+  </a>
+</svg>"#;
+        fs::write(&src, xml).unwrap();
+        let h = SvgHandler;
+        h.clean_metadata(&src, &dst).expect("clean must not panic");
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(out.contains("<text"), "text element must survive: {out}");
     }
 }
