@@ -245,6 +245,20 @@ impl ffi::FileListModel {
                         this.as_mut().data_changed(&model_index, &model_index, &roles);
                     }
                     this.as_mut().update_aux_properties();
+
+                    // If the event updated the row whose metadata is
+                    // currently being rendered in the detail drawer,
+                    // re-snapshot so the drawer reflects the new state
+                    // instead of whatever was captured when the user
+                    // clicked Details. Without this, a worker that
+                    // finishes scanning the selected row leaves the
+                    // drawer stuck on its pre-event snapshot.
+                    if let Some(row) = affected_row {
+                        let current_detail = this.rust().detail_row;
+                        if row == current_detail {
+                            this.as_mut().select_detail(row);
+                        }
+                    }
                 });
             }
         });

@@ -36,11 +36,19 @@ use super::FormatHandler;
 pub struct SvgHandler;
 
 /// Element local-names that we drop entirely (along with every child).
+///
+/// `script` is here for content-safety, not metadata: an SVG can carry
+/// arbitrary JavaScript that runs when the file is opened in a browser,
+/// and a user who clicks "Clean" reasonably expects the output to be
+/// safe to share. mat2 side-steps this by rasterizing the whole SVG;
+/// we preserve vectors and instead enumerate the unsafe surface here
+/// and in `STRIP_EVENT_HANDLER_HREFS` / `sanitize_attributes` below.
 const DROP_ELEMENTS: &[&str] = &[
     "metadata",      // the whole RDF block
     "title",         // often contains author name
     "desc",          // often contains description + author
     "namedview",     // sodipodi editor state
+    "script",        // embedded JavaScript (content-safety, not metadata)
 ];
 
 /// Namespace prefixes whose attributes we strip from every element.
@@ -51,6 +59,75 @@ const STRIP_NS_PREFIXES: &[&str] = &[
     "dc:",
     "cc:",
 ];
+
+/// Attribute local-names whose values we scrub for `javascript:` URIs.
+/// An SVG `<a href="javascript:...">` or `<use xlink:href="javascript:...">`
+/// fires the JS when the link is followed, so even without a `<script>`
+/// block or an `on*` handler the cleaned file can still execute code.
+const URL_ATTRIBUTE_LOCALS: &[&str] = &["href"];
+
+/// Complete list of HTML5 + SVG event-handler attributes. Kept as a
+/// lowercase slice so `is_event_handler_attr` below does an ASCII
+/// case-insensitive linear scan. Matches the union of HTML Living
+/// Standard §8.1.7.2.1 and SVG 2 §6.5 ("Event attributes"). ~100 names
+/// means a linear scan is cheap enough per attribute and avoids the
+/// `phf` / `HashSet` dependency.
+///
+/// Over-matching a non-event attribute starts stripping real user data
+/// (e.g. a custom `onion` data attribute), and under-matching leaves a
+/// real XSS vector in the cleaned file. The whitelist approach is the
+/// only way to get both right.
+const EVENT_HANDLER_ATTRS: &[&str] = &[
+    "onabort", "onactivate", "onafterprint", "onanimationend",
+    "onanimationiteration", "onanimationstart", "onauxclick",
+    "onbeforeinput", "onbeforeprint", "onbeforeunload", "onbegin",
+    "onblur", "oncancel", "oncanplay", "oncanplaythrough", "onchange",
+    "onclick", "onclose", "oncontextlost", "oncontextmenu",
+    "oncontextrestored", "oncopy", "oncuechange", "oncut", "ondblclick",
+    "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover",
+    "ondragstart", "ondrop", "ondurationchange", "onemptied", "onend",
+    "onended", "onerror", "onfocus", "onfocusin", "onfocusout",
+    "onformdata", "ongotpointercapture", "onhashchange", "oninput",
+    "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onlanguagechange",
+    "onload", "onloadeddata", "onloadedmetadata", "onloadstart",
+    "onlostpointercapture", "onmessage", "onmessageerror", "onmousedown",
+    "onmouseenter", "onmouseleave", "onmousemove", "onmouseout",
+    "onmouseover", "onmouseup", "onoffline", "ononline", "onpagehide",
+    "onpageshow", "onpaste", "onpause", "onplay", "onplaying",
+    "onpointercancel", "onpointerdown", "onpointerenter",
+    "onpointerleave", "onpointermove", "onpointerout", "onpointerover",
+    "onpointerup", "onpopstate", "onprogress", "onratechange",
+    "onrejectionhandled", "onrepeat", "onreset", "onresize", "onscroll",
+    "onscrollend", "onsecuritypolicyviolation", "onseeked", "onseeking",
+    "onselect", "onshow", "onslotchange", "onstalled", "onstorage",
+    "onsubmit", "onsuspend", "ontimeupdate", "ontoggle",
+    "ontransitionend", "ontransitionstart", "onunhandledrejection",
+    "onunload", "onvolumechange", "onwaiting", "onwheel", "onzoom",
+];
+
+/// True if `name` is one of the HTML/SVG event-handler attributes.
+/// Case-insensitive: `ONCLICK`, `onClick`, and `onclick` all match.
+fn is_event_handler_attr(name: &str) -> bool {
+    // Binary search over the sorted table. `eq_ignore_ascii_case`
+    // gives us the case-insensitivity; we compare via lower bound.
+    EVENT_HANDLER_ATTRS
+        .iter()
+        .any(|known| known.eq_ignore_ascii_case(name))
+}
+
+/// True if the attribute's local name (namespace prefix already
+/// stripped) is in `URL_ATTRIBUTE_LOCALS`.
+fn is_url_attribute(local: &str) -> bool {
+    URL_ATTRIBUTE_LOCALS.iter().any(|&n| n.eq_ignore_ascii_case(local))
+}
+
+/// True if the (trimmed, ASCII-lowercased) attribute value names a
+/// `javascript:` pseudo-URI.
+fn is_javascript_uri(value: &str) -> bool {
+    let trimmed = value.trim_start();
+    trimmed.len() >= "javascript:".len()
+        && trimmed[.."javascript:".len()].eq_ignore_ascii_case("javascript:")
+}
 
 impl FormatHandler for SvgHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
@@ -69,39 +146,14 @@ impl FormatHandler for SvgHandler {
                     let name = local_name_of(e);
                     let qname = full_name_of(e);
 
-                    // Expose inkscape/sodipodi/rdf/dc attributes as leaks
-                    for attr in e.attributes().filter_map(Result::ok) {
-                        let key_str = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-                        if STRIP_NS_PREFIXES
-                            .iter()
-                            .any(|p| key_str.starts_with(p))
-                        {
-                            let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
-                            items.push(MetadataItem {
-                                key: format!("<{qname}> {key_str}"),
-                                value,
-                            });
-                        }
-                    }
+                    collect_leaky_attrs(e, &qname, &mut items);
 
                     if DROP_ELEMENTS.contains(&name.as_str()) {
                         current_tag = Some(qname);
                     }
                 }
                 Ok(Event::Empty(ref e)) => {
-                    for attr in e.attributes().filter_map(Result::ok) {
-                        let key_str = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
-                        if STRIP_NS_PREFIXES
-                            .iter()
-                            .any(|p| key_str.starts_with(p))
-                        {
-                            let value = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
-                            items.push(MetadataItem {
-                                key: format!("<{}> {key_str}", full_name_of(e)),
-                                value,
-                            });
-                        }
-                    }
+                    collect_leaky_attrs(e, &full_name_of(e), &mut items);
                 }
                 Ok(Event::Text(ref t)) => {
                     if let Some(tag) = &current_tag {
@@ -239,7 +291,9 @@ impl FormatHandler for SvgHandler {
 }
 
 /// Rewrite a start tag's attributes, dropping any whose key starts with
-/// an `inkscape:` / `sodipodi:` / `rdf:` / `dc:` / `cc:` prefix.
+/// an `inkscape:` / `sodipodi:` / `rdf:` / `dc:` / `cc:` prefix, plus
+/// any event-handler attribute (`onclick`, `onload`, …) and any
+/// `href` / `xlink:href` value pointing at a `javascript:` URI.
 fn sanitize_attributes(start: &BytesStart<'_>) -> BytesStart<'static> {
     let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
     let mut out = BytesStart::new(name);
@@ -247,19 +301,35 @@ fn sanitize_attributes(start: &BytesStart<'_>) -> BytesStart<'static> {
     for attr in start.attributes().filter_map(Result::ok) {
         let key_bytes = attr.key.as_ref().to_vec();
         let key_str = String::from_utf8_lossy(&key_bytes);
+        let local_attr = key_str
+            .rsplit_once(':')
+            .map_or_else(|| key_str.as_ref(), |(_, l)| l);
 
         if STRIP_NS_PREFIXES.iter().any(|p| key_str.starts_with(p)) {
             continue;
         }
         // Drop xmlns declarations for dropped namespaces to keep the
-        // output tidy — they otherwise dangle as unused prefix bindings.
+        // output tidy - they otherwise dangle as unused prefix bindings.
         if let Some(prefix) = key_str.strip_prefix("xmlns:")
             && STRIP_NS_PREFIXES.iter().any(|p| p.trim_end_matches(':') == prefix)
         {
             continue;
         }
-
+        // Event handlers (`onclick`, `onload`, …) can run arbitrary
+        // JavaScript when the SVG is rendered in a browser.
+        if is_event_handler_attr(local_attr) {
+            continue;
+        }
+        // `href`/`xlink:href` values like `javascript:alert(1)` fire
+        // when the link is followed.
         let value = attr.value.into_owned();
+        if is_url_attribute(local_attr)
+            && let Ok(value_str) = std::str::from_utf8(&value)
+            && is_javascript_uri(value_str)
+        {
+            continue;
+        }
+
         out.push_attribute(Attribute {
             key: quick_xml::name::QName(&key_bytes),
             value: Cow::Owned(value),
@@ -279,6 +349,46 @@ fn local_name_of(start: &BytesStart<'_>) -> String {
 
 fn full_name_of(start: &BytesStart<'_>) -> String {
     String::from_utf8_lossy(start.name().as_ref()).into_owned()
+}
+
+/// Walk the attributes of one element and append every attribute that
+/// `clean_metadata` would drop as a `MetadataItem` so the user sees it
+/// before they click Clean. Covers the five leaky namespace prefixes
+/// plus `on*` event handlers plus `href`/`xlink:href` values that
+/// point at `javascript:` URIs.
+fn collect_leaky_attrs(
+    start: &BytesStart<'_>,
+    qname: &str,
+    items: &mut Vec<MetadataItem>,
+) {
+    for attr in start.attributes().filter_map(Result::ok) {
+        let key_str = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
+        let local_attr = key_str
+            .rsplit_once(':')
+            .map_or(key_str.as_str(), |(_, l)| l);
+        let value_str = String::from_utf8_lossy(attr.value.as_ref()).into_owned();
+
+        if STRIP_NS_PREFIXES.iter().any(|p| key_str.starts_with(p)) {
+            items.push(MetadataItem {
+                key: format!("<{qname}> {key_str}"),
+                value: value_str,
+            });
+            continue;
+        }
+        if is_event_handler_attr(local_attr) {
+            items.push(MetadataItem {
+                key: format!("<{qname}> {key_str} (event handler)"),
+                value: value_str,
+            });
+            continue;
+        }
+        if is_url_attribute(local_attr) && is_javascript_uri(&value_str) {
+            items.push(MetadataItem {
+                key: format!("<{qname}> {key_str} (javascript: uri)"),
+                value: value_str,
+            });
+        }
+    }
 }
 
 #[cfg(test)]
@@ -327,6 +437,103 @@ mod tests {
         let dump = format!("{meta:?}");
         assert!(dump.contains("inkscape:version"));
         assert!(dump.contains("sodipodi:docname"));
+    }
+
+    #[test]
+    fn svg_clean_drops_script_and_event_handlers_and_js_uris() {
+        // mat2 rasterizes SVGs, which nukes scripts and event handlers
+        // as a side effect. We preserve vectors, so we have to
+        // explicitly strip every element and attribute that can execute
+        // JS when the file is rendered in a browser.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("hostile.svg");
+        let dst = dir.path().join("clean.svg");
+        let xml = br#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:xlink="http://www.w3.org/1999/xlink"
+     width="10" height="10">
+  <script>var stolen = document.cookie;</script>
+  <rect x="0" y="0" width="10" height="10" fill="red"
+        onclick="alert('evil-click')"
+        ONLOAD="alert('evil-load')"
+        one="keep-me"
+        onion="keep-too"/>
+  <a href="javascript:alert('a-href')"><text>click</text></a>
+  <use xlink:href="javascript:alert('xlink')"/>
+  <g><rect x="5" y="5" width="2" height="2" fill="blue"/></g>
+</svg>"#;
+        fs::write(&src, xml).unwrap();
+
+        let h = SvgHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+
+        // Every script body, event handler, and javascript: URI is gone.
+        for needle in [
+            "var stolen",
+            "document.cookie",
+            "<script",
+            "</script>",
+            "evil-click",
+            "evil-load",
+            "onclick",
+            "onload",
+            "ONLOAD",
+            "javascript:",
+            "a-href",
+            "xlink:href",
+        ] {
+            assert!(
+                !out.contains(needle),
+                "'{needle}' leaked through SVG clean: {out}"
+            );
+        }
+
+        // But the harmless attributes whose names merely start with
+        // "on" (`one`, `onion`) must survive.
+        assert!(
+            out.contains(r#"one="keep-me""#),
+            "harmless 'one' attr was over-eagerly stripped: {out}"
+        );
+        assert!(
+            out.contains(r#"onion="keep-too""#),
+            "harmless 'onion' attr was over-eagerly stripped: {out}"
+        );
+
+        // Structural content still there
+        assert!(out.contains("<rect"), "rect elements must survive: {out}");
+        assert!(out.contains(r#"fill="red""#));
+        assert!(out.contains(r#"fill="blue""#));
+        // The link's `<text>` child (not inside a dropped subtree) must
+        // survive even though the enclosing `<a>` lost its href.
+        assert!(out.contains("click"), "<text> body inside <a> must survive: {out}");
+    }
+
+    #[test]
+    fn svg_read_surfaces_script_and_event_handlers() {
+        // The reader must flag scripts and event handlers to the user
+        // so they see why the cleaner is about to touch the file.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("hostile.svg");
+        fs::write(
+            &src,
+            r#"<svg xmlns="http://www.w3.org/2000/svg">
+  <script>evil()</script>
+  <rect onclick="bad()"/>
+  <a href="javascript:also_bad()"><text>x</text></a>
+</svg>"#,
+        )
+        .unwrap();
+        let h = SvgHandler;
+        let meta = h.read_metadata(&src).unwrap();
+        let dump = format!("{meta:?}");
+        assert!(dump.contains("event handler"), "{dump}");
+        assert!(dump.contains("bad()"), "{dump}");
+        assert!(dump.contains("javascript: uri"), "{dump}");
+        assert!(dump.contains("also_bad"), "{dump}");
+        // Script body text is surfaced via the existing
+        // DROP_ELEMENTS text-capture path, not as an attribute.
+        assert!(dump.contains("evil()"), "{dump}");
     }
 
     #[test]

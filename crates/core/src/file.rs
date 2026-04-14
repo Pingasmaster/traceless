@@ -99,15 +99,88 @@ impl FileEntry {
     }
 }
 
-/// Simplify a directory path for display: replace home dir with ~.
+/// Simplify a directory path for display: replace home dir with `~`.
+///
+/// Uses `Path::strip_prefix` rather than string `strip_prefix` so that
+/// a directory like `/home/alice-backups/project` with `$HOME =
+/// /home/alice` does *not* come out as `~-backups/project`. The stdlib
+/// check operates on whole path components, so the prefix only matches
+/// at a component boundary.
 fn simplify_dir_path(path: &Path) -> String {
-    let dir = path.parent().map(|p| p.to_string_lossy().into_owned()).unwrap_or_default();
-    if let Some(home) = dirs_home() && let Some(rest) = dir.strip_prefix(&home) {
-        return format!("~{rest}");
-    }
-    dir
+    simplify_dir_path_with_home(path, dirs_home().as_deref())
 }
 
-fn dirs_home() -> Option<String> {
-    std::env::var("HOME").ok()
+/// Same as `simplify_dir_path` but with an explicit home path override.
+/// Factored out for the unit tests, which must not mutate the global
+/// `$HOME` environment variable (the core crate forbids `unsafe`, and
+/// `env::set_var` is `unsafe` on edition 2024).
+fn simplify_dir_path_with_home(path: &Path, home: Option<&Path>) -> String {
+    let Some(dir) = path.parent() else {
+        return String::new();
+    };
+    if let Some(home) = home
+        && let Ok(rest) = dir.strip_prefix(home)
+    {
+        if rest.as_os_str().is_empty() {
+            return "~".to_string();
+        }
+        return format!("~/{}", rest.display());
+    }
+    dir.to_string_lossy().into_owned()
+}
+
+fn dirs_home() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn simplify_dir_under_home_is_tilde_rel() {
+        let got = simplify_dir_path_with_home(
+            Path::new("/home/alice/docs/report.pdf"),
+            Some(Path::new("/home/alice")),
+        );
+        assert_eq!(got, "~/docs");
+    }
+
+    #[test]
+    fn simplify_dir_exactly_home_is_tilde() {
+        let got = simplify_dir_path_with_home(
+            Path::new("/home/alice/report.pdf"),
+            Some(Path::new("/home/alice")),
+        );
+        assert_eq!(got, "~");
+    }
+
+    #[test]
+    fn simplify_dir_lookalike_not_collapsed() {
+        // Regression: a directory that happens to start with the home
+        // bytes but isn't a subdirectory must not be collapsed into `~`.
+        // Before the fix, `/home/alice-backups/project/report.pdf`
+        // collapsed to `~-backups/project`.
+        let got = simplify_dir_path_with_home(
+            Path::new("/home/alice-backups/project/report.pdf"),
+            Some(Path::new("/home/alice")),
+        );
+        assert_eq!(got, "/home/alice-backups/project");
+    }
+
+    #[test]
+    fn simplify_dir_outside_home_passes_through() {
+        let got = simplify_dir_path_with_home(
+            Path::new("/var/log/messages"),
+            Some(Path::new("/home/alice")),
+        );
+        assert_eq!(got, "/var/log");
+    }
+
+    #[test]
+    fn simplify_dir_no_home_returns_raw() {
+        // `$HOME` unset → fall back to the raw parent path.
+        let got = simplify_dir_path_with_home(Path::new("/var/log/messages"), None);
+        assert_eq!(got, "/var/log");
+    }
 }

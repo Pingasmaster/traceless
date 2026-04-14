@@ -952,6 +952,22 @@ pub fn assert_zip_is_normalized(path: &Path) {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).unwrap();
 
+    // Collect every member name up-front so the mimetype invariant can
+    // be checked once, instead of threading position bookkeeping
+    // through the per-entry loop. The previous implementation had a
+    // broken `assert_eq!(i, 1, "must be at index 0")` that only fired
+    // when mimetype was at index 1, which was (a) physically incorrect
+    // and (b) literally the opposite of the assertion message.
+    let names: Vec<String> = (0..archive.len())
+        .map(|i| archive.by_index_raw(i).unwrap().name().to_string())
+        .collect();
+    if let Some(mimetype_idx) = names.iter().position(|n| n == "mimetype") {
+        assert_eq!(
+            mimetype_idx, 0,
+            "mimetype must be at index 0, found at {mimetype_idx}"
+        );
+    }
+
     let mut prev_name: Option<String> = None;
     for i in 0..archive.len() {
         let entry = archive.by_index_raw(i).unwrap();
@@ -979,18 +995,16 @@ pub fn assert_zip_is_normalized(path: &Path) {
         );
 
         // Lexicographic ordering, with a single exception for mimetype
-        if let Some(prev) = &prev_name {
-            if name == "mimetype" {
-                // mimetype never leads
-                assert_eq!(i, 1, "mimetype must be at index 0, found at {i}");
-            } else if prev != "mimetype" {
-                assert!(
-                    &name >= prev,
-                    "zip entries not lexicographically sorted: {prev:?} then {name:?}"
-                );
-            }
-        } else if name != "mimetype" {
-            // First member that isn't mimetype is fine.
+        // (which is always at index 0 per the check above). Every
+        // other member must be >= its predecessor.
+        if name != "mimetype"
+            && let Some(prev) = &prev_name
+            && prev != "mimetype"
+        {
+            assert!(
+                &name >= prev,
+                "zip entries not lexicographically sorted: {prev:?} then {name:?}"
+            );
         }
         prev_name = Some(name);
     }
