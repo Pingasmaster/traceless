@@ -20,9 +20,21 @@ mod ffi {
 
 use cxx_qt_lib::QString;
 
-#[derive(Default)]
 pub struct AppControllerRust {
+    /// Populated at construction from `env!("CARGO_PKG_VERSION")` so
+    /// QML bindings like `text: "Version " + appController.app_version`
+    /// track the workspace manifest automatically. Previously derived
+    /// as `Default`, which left the property as an empty string and
+    /// forced QML to hardcode the version in the About dialog.
     app_version: QString,
+}
+
+impl Default for AppControllerRust {
+    fn default() -> Self {
+        Self {
+            app_version: QString::from(env!("CARGO_PKG_VERSION")),
+        }
+    }
 }
 
 impl ffi::AppController {

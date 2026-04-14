@@ -71,7 +71,10 @@ pub fn show_about_dialog(parent: &impl IsA<gtk::Window>) {
     let about = adw::AboutDialog::builder()
         .application_name("Traceless")
         .developer_name("Traceless Contributors")
-        .version("1.0.0")
+        // `env!` resolves at compile time from the crate's Cargo.toml
+        // version, so the About dialog stays in sync with the
+        // workspace manifest automatically on any version bump.
+        .version(env!("CARGO_PKG_VERSION"))
         .comments("View and remove metadata from your files.\n\nInspired by Metadata Cleaner by Romain Vigier.")
         .website("https://gitlab.com/rmnvgr/metadata-cleaner")
         .license_type(gtk::License::Gpl30)

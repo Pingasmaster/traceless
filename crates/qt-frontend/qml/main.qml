@@ -205,7 +205,11 @@ ApplicationWindow {
                 Layout.alignment: Qt.AlignHCenter
             }
             Label {
-                text: "Version 1.0.0"
+                // `app_version` is a Q_PROPERTY populated at
+                // construction from `env!("CARGO_PKG_VERSION")`, so
+                // this label tracks the workspace Cargo.toml version
+                // automatically on any bump.
+                text: "Version " + appController.app_version
                 Layout.alignment: Qt.AlignHCenter
                 opacity: 0.7
             }
