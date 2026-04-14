@@ -48,6 +48,7 @@ mod ffi {
         #[qproperty(i32, detail_row)]
         #[qproperty(QString, detail_group)]
         #[qproperty(i32, detail_count)]
+        #[qproperty(QString, detail_error)]
         type FileListModel = super::FileListModelRust;
     }
 
@@ -93,11 +94,6 @@ mod ffi {
         /// Read a metadata value for the currently selected detail row.
         #[qinvokable]
         fn detail_value(self: &FileListModel, index: i32) -> QString;
-
-        /// Returns the user-facing error attached to the currently selected
-        /// detail row, or an empty string if there is none.
-        #[qinvokable]
-        fn detail_error(self: &FileListModel) -> QString;
     }
 
     extern "RustQt" {
@@ -192,7 +188,16 @@ pub struct FileListModelRust {
     /// selected a detail row. Captured into the model so that QML can
     /// render from it even if the underlying file state mutates later.
     detail_items: Vec<(String, String)>,
-    detail_error: String,
+    /// User-facing error attached to the currently selected detail row.
+    /// Held as `QString` (and exposed via `#[qproperty]`) so its QML
+    /// bindings re-evaluate when `select_detail` writes a new value.
+    /// The old Q_INVOKABLE version was bound as
+    /// `text: model.detail_error()` in `DetailsPanel.qml`, which is
+    /// evaluated exactly once at Label creation (QML doesn't track
+    /// method-call return values as binding dependencies), so the
+    /// drawer would freeze the error text from the first file the
+    /// user ever viewed.
+    detail_error: QString,
 }
 
 impl Default for FileListModelRust {
@@ -207,7 +212,7 @@ impl Default for FileListModelRust {
             detail_group: QString::default(),
             detail_count: 0,
             detail_items: Vec::new(),
-            detail_error: String::new(),
+            detail_error: QString::default(),
         }
     }
 }
@@ -435,14 +440,11 @@ impl ffi::FileListModel {
     /// Wipe the detail drawer snapshot. Called when the backing file is
     /// removed or the store is cleared.
     fn reset_detail(mut self: Pin<&mut Self>) {
-        {
-            let mut state = self.as_mut().rust_mut();
-            state.detail_items.clear();
-            state.detail_error.clear();
-        }
+        self.as_mut().rust_mut().detail_items.clear();
         self.as_mut().set_detail_row(-1);
         self.as_mut().set_detail_group(QString::default());
         self.as_mut().set_detail_count(0);
+        self.as_mut().set_detail_error(QString::default());
     }
 
     fn select_detail(mut self: Pin<&mut Self>, row: i32) {
@@ -476,14 +478,12 @@ impl ffi::FileListModel {
         }
 
         let count = i32::try_from(items.len()).unwrap_or(i32::MAX);
-        {
-            let mut state = self.as_mut().rust_mut();
-            state.detail_items = items;
-            state.detail_error = error;
-        }
+        self.as_mut().rust_mut().detail_items = items;
         self.as_mut().set_detail_row(row);
         self.as_mut().set_detail_group(group);
         self.as_mut().set_detail_count(count);
+        self.as_mut()
+            .set_detail_error(QString::from(&error as &str));
     }
 
     fn detail_key(&self, index: i32) -> QString {
@@ -498,10 +498,6 @@ impl ffi::FileListModel {
             .ok()
             .and_then(|i| self.rust().detail_items.get(i))
             .map_or_else(QString::default, |(_, v)| QString::from(v as &str))
-    }
-
-    fn detail_error(&self) -> QString {
-        QString::from(&self.rust().detail_error as &str)
     }
 
     fn data(&self, index: &QModelIndex, role: i32) -> QVariant {

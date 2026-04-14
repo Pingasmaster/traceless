@@ -1,4 +1,6 @@
+use std::any::Any;
 use std::fs;
+use std::panic::{catch_unwind, AssertUnwindSafe};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -92,7 +94,6 @@ impl FileStore {
     /// Add files and start background metadata checking.
     /// Returns the indices of the newly added files.
     pub fn add_files(&mut self, paths: Vec<PathBuf>, tx: &Sender<FileStoreEvent>) -> Vec<usize> {
-        let start_index = self.files.len();
         let mut indices = Vec::new();
         let mut ids = Vec::with_capacity(paths.len());
 
@@ -109,14 +110,23 @@ impl FileStore {
         // `min(available_parallelism(), 8)`; the old `thread::spawn`
         // per path hit `RLIMIT_NPROC` (and panicked the caller) on
         // large batches such as a dropped photo library.
+        //
+        // `run_job_with_terminal_error` wraps the job body in
+        // `catch_unwind` so a handler panic mid-scan still produces
+        // a terminal `FileError` event, instead of leaving the file
+        // stuck in `CheckingMetadata` forever.
         for (path, id) in paths.into_iter().zip(ids) {
             let tx = tx.clone();
             worker_pool::submit(move || {
-                check_file_metadata(id, &path, &tx);
+                run_job_with_terminal_error(
+                    id,
+                    &tx,
+                    FileState::ErrorWhileCheckingMetadata,
+                    || check_file_metadata(id, &path, &tx),
+                );
             });
         }
 
-        let _ = start_index;
         indices
     }
 
@@ -152,7 +162,12 @@ impl FileStore {
                 let id = entry.id;
                 let tx = tx.clone();
                 worker_pool::submit(move || {
-                    clean_single_file(id, &path, &tx);
+                    run_job_with_terminal_error(
+                        id,
+                        &tx,
+                        FileState::ErrorWhileRemovingMetadata,
+                        || clean_single_file(id, &path, &tx),
+                    );
                 });
             }
         }
@@ -232,6 +247,48 @@ impl Default for FileStore {
 #[must_use]
 pub fn collect_paths(dir: &Path, recursive: bool) -> Vec<PathBuf> {
     collect_files_from_dir(dir, recursive)
+}
+
+/// Decode a `catch_unwind` payload into a displayable string. The
+/// standard library types `Box<dyn Any + Send>` as the payload; the
+/// `&'static str` and `String` cases cover every panic that Rust's
+/// own `panic!` macro produces. Anything else falls back to a
+/// generic label.
+fn panic_payload_message(payload: &(dyn Any + Send)) -> &'static str {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        return s;
+    }
+    if let Some(s) = payload.downcast_ref::<String>() {
+        // Leak a 'static slice: this is the panic path, so we don't
+        // care about the one-off allocation. Using Box::leak keeps
+        // the return type `&'static str` so both arms match.
+        return Box::leak(s.clone().into_boxed_str());
+    }
+    "<non-string panic payload>"
+}
+
+/// Run a job that emits lifecycle events through `tx`, catching any
+/// panic and converting it to a terminal `FileError` so the UI never
+/// sees a file stuck in a working state. The inner `worker_pool`
+/// `catch_unwind` is still the last-line safety net that keeps
+/// workers alive if this wrapper is ever bypassed.
+fn run_job_with_terminal_error<F>(
+    id: FileId,
+    tx: &Sender<FileStoreEvent>,
+    terminal_error_state: FileState,
+    job: F,
+) where
+    F: FnOnce(),
+{
+    let result = catch_unwind(AssertUnwindSafe(job));
+    if let Err(payload) = result {
+        let msg = panic_payload_message(payload.as_ref());
+        let _ = tx.send_blocking(FileStoreEvent::FileError {
+            id,
+            state: terminal_error_state,
+            message: format!("handler panicked: {msg}"),
+        });
+    }
 }
 
 fn check_file_metadata(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
@@ -373,7 +430,9 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::{clean_single_file, FileId, FileStoreEvent};
+    use super::{
+        clean_single_file, run_job_with_terminal_error, FileId, FileState, FileStoreEvent,
+    };
     use async_channel::unbounded;
     use std::os::unix::fs::symlink;
 
@@ -429,5 +488,67 @@ mod tests {
             leftovers.is_empty(),
             "expected no leftover .traceless-* entries, found {leftovers:?}"
         );
+    }
+
+    #[test]
+    fn panic_in_job_emits_terminal_error_event() {
+        // Regression: `worker_pool::submit` already catches panics so
+        // the worker thread survives, but before this fix the file
+        // whose job panicked got no terminal event at all - the UI
+        // left the entry stuck on whatever `FileStateChanged` state
+        // had been emitted before the panic. `run_job_with_terminal_error`
+        // now wraps the job in its own `catch_unwind` and emits a
+        // `FileError` on the unwind path so every submitted job
+        // always terminates with a terminal event.
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        run_job_with_terminal_error(
+            FileId(42),
+            &tx,
+            FileState::ErrorWhileRemovingMetadata,
+            || {
+                panic!("synthetic handler panic");
+            },
+        );
+        drop(tx);
+
+        let mut saw_terminal_error = false;
+        while let Ok(event) = rx.try_recv() {
+            if let FileStoreEvent::FileError { id, state, message } = event {
+                assert_eq!(id, FileId(42));
+                assert_eq!(state, FileState::ErrorWhileRemovingMetadata);
+                assert!(
+                    message.contains("synthetic handler panic"),
+                    "error message should carry the panic payload, got: {message}"
+                );
+                saw_terminal_error = true;
+            }
+        }
+        assert!(
+            saw_terminal_error,
+            "expected a terminal FileError event after the panicking job"
+        );
+    }
+
+    #[test]
+    fn successful_job_does_not_emit_spurious_error() {
+        // The normal non-panic path must not emit a FileError just
+        // because the wrapper is in place. The terminal events are
+        // still the handler's responsibility on the happy path.
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        run_job_with_terminal_error(
+            FileId(7),
+            &tx,
+            FileState::ErrorWhileCheckingMetadata,
+            || {
+                // Empty job. No events emitted from inside.
+            },
+        );
+        drop(tx);
+
+        while let Ok(event) = rx.try_recv() {
+            if let FileStoreEvent::FileError { .. } = event {
+                panic!("wrapper emitted a spurious error on a successful job");
+            }
+        }
     }
 }

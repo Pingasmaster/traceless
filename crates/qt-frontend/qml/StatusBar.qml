@@ -37,10 +37,15 @@ Item {
             visible: !statusBar.isWorking && statusBar.statusMessage.length === 0
         }
 
-        // Clean button
+        // Clean button. Disabled while any file is still scanning so
+        // the user cannot trigger a partial clean that silently skips
+        // files whose state has not yet transitioned to cleanable.
+        // Matches the GTK frontend's `cleanable_count() > 0 &&
+        // !has_working()` gate.
         Button {
             text: "Clean"
             highlighted: true
+            enabled: !statusBar.isWorking
             palette.button: "#c01c28"
             palette.buttonText: "white"
             onClicked: statusBar.cleanClicked()

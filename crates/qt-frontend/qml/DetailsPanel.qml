@@ -63,7 +63,13 @@ Page {
 
             Label {
                 id: errorLabel
-                text: detailsPanel.model.detail_error()
+                // `detail_error` is a Q_PROPERTY, not a Q_INVOKABLE,
+                // so this binding re-evaluates whenever `select_detail`
+                // writes a new value. The method-call form
+                // `detail_error()` was only evaluated once at Label
+                // creation and froze the error text for the life of
+                // the page.
+                text: detailsPanel.model.detail_error
                 visible: detailsPanel.model.detail_row >= 0
                          && detailsPanel.model.detail_count === 0
                          && errorLabel.text.length > 0
