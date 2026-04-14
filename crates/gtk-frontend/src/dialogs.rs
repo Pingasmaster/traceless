@@ -11,20 +11,24 @@ pub fn show_file_chooser(
         .build();
 
     let parent_clone = parent.clone().upcast::<gtk::Window>();
-    dialog.open_multiple(Some(&parent_clone), gtk::gio::Cancellable::NONE, move |result| {
-        if let Ok(files) = result {
-            let mut paths = Vec::new();
-            for i in 0..files.n_items() {
-                if let Some(file) = files.item(i)
-                    && let Some(gfile) = file.downcast_ref::<gtk::gio::File>()
-                    && let Some(path) = gfile.path()
-                {
-                    paths.push(path);
+    dialog.open_multiple(
+        Some(&parent_clone),
+        gtk::gio::Cancellable::NONE,
+        move |result| {
+            if let Ok(files) = result {
+                let mut paths = Vec::new();
+                for i in 0..files.n_items() {
+                    if let Some(file) = files.item(i)
+                        && let Some(gfile) = file.downcast_ref::<gtk::gio::File>()
+                        && let Some(path) = gfile.path()
+                    {
+                        paths.push(path);
+                    }
                 }
+                callback(paths);
             }
-            callback(paths);
-        }
-    });
+        },
+    );
 }
 
 /// Show a folder chooser dialog.
@@ -38,13 +42,17 @@ pub fn show_folder_chooser(
         .build();
 
     let parent_clone = parent.clone().upcast::<gtk::Window>();
-    dialog.select_folder(Some(&parent_clone), gtk::gio::Cancellable::NONE, move |result| {
-        if let Ok(folder) = result
-            && let Some(path) = folder.path()
-        {
-            callback(path);
-        }
-    });
+    dialog.select_folder(
+        Some(&parent_clone),
+        gtk::gio::Cancellable::NONE,
+        move |result| {
+            if let Ok(folder) = result
+                && let Some(path) = folder.path()
+            {
+                callback(path);
+            }
+        },
+    );
 }
 
 /// Show the cleaning warning dialog.
@@ -61,9 +69,13 @@ pub fn show_cleaning_warning(parent: &impl IsA<gtk::Window>, callback: impl Fn(b
     dialog.set_close_response("cancel");
 
     let parent_clone = parent.clone().upcast::<gtk::Window>();
-    dialog.choose(Some(&parent_clone), gtk::gio::Cancellable::NONE, move |response| {
-        callback(response == "clean");
-    });
+    dialog.choose(
+        Some(&parent_clone),
+        gtk::gio::Cancellable::NONE,
+        move |response| {
+            callback(response == "clean");
+        },
+    );
 }
 
 /// Show the About dialog.

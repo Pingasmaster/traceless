@@ -110,9 +110,7 @@ pub fn clean_opf(xml: &str) -> String {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0
-                    && writer.write_event(Event::Text(t.clone())).is_err()
-                {
+                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
                     return xml.to_string();
                 }
             }
@@ -191,9 +189,7 @@ pub fn clean_head_only(xml: &str) -> String {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0
-                    && writer.write_event(Event::Text(t.clone())).is_err()
-                {
+                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
                     return xml.to_string();
                 }
             }
@@ -239,11 +235,22 @@ fn generate_urn_uuid_v4(rng: &mut impl Rng) -> String {
     bytes[8] = (bytes[8] & 0x3F) | 0x80;
     format!(
         "urn:uuid:{:02x}{:02x}{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}-{:02x}{:02x}{:02x}{:02x}{:02x}{:02x}",
-        bytes[0], bytes[1], bytes[2], bytes[3],
-        bytes[4], bytes[5],
-        bytes[6], bytes[7],
-        bytes[8], bytes[9],
-        bytes[10], bytes[11], bytes[12], bytes[13], bytes[14], bytes[15],
+        bytes[0],
+        bytes[1],
+        bytes[2],
+        bytes[3],
+        bytes[4],
+        bytes[5],
+        bytes[6],
+        bytes[7],
+        bytes[8],
+        bytes[9],
+        bytes[10],
+        bytes[11],
+        bytes[12],
+        bytes[13],
+        bytes[14],
+        bytes[15],
     )
 }
 
@@ -265,9 +272,15 @@ mod tests {
 </package>"#;
         let out = clean_opf(xml);
         assert!(!out.contains("Jane Doe"), "author must be removed: {out}");
-        assert!(!out.contains("Secret Press"), "publisher must be removed: {out}");
+        assert!(
+            !out.contains("Secret Press"),
+            "publisher must be removed: {out}"
+        );
         assert!(!out.contains("Secret Book"), "title must be removed: {out}");
-        assert!(out.contains("urn:uuid:"), "new UUID must be injected: {out}");
+        assert!(
+            out.contains("urn:uuid:"),
+            "new UUID must be injected: {out}"
+        );
         assert!(out.contains("dc:identifier"), "identifier element required");
         assert!(out.contains("dc:language"), "language element required");
         assert!(out.contains("dc:title"), "title element required (empty)");
@@ -285,7 +298,10 @@ mod tests {
   <docTitle><text>Title</text></docTitle>
 </ncx>"#;
         let out = clean_head_only(xml);
-        assert!(!out.contains("secret-identifier"), "uid must be blanked: {out}");
+        assert!(
+            !out.contains("secret-identifier"),
+            "uid must be blanked: {out}"
+        );
         assert!(!out.contains("Calibre"), "generator must be blanked: {out}");
         assert!(out.contains("docTitle"), "rest of doc must survive");
     }
@@ -301,6 +317,9 @@ mod tests {
         assert_eq!(parts.len(), 5);
         assert!(parts[2].starts_with('4'), "version 4 expected: {core}");
         let variant = parts[3].chars().next().unwrap();
-        assert!(matches!(variant, '8' | '9' | 'a' | 'b'), "RFC 4122 variant expected: {core}");
+        assert!(
+            matches!(variant, '8' | '9' | 'a' | 'b'),
+            "RFC 4122 variant expected: {core}"
+        );
     }
 }

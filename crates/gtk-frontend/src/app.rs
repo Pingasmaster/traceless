@@ -6,9 +6,7 @@ use crate::window::Window;
 const APP_ID: &str = "io.github.traceless";
 
 pub fn run() {
-    let app = adw::Application::builder()
-        .application_id(APP_ID)
-        .build();
+    let app = adw::Application::builder().application_id(APP_ID).build();
 
     app.connect_startup(|_| {
         style::load_css();

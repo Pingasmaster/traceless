@@ -69,13 +69,7 @@ const DROP_ELEMENTS: &[&str] = &[
 ];
 
 /// Namespace prefixes whose attributes we strip from every element.
-const STRIP_NS_PREFIXES: &[&str] = &[
-    "inkscape:",
-    "sodipodi:",
-    "rdf:",
-    "dc:",
-    "cc:",
-];
+const STRIP_NS_PREFIXES: &[&str] = &["inkscape:", "sodipodi:", "rdf:", "dc:", "cc:"];
 
 /// Attribute local-names whose values we scrub for `javascript:` URIs.
 /// An SVG `<a href="javascript:...">` or `<use xlink:href="javascript:...">`
@@ -95,31 +89,114 @@ const URL_ATTRIBUTE_LOCALS: &[&str] = &["href"];
 /// real XSS vector in the cleaned file. The whitelist approach is the
 /// only way to get both right.
 const EVENT_HANDLER_ATTRS: &[&str] = &[
-    "onabort", "onactivate", "onafterprint", "onanimationend",
-    "onanimationiteration", "onanimationstart", "onauxclick",
-    "onbeforeinput", "onbeforeprint", "onbeforeunload", "onbegin",
-    "onblur", "oncancel", "oncanplay", "oncanplaythrough", "onchange",
-    "onclick", "onclose", "oncontextlost", "oncontextmenu",
-    "oncontextrestored", "oncopy", "oncuechange", "oncut", "ondblclick",
-    "ondrag", "ondragend", "ondragenter", "ondragleave", "ondragover",
-    "ondragstart", "ondrop", "ondurationchange", "onemptied", "onend",
-    "onended", "onerror", "onfocus", "onfocusin", "onfocusout",
-    "onformdata", "ongotpointercapture", "onhashchange", "oninput",
-    "oninvalid", "onkeydown", "onkeypress", "onkeyup", "onlanguagechange",
-    "onload", "onloadeddata", "onloadedmetadata", "onloadstart",
-    "onlostpointercapture", "onmessage", "onmessageerror", "onmousedown",
-    "onmouseenter", "onmouseleave", "onmousemove", "onmouseout",
-    "onmouseover", "onmouseup", "onoffline", "ononline", "onpagehide",
-    "onpageshow", "onpaste", "onpause", "onplay", "onplaying",
-    "onpointercancel", "onpointerdown", "onpointerenter",
-    "onpointerleave", "onpointermove", "onpointerout", "onpointerover",
-    "onpointerup", "onpopstate", "onprogress", "onratechange",
-    "onrejectionhandled", "onrepeat", "onreset", "onresize", "onscroll",
-    "onscrollend", "onsecuritypolicyviolation", "onseeked", "onseeking",
-    "onselect", "onshow", "onslotchange", "onstalled", "onstorage",
-    "onsubmit", "onsuspend", "ontimeupdate", "ontoggle",
-    "ontransitionend", "ontransitionstart", "onunhandledrejection",
-    "onunload", "onvolumechange", "onwaiting", "onwheel", "onzoom",
+    "onabort",
+    "onactivate",
+    "onafterprint",
+    "onanimationend",
+    "onanimationiteration",
+    "onanimationstart",
+    "onauxclick",
+    "onbeforeinput",
+    "onbeforeprint",
+    "onbeforeunload",
+    "onbegin",
+    "onblur",
+    "oncancel",
+    "oncanplay",
+    "oncanplaythrough",
+    "onchange",
+    "onclick",
+    "onclose",
+    "oncontextlost",
+    "oncontextmenu",
+    "oncontextrestored",
+    "oncopy",
+    "oncuechange",
+    "oncut",
+    "ondblclick",
+    "ondrag",
+    "ondragend",
+    "ondragenter",
+    "ondragleave",
+    "ondragover",
+    "ondragstart",
+    "ondrop",
+    "ondurationchange",
+    "onemptied",
+    "onend",
+    "onended",
+    "onerror",
+    "onfocus",
+    "onfocusin",
+    "onfocusout",
+    "onformdata",
+    "ongotpointercapture",
+    "onhashchange",
+    "oninput",
+    "oninvalid",
+    "onkeydown",
+    "onkeypress",
+    "onkeyup",
+    "onlanguagechange",
+    "onload",
+    "onloadeddata",
+    "onloadedmetadata",
+    "onloadstart",
+    "onlostpointercapture",
+    "onmessage",
+    "onmessageerror",
+    "onmousedown",
+    "onmouseenter",
+    "onmouseleave",
+    "onmousemove",
+    "onmouseout",
+    "onmouseover",
+    "onmouseup",
+    "onoffline",
+    "ononline",
+    "onpagehide",
+    "onpageshow",
+    "onpaste",
+    "onpause",
+    "onplay",
+    "onplaying",
+    "onpointercancel",
+    "onpointerdown",
+    "onpointerenter",
+    "onpointerleave",
+    "onpointermove",
+    "onpointerout",
+    "onpointerover",
+    "onpointerup",
+    "onpopstate",
+    "onprogress",
+    "onratechange",
+    "onrejectionhandled",
+    "onrepeat",
+    "onreset",
+    "onresize",
+    "onscroll",
+    "onscrollend",
+    "onsecuritypolicyviolation",
+    "onseeked",
+    "onseeking",
+    "onselect",
+    "onshow",
+    "onslotchange",
+    "onstalled",
+    "onstorage",
+    "onsubmit",
+    "onsuspend",
+    "ontimeupdate",
+    "ontoggle",
+    "ontransitionend",
+    "ontransitionstart",
+    "onunhandledrejection",
+    "onunload",
+    "onvolumechange",
+    "onwaiting",
+    "onwheel",
+    "onzoom",
 ];
 
 /// True if `name` is one of the HTML/SVG event-handler attributes.
@@ -135,7 +212,9 @@ fn is_event_handler_attr(name: &str) -> bool {
 /// True if the attribute's local name (namespace prefix already
 /// stripped) is in `URL_ATTRIBUTE_LOCALS`.
 fn is_url_attribute(local: &str) -> bool {
-    URL_ATTRIBUTE_LOCALS.iter().any(|&n| n.eq_ignore_ascii_case(local))
+    URL_ATTRIBUTE_LOCALS
+        .iter()
+        .any(|&n| n.eq_ignore_ascii_case(local))
 }
 
 /// True if the (trimmed, ASCII-lowercased) attribute value names a
@@ -239,24 +318,24 @@ impl FormatHandler for SvgHandler {
                         continue;
                     }
                     let sanitized = sanitize_attributes(e);
-                    writer
-                        .write_event(Event::Start(sanitized))
-                        .map_err(|err| CoreError::CleanError {
+                    writer.write_event(Event::Start(sanitized)).map_err(|err| {
+                        CoreError::CleanError {
                             path: path.to_path_buf(),
                             detail: format!("SVG write error: {err}"),
-                        })?;
+                        }
+                    })?;
                 }
                 Ok(Event::End(ref e)) => {
                     if skip_depth > 0 {
                         skip_depth -= 1;
                         continue;
                     }
-                    writer
-                        .write_event(Event::End(e.clone()))
-                        .map_err(|err| CoreError::CleanError {
+                    writer.write_event(Event::End(e.clone())).map_err(|err| {
+                        CoreError::CleanError {
                             path: path.to_path_buf(),
                             detail: format!("SVG write error: {err}"),
-                        })?;
+                        }
+                    })?;
                 }
                 Ok(Event::Empty(ref e)) => {
                     if skip_depth > 0 {
@@ -267,21 +346,21 @@ impl FormatHandler for SvgHandler {
                         continue;
                     }
                     let sanitized = sanitize_attributes(e);
-                    writer
-                        .write_event(Event::Empty(sanitized))
-                        .map_err(|err| CoreError::CleanError {
+                    writer.write_event(Event::Empty(sanitized)).map_err(|err| {
+                        CoreError::CleanError {
                             path: path.to_path_buf(),
                             detail: format!("SVG write error: {err}"),
-                        })?;
+                        }
+                    })?;
                 }
                 Ok(Event::Text(ref t)) => {
                     if skip_depth == 0 {
-                        writer
-                            .write_event(Event::Text(t.clone()))
-                            .map_err(|err| CoreError::CleanError {
+                        writer.write_event(Event::Text(t.clone())).map_err(|err| {
+                            CoreError::CleanError {
                                 path: path.to_path_buf(),
                                 detail: format!("SVG write error: {err}"),
-                            })?;
+                            }
+                        })?;
                     }
                 }
                 Ok(Event::Comment(_)) => {
@@ -290,10 +369,12 @@ impl FormatHandler for SvgHandler {
                 Ok(Event::Eof) => break,
                 Ok(other) => {
                     if skip_depth == 0 {
-                        writer.write_event(other).map_err(|err| CoreError::CleanError {
-                            path: path.to_path_buf(),
-                            detail: format!("SVG write error: {err}"),
-                        })?;
+                        writer
+                            .write_event(other)
+                            .map_err(|err| CoreError::CleanError {
+                                path: path.to_path_buf(),
+                                detail: format!("SVG write error: {err}"),
+                            })?;
                     }
                 }
                 Err(e) => {
@@ -339,7 +420,9 @@ fn sanitize_attributes(start: &BytesStart<'_>) -> BytesStart<'static> {
         // Drop xmlns declarations for dropped namespaces to keep the
         // output tidy - they otherwise dangle as unused prefix bindings.
         if let Some(prefix) = key_str.strip_prefix("xmlns:")
-            && STRIP_NS_PREFIXES.iter().any(|p| p.trim_end_matches(':') == prefix)
+            && STRIP_NS_PREFIXES
+                .iter()
+                .any(|p| p.trim_end_matches(':') == prefix)
         {
             continue;
         }
@@ -384,11 +467,7 @@ fn full_name_of(start: &BytesStart<'_>) -> String {
 /// before they click Clean. Covers the five leaky namespace prefixes
 /// plus `on*` event handlers plus `href`/`xlink:href` values that
 /// point at `javascript:` URIs.
-fn collect_leaky_attrs(
-    start: &BytesStart<'_>,
-    qname: &str,
-    items: &mut Vec<MetadataItem>,
-) {
+fn collect_leaky_attrs(start: &BytesStart<'_>, qname: &str, items: &mut Vec<MetadataItem>) {
     for attr in start.attributes().filter_map(Result::ok) {
         let key_str = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
         let local_attr = key_str
@@ -535,7 +614,10 @@ mod tests {
         assert!(out.contains(r#"fill="blue""#));
         // The link's `<text>` child (not inside a dropped subtree) must
         // survive even though the enclosing `<a>` lost its href.
-        assert!(out.contains("click"), "<text> body inside <a> must survive: {out}");
+        assert!(
+            out.contains("click"),
+            "<text> body inside <a> must survive: {out}"
+        );
     }
 
     #[test]

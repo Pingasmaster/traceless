@@ -20,7 +20,6 @@
 // infallible (plain byte writers), which trips `unnecessary_wraps`;
 // silence it file-wide because the uniformity is the point.
 #![allow(clippy::unnecessary_wraps)]
-
 #![allow(clippy::unwrap_used)]
 mod common;
 
@@ -283,9 +282,7 @@ enum SkipReason {
 /// Helper: build the fixture, clean twice, return both output paths.
 /// If the fixture can't be synthesised, return a typed skip reason so
 /// the caller can accumulate it.
-fn clean_twice(
-    row: &FormatRow,
-) -> Result<(tempfile::TempDir, PathBuf, PathBuf), SkipReason> {
+fn clean_twice(row: &FormatRow) -> Result<(tempfile::TempDir, PathBuf, PathBuf), SkipReason> {
     if row.needs_ffmpeg && !have_ffmpeg() {
         return Err(SkipReason::FfmpegMissing);
     }

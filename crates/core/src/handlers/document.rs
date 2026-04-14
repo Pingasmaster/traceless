@@ -13,7 +13,7 @@ use zip::ZipArchive;
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::{epub, odf, ooxml, zip_util, FormatHandler};
+use super::{FormatHandler, epub, odf, ooxml, zip_util};
 
 pub struct DocumentHandler;
 
@@ -37,12 +37,11 @@ impl FormatHandler for DocumentHandler {
             source: e,
         })?;
 
-        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
-            CoreError::ParseError {
+        let mut archive =
+            ZipArchive::new(BufReader::new(file)).map_err(|e| CoreError::ParseError {
                 path: path.to_path_buf(),
                 detail: format!("Not a valid ZIP archive: {e}"),
-            }
-        })?;
+            })?;
 
         let filename = path
             .file_name()
@@ -135,22 +134,17 @@ impl FormatHandler for DocumentHandler {
         Ok(set)
     }
 
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError> {
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         let file = File::open(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
 
-        let mut archive = ZipArchive::new(BufReader::new(file)).map_err(|e| {
-            CoreError::CleanError {
+        let mut archive =
+            ZipArchive::new(BufReader::new(file)).map_err(|e| CoreError::CleanError {
                 path: path.to_path_buf(),
                 detail: format!("Not a valid ZIP archive: {e}"),
-            }
-        })?;
+            })?;
 
         // --- Detect archive family -----------------------------------------
         let kind = detect_kind(&mut archive);
@@ -209,10 +203,12 @@ impl FormatHandler for DocumentHandler {
             }
 
             let (raw_bytes, compression) = {
-                let mut e = archive.by_name(entry_name).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
-                })?;
+                let mut e = archive
+                    .by_name(entry_name)
+                    .map_err(|e| CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
+                    })?;
                 // Don't re-pack directory entries - they confuse ODF readers.
                 if e.is_dir() {
                     continue;
@@ -244,12 +240,11 @@ impl FormatHandler for DocumentHandler {
                 (buf, compression)
             };
 
-            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes).map_err(|e| {
-                CoreError::CleanError {
+            let cleaned_bytes =
+                clean_entry(kind, entry_name, raw_bytes).map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("Failed to clean entry {entry_name}: {e}"),
-                }
-            })?;
+                })?;
 
             let options = zip_util::normalized_options(compression);
             writer
@@ -724,8 +719,16 @@ mod tests {
 </cp:coreProperties>"#;
         let items = parse_xml_metadata(xml);
         // `parse_xml_metadata` keys by local name, not namespace-qualified.
-        assert!(items.iter().any(|i| i.key == "creator" && i.value == "Alice"));
-        assert!(items.iter().any(|i| i.key == "title" && i.value == "Secret"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.key == "creator" && i.value == "Alice")
+        );
+        assert!(
+            items
+                .iter()
+                .any(|i| i.key == "title" && i.value == "Secret")
+        );
     }
 
     #[test]
@@ -830,7 +833,13 @@ mod tests {
 
     #[test]
     fn is_xml_like_recognizes_every_ooxml_odf_epub_extension() {
-        for ext in ["foo.xml", "word/_rels/document.xml.rels", "content.opf", "toc.ncx", "ch1.xhtml"] {
+        for ext in [
+            "foo.xml",
+            "word/_rels/document.xml.rels",
+            "content.opf",
+            "toc.ncx",
+            "ch1.xhtml",
+        ] {
             assert!(is_xml_like(ext), "{ext} should be xml-like");
         }
     }

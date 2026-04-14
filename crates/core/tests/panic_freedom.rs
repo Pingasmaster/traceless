@@ -14,7 +14,7 @@
 
 #![allow(clippy::unwrap_used)]
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::Path;
 
 use traceless_core::format_support::get_handler_for_mime;
@@ -56,8 +56,8 @@ fn fixture(bytes: &[u8], ext: &str) -> (tempfile::TempDir, std::path::PathBuf) {
 /// the given path and assert neither panics. The results are
 /// discarded; we only care that the calls completed.
 fn exercise(mime: &str, path: &Path, label: &str) {
-    let handler = get_handler_for_mime(mime)
-        .unwrap_or_else(|| panic!("no handler registered for {mime}"));
+    let handler =
+        get_handler_for_mime(mime).unwrap_or_else(|| panic!("no handler registered for {mime}"));
     let _ = no_panic(&format!("{label}: read_metadata({mime})"), || {
         handler.read_metadata(path)
     });
@@ -100,9 +100,18 @@ const ALL_MIMES: &[(&str, &str)] = &[
     ("video/quicktime", "mov"),
     ("video/x-ms-wmv", "wmv"),
     ("video/x-flv", "flv"),
-    ("application/vnd.openxmlformats-officedocument.wordprocessingml.document", "docx"),
-    ("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", "xlsx"),
-    ("application/vnd.openxmlformats-officedocument.presentationml.presentation", "pptx"),
+    (
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        "docx",
+    ),
+    (
+        "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xlsx",
+    ),
+    (
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        "pptx",
+    ),
     ("application/vnd.oasis.opendocument.text", "odt"),
     ("application/vnd.oasis.opendocument.spreadsheet", "ods"),
     ("application/vnd.oasis.opendocument.presentation", "odp"),
@@ -434,10 +443,7 @@ fn flac_signature_only() {
 #[test]
 fn mp3_id3v2_header_only() {
     // "ID3" + version bytes + flags + 4-byte synchsafe length (0)
-    let (_g, path) = fixture(
-        &[b'I', b'D', b'3', 0x04, 0x00, 0x00, 0, 0, 0, 0],
-        "mp3",
-    );
+    let (_g, path) = fixture(&[b'I', b'D', b'3', 0x04, 0x00, 0x00, 0, 0, 0, 0], "mp3");
     exercise("audio/mpeg", &path, "mp3_id3_only");
 }
 

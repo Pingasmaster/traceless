@@ -132,11 +132,7 @@ fn clean_ppm(path: &Path, output_path: &Path) -> Result<(), CoreError> {
     // magic + width + height (PBM) or magic + width + height + maxval
     // (PGM/PPM). If the magic is unrecognized we default to 4 tokens to
     // be safe — this still stops before pixel data.
-    let token_count_needed: usize = if matches!(magic, b"P1" | b"P4") {
-        3
-    } else {
-        4
-    };
+    let token_count_needed: usize = if matches!(magic, b"P1" | b"P4") { 3 } else { 4 };
 
     let mut out = Vec::with_capacity(raw.len());
     let mut i = 0usize;

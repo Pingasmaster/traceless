@@ -14,9 +14,9 @@ pub mod metadata;
 mod worker_pool;
 
 pub use config::{
-    archive_unknown_policy, set_archive_unknown_policy, PolicyGuard, UnknownMemberPolicy,
+    PolicyGuard, UnknownMemberPolicy, archive_unknown_policy, set_archive_unknown_policy,
 };
 pub use error::CoreError;
 pub use file::{FileEntry, FileId, FileState};
-pub use file_store::{collect_paths, FileStore, FileStoreEvent};
+pub use file_store::{FileStore, FileStoreEvent, collect_paths};
 pub use metadata::{MetadataGroup, MetadataItem, MetadataSet};

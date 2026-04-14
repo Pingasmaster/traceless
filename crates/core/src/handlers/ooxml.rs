@@ -134,9 +134,7 @@ fn strip_fingerprints(xml: &str) -> String {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0
-                    && writer.write_event(Event::Text(t.clone())).is_err()
-                {
+                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
                     return xml.to_string();
                 }
             }
@@ -166,10 +164,7 @@ fn is_fingerprint_element(local: &str) -> bool {
     false
 }
 
-fn rewrite_attributes(
-    start: &BytesStart<'_>,
-    rng: &mut impl Rng,
-) -> BytesStart<'static> {
+fn rewrite_attributes(start: &BytesStart<'_>, rng: &mut impl Rng) -> BytesStart<'static> {
     let name = String::from_utf8_lossy(start.name().as_ref()).into_owned();
     let mut out = BytesStart::new(name);
     let is_creation_id = local_name(start) == "creationId";
@@ -179,7 +174,9 @@ fn rewrite_attributes(
         let key_str = String::from_utf8_lossy(&key_bytes).to_ascii_lowercase();
 
         // Attribute rsid removal (e.g. w:rsidR="00F12345")
-        let local_attr = key_str.rsplit_once(':').map_or(key_str.as_str(), |(_, l)| l);
+        let local_attr = key_str
+            .rsplit_once(':')
+            .map_or(key_str.as_str(), |(_, l)| l);
         if local_attr.starts_with("rsid") {
             continue;
         }
@@ -261,9 +258,7 @@ fn strip_revisions(xml: &str) -> String {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if del_depth == 0
-                    && writer.write_event(Event::Text(t.clone())).is_err()
-                {
+                if del_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
                     return xml.to_string();
                 }
             }
@@ -428,9 +423,18 @@ mod tests {
             <w:t>hello</w:t>
         </w:p>"#;
         let out = strip_fingerprints(xml);
-        assert!(!out.contains("rsidR"), "rsid attributes must be removed: {out}");
-        assert!(!out.contains("rsids"), "rsid elements must be removed: {out}");
-        assert!(out.contains("hello"), "non-rsid content must survive: {out}");
+        assert!(
+            !out.contains("rsidR"),
+            "rsid attributes must be removed: {out}"
+        );
+        assert!(
+            !out.contains("rsids"),
+            "rsid elements must be removed: {out}"
+        );
+        assert!(
+            out.contains("hello"),
+            "non-rsid content must survive: {out}"
+        );
     }
 
     #[test]
@@ -451,7 +455,10 @@ mod tests {
     fn strip_mc_ignorable_removes_attribute() {
         let xml = r#"<doc xmlns:mc="x" mc:Ignorable="w14 w15"><p/></doc>"#;
         let out = strip_mc_ignorable(xml);
-        assert!(!out.contains("mc:Ignorable"), "mc:Ignorable must be stripped: {out}");
+        assert!(
+            !out.contains("mc:Ignorable"),
+            "mc:Ignorable must be stripped: {out}"
+        );
     }
 
     #[test]
@@ -471,7 +478,10 @@ mod tests {
             !out.contains("mc:Ignorable"),
             "every mc:Ignorable must be stripped, got: {out}"
         );
-        assert!(out.contains("mc:AlternateContent"), "wrappers must survive: {out}");
+        assert!(
+            out.contains("mc:AlternateContent"),
+            "wrappers must survive: {out}"
+        );
     }
 
     #[test]

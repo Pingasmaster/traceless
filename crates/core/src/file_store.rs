@@ -1,6 +1,6 @@
 use std::any::Any;
 use std::fs;
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -50,9 +50,7 @@ pub struct FileStore {
 impl FileStore {
     #[must_use]
     pub const fn new() -> Self {
-        Self {
-            files: Vec::new(),
-        }
+        Self { files: Vec::new() }
     }
 
     #[must_use]
@@ -166,12 +164,9 @@ impl FileStore {
         for (id, path) in ids_paths {
             let tx = tx.clone();
             worker_pool::submit(move || {
-                run_job_with_terminal_error(
-                    id,
-                    &tx,
-                    FileState::ErrorWhileCheckingMetadata,
-                    || check_file_metadata(id, &path, &tx),
-                );
+                run_job_with_terminal_error(id, &tx, FileState::ErrorWhileCheckingMetadata, || {
+                    check_file_metadata(id, &path, &tx);
+                });
             });
         }
 
@@ -269,11 +264,7 @@ impl FileStore {
                 entry.metadata = Some(metadata.clone());
                 Some(pos)
             }
-            FileStoreEvent::FileError {
-                id,
-                state,
-                message,
-            } => {
+            FileStoreEvent::FileError { id, state, message } => {
                 let pos = self.position_of(*id)?;
                 let entry = self.files.get_mut(pos)?;
                 entry.state = *state;
@@ -374,11 +365,7 @@ fn check_file_metadata(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
     }
 }
 
-fn clean_single_file(
-    id: FileId,
-    path: &Path,
-    tx: &Sender<FileStoreEvent>,
-) {
+fn clean_single_file(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
     let _ = tx.send_blocking(FileStoreEvent::FileStateChanged {
         id,
         state: FileState::RemovingMetadata,
@@ -464,7 +451,9 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
         // `DirEntry::file_type` does *not* follow symlinks; this skips
         // symlinked directories up-front and prevents infinite recursion
         // on pathological trees (`~/loop -> ~/`).
-        let Ok(file_type) = entry.file_type() else { continue };
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
         if file_type.is_symlink() {
             continue;
         }
@@ -482,7 +471,7 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::{
-        clean_single_file, run_job_with_terminal_error, FileId, FileState, FileStoreEvent,
+        FileId, FileState, FileStoreEvent, clean_single_file, run_job_with_terminal_error,
     };
     use async_channel::unbounded;
     use std::os::unix::fs::symlink;
@@ -625,10 +614,7 @@ mod tests {
 
         let mut saw_symlink_rejection = false;
         while let Ok(event) = rx.try_recv() {
-            if let FileStoreEvent::FileError {
-                state, message, ..
-            } = event
-            {
+            if let FileStoreEvent::FileError { state, message, .. } = event {
                 assert_eq!(state, FileState::ErrorWhileCheckingMetadata);
                 assert!(
                     message.contains("symlink"),

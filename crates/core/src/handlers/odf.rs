@@ -70,9 +70,7 @@ fn strip_tracked_changes(xml: &str) -> String {
                 }
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0
-                    && writer.write_event(Event::Text(t.clone())).is_err()
-                {
+                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
                     return xml.to_string();
                 }
             }
@@ -107,7 +105,10 @@ mod tests {
             </office:body>
         </office:document-content>"#;
         let out = strip_tracked_changes(xml);
-        assert!(!out.contains("tracked-changes"), "wrapper must be gone: {out}");
+        assert!(
+            !out.contains("tracked-changes"),
+            "wrapper must be gone: {out}"
+        );
         assert!(!out.contains("deleted"), "deleted text must be gone: {out}");
         assert!(out.contains("kept"), "other body text must survive: {out}");
     }

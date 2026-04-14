@@ -18,7 +18,7 @@
 //! is logged and the worker continues with the next job instead of
 //! silently disappearing from the pool.
 
-use std::panic::{catch_unwind, AssertUnwindSafe};
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::OnceLock;
 use std::thread;
 
@@ -108,8 +108,8 @@ where
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
-    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::{Duration, Instant};
 
     #[test]

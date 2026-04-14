@@ -404,7 +404,10 @@ fn docx_round_trip_strips_every_fingerprint() {
     );
 
     // 3. Comment machinery gone
-    assert_eq!(count_needle_in_xml_entries(&cleaned, "commentRangeStart"), 0);
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "commentRangeStart"),
+        0
+    );
     assert_eq!(count_needle_in_xml_entries(&cleaned, "commentReference"), 0);
     assert!(
         read_zip_entry(&cleaned, "word/comments.xml").is_none(),
@@ -469,8 +472,8 @@ fn docx_embedded_tiff_has_exif_stripped() {
     }
 
     use std::io::Write as _;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let dir = tempfile::tempdir().unwrap();
     let inner_tiff = dir.path().join("inner.tiff");
@@ -503,7 +506,9 @@ fn docx_embedded_tiff_has_exif_stripped() {
         writer
             .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
             .unwrap();
-        writer.start_file("word/media/image1.tiff", options).unwrap();
+        writer
+            .start_file("word/media/image1.tiff", options)
+            .unwrap();
         writer.write_all(&tiff_bytes).unwrap();
         writer.finish().unwrap();
     }
@@ -590,8 +595,7 @@ fn odt_round_trip_drops_junk_and_tracked_changes() {
     assert!(read_zip_entry(&dirty, "Thumbnails/thumbnail.png").is_some());
     assert!(count_needle_in_xml_entries(&dirty, "tracked-changes") > 0);
 
-    let handler =
-        get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
     handler.clean_metadata(&dirty, &cleaned).unwrap();
 
     // Assertions
@@ -633,8 +637,7 @@ fn odt_cleaning_is_deterministic() {
     let dirty = dir.path().join("dirty.odt");
     make_dirty_odt(&dirty);
 
-    let handler =
-        get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
     let a = dir.path().join("a.odt");
     let b = dir.path().join("b.odt");
     handler.clean_metadata(&dirty, &a).unwrap();
@@ -694,8 +697,8 @@ fn epub_ops_body_meta_is_stripped() {
     // dropped into the body survived because `clean_head_only` only
     // touched the `<head>` element.
     use std::io::Write as _;
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let dir = tempfile::tempdir().unwrap();
     let dirty = dir.path().join("dirty-body.epub");
@@ -711,7 +714,9 @@ fn epub_ops_body_meta_is_stripped() {
         writer.start_file("mimetype", stored).unwrap();
         writer.write_all(b"application/epub+zip").unwrap();
 
-        writer.start_file("META-INF/container.xml", options).unwrap();
+        writer
+            .start_file("META-INF/container.xml", options)
+            .unwrap();
         writer
             .write_all(br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
@@ -790,7 +795,10 @@ fn wav_round_trip() {
 
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
-    assert!(after.is_empty(), "cleaned WAV should have no metadata: {after:?}");
+    assert!(
+        after.is_empty(),
+        "cleaned WAV should have no metadata: {after:?}"
+    );
 
     // Ground-truth check via ffprobe (independent parser from lofty).
     if have_ffprobe() {
@@ -822,7 +830,10 @@ fn mp3_round_trip() {
 
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
-    assert!(after.is_empty(), "cleaned MP3 should have no metadata: {after:?}");
+    assert!(
+        after.is_empty(),
+        "cleaned MP3 should have no metadata: {after:?}"
+    );
 
     if have_ffprobe() {
         let post = ffprobe_user_tags(&cleaned);
@@ -855,7 +866,10 @@ fn flac_round_trip() {
 
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
-    assert!(after.is_empty(), "cleaned FLAC should have no metadata: {after:?}");
+    assert!(
+        after.is_empty(),
+        "cleaned FLAC should have no metadata: {after:?}"
+    );
 
     if have_ffprobe() {
         let post = ffprobe_user_tags(&cleaned);
@@ -886,7 +900,10 @@ fn ogg_round_trip() {
 
     handler.clean_metadata(&dirty, &cleaned).unwrap();
     let after = handler.read_metadata(&cleaned).unwrap();
-    assert!(after.is_empty(), "cleaned OGG should have no metadata: {after:?}");
+    assert!(
+        after.is_empty(),
+        "cleaned OGG should have no metadata: {after:?}"
+    );
 
     // OGG vendor is force-preserved by lofty; ffprobe may still
     // report `encoder` for native OGG. Filter it out of the ground
@@ -1258,7 +1275,7 @@ fn html_round_trip_drops_meta_and_blanks_title() {
 
 #[test]
 fn torrent_round_trip_drops_non_allowlisted_keys() {
-    use traceless_core::handlers::torrent::{encode, BencodeValue};
+    use traceless_core::handlers::torrent::{BencodeValue, encode};
 
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("dirty.torrent");
@@ -1363,9 +1380,8 @@ fn zip_archive_normalizes_members_and_cleans_contents() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut writer = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default().last_modified_time(
-            zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap(),
-        );
+        let opts = SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap());
         writer.start_file("image.jpg", opts).unwrap();
         use std::io::Write as _;
         writer.write_all(&jpeg_bytes).unwrap();
@@ -1384,10 +1400,7 @@ fn zip_archive_normalizes_members_and_cleans_contents() {
     let inner = read_zip_entry(&dst, "image.jpg").unwrap();
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner).unwrap();
-    assert_no_exif_or_valid_jpeg(
-        &probe,
-        "embedded JPEG inside plain ZIP must be stripped",
-    );
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG inside plain ZIP must be stripped");
 }
 
 #[test]
@@ -1446,8 +1459,8 @@ fn tar_archive_normalizes_uid_gid_mtime() {
 
 #[test]
 fn tar_gz_round_trip_cleans_embedded_image() {
-    use flate2::write::GzEncoder;
     use flate2::Compression;
+    use flate2::write::GzEncoder;
     use tar::{Builder as TarBuilder, EntryType, Header as TarHeader};
 
     let dir = tempfile::tempdir().unwrap();
@@ -1490,10 +1503,7 @@ fn tar_gz_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    assert_no_exif_or_valid_jpeg(
-        &probe,
-        "embedded JPEG inside .tar.gz must be stripped",
-    );
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG inside .tar.gz must be stripped");
 }
 
 #[test]
@@ -1731,7 +1741,10 @@ fn jpeg_reader_surfaces_individual_xmp_fields() {
     let handler = get_handler_for_mime("image/jpeg").unwrap();
     let meta = handler.read_metadata(&dirty).unwrap();
     let dump = format!("{meta:?}");
-    assert!(dump.contains("XMP dc:creator"), "dc:creator missing: {dump}");
+    assert!(
+        dump.contains("XMP dc:creator"),
+        "dc:creator missing: {dump}"
+    );
     assert!(dump.contains("mat2-parity-xmp-creator"), "{dump}");
     assert!(dump.contains("XMP xmp:CreatorTool"), "{dump}");
     assert!(dump.contains("secret-camera-firmware"), "{dump}");
@@ -2011,17 +2024,14 @@ fn make_dirty_html(path: &Path) {
 }
 
 fn make_dirty_torrent_file(path: &Path) {
-    use traceless_core::handlers::torrent::{encode, BencodeValue};
+    use traceless_core::handlers::torrent::{BencodeValue, encode};
     let mut map: std::collections::BTreeMap<Vec<u8>, BencodeValue> =
         std::collections::BTreeMap::new();
     map.insert(
         b"announce".to_vec(),
         BencodeValue::Bytes(b"http://tracker/".to_vec()),
     );
-    map.insert(
-        b"comment".to_vec(),
-        BencodeValue::Bytes(b"secret".to_vec()),
-    );
+    map.insert(b"comment".to_vec(), BencodeValue::Bytes(b"secret".to_vec()));
     let mut info = std::collections::BTreeMap::new();
     info.insert(b"name".to_vec(), BencodeValue::Bytes(b"f".to_vec()));
     info.insert(b"piece length".to_vec(), BencodeValue::Int(16384));
@@ -2104,7 +2114,10 @@ fn css_handles_nested_strings_with_comment_markers() {
     let handler = get_handler_for_mime("text/css").unwrap();
     handler.clean_metadata(&src, &dst).unwrap();
     let out = fs::read_to_string(&dst).unwrap();
-    assert!(out.contains("/* not a comment */"), "string literal corrupted: {out}");
+    assert!(
+        out.contains("/* not a comment */"),
+        "string literal corrupted: {out}"
+    );
     assert!(!out.contains("REAL"));
 }
 
@@ -2158,7 +2171,10 @@ fn html_xhtml_self_closing_meta_is_dropped() {
     // must be dropped. An unrelated self-closing tag like `<br/>`
     // stays as proof the cleaner only drops blocklist tags.
     assert!(!out.contains("<link"), "<link> must be stripped: {out}");
-    assert!(out.contains("<br"), "unrelated self-closing tag dropped: {out}");
+    assert!(
+        out.contains("<br"),
+        "unrelated self-closing tag dropped: {out}"
+    );
     assert!(out.contains("<?xml"));
 }
 
@@ -2189,7 +2205,7 @@ fn svg_self_closing_metadata_is_dropped() {
 
 #[test]
 fn torrent_preserves_nested_info_dict() {
-    use traceless_core::handlers::torrent::{encode, BencodeValue};
+    use traceless_core::handlers::torrent::{BencodeValue, encode};
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("nested.torrent");
     let dst = dir.path().join("clean.torrent");
@@ -2308,10 +2324,7 @@ fn tar_bz2_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    assert_no_exif_or_valid_jpeg(
-        &probe,
-        "embedded JPEG inside .tar.bz2 must be stripped",
-    );
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG inside .tar.bz2 must be stripped");
 }
 
 #[test]
@@ -2358,10 +2371,7 @@ fn tar_xz_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    assert_no_exif_or_valid_jpeg(
-        &probe,
-        "embedded JPEG inside .tar.xz must be stripped",
-    );
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG inside .tar.xz must be stripped");
 }
 
 #[test]
@@ -2378,7 +2388,9 @@ fn tar_zst_round_trip_cleans_embedded_image() {
 
     {
         let file = fs::File::create(&src).unwrap();
-        let enc = zstd::stream::write::Encoder::new(file, 3).unwrap().auto_finish();
+        let enc = zstd::stream::write::Encoder::new(file, 3)
+            .unwrap()
+            .auto_finish();
         let mut builder = TarBuilder::new(enc);
         let mut header = TarHeader::new_gnu();
         header.set_path("photo.jpg").unwrap();
@@ -2412,10 +2424,7 @@ fn tar_zst_round_trip_cleans_embedded_image() {
     }
     let probe = dir.path().join("probe.jpg");
     fs::write(&probe, &inner_bytes).unwrap();
-    assert_no_exif_or_valid_jpeg(
-        &probe,
-        "embedded JPEG inside .tar.zst must be stripped",
-    );
+    assert_no_exif_or_valid_jpeg(&probe, "embedded JPEG inside .tar.zst must be stripped");
 }
 
 #[test]
@@ -2427,9 +2436,8 @@ fn zip_archive_is_deterministic() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut writer = zip::ZipWriter::new(file);
-        let opts = SimpleFileOptions::default().last_modified_time(
-            zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap(),
-        );
+        let opts = SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap());
         writer.start_file("z.txt", opts).unwrap();
         writer.write_all(b"zz").unwrap();
         writer.start_file("a.txt", opts).unwrap();
@@ -2649,7 +2657,10 @@ fn unknown_policy_abort_rejects_archive() {
     let _g = PolicyGuard::new(UnknownMemberPolicy::Abort);
     let handler = get_handler_for_mime("application/zip").unwrap();
     let result = handler.clean_metadata(&src, &dst);
-    assert!(result.is_err(), "Abort policy must reject archives with unknown members");
+    assert!(
+        result.is_err(),
+        "Abort policy must reject archives with unknown members"
+    );
 }
 
 #[test]
@@ -2671,9 +2682,9 @@ fn unknown_policy_abort_passes_when_every_member_is_known() {
         // minimal PNG
         writer
             .write_all(&[
-                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D', b'R',
-                0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xDE, 0, 0, 0, 0, b'I',
-                b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
+                0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0, 0, 13, b'I', b'H', b'D',
+                b'R', 0, 0, 0, 1, 0, 0, 0, 1, 8, 2, 0, 0, 0, 0x90, 0x77, 0x53, 0xDE, 0, 0, 0, 0,
+                b'I', b'E', b'N', b'D', 0xAE, 0x42, 0x60, 0x82,
             ])
             .unwrap();
         writer.finish().unwrap();
@@ -2762,9 +2773,7 @@ fn ooxml_with_fake_content_xml_still_strips_author_and_rsid() {
         // Decoy ODF marker: a minimal `content.xml` at the archive
         // root. Legitimate OOXML never emits this.
         writer.start_file("content.xml", opts).unwrap();
-        writer
-            .write_all(b"<?xml version=\"1.0\"?><fake/>")
-            .unwrap();
+        writer.write_all(b"<?xml version=\"1.0\"?><fake/>").unwrap();
 
         // Real OOXML marker.
         writer.start_file("[Content_Types].xml", opts).unwrap();
@@ -2839,9 +2848,7 @@ fn ooxml_with_fake_content_xml_still_strips_author_and_rsid() {
 // ================================================================
 
 fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
-    haystack
-        .windows(needle.len())
-        .position(|w| w == needle)
+    haystack.windows(needle.len()).position(|w| w == needle)
 }
 
 // ================================================================
@@ -2894,8 +2901,8 @@ fn build_tar_like(path: &std::path::Path, fmt: &str) {
     match fmt {
         "tar" => fs::write(path, &tar_bytes).unwrap(),
         "tar.gz" => {
-            use flate2::write::GzEncoder;
             use flate2::Compression;
+            use flate2::write::GzEncoder;
             let f = fs::File::create(path).unwrap();
             let mut enc = GzEncoder::new(f, Compression::default());
             enc.write_all(&tar_bytes).unwrap();
@@ -2979,23 +2986,43 @@ fn policy_omit_tar() {
 #[test]
 fn policy_abort_tar() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/x-tar", "tar", UnknownMemberPolicy::Abort, false);
+    run_policy_cell(
+        "application/x-tar",
+        "tar",
+        UnknownMemberPolicy::Abort,
+        false,
+    );
 }
 
 #[test]
 fn policy_keep_targz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Keep, true);
+    run_policy_cell(
+        "application/gzip",
+        "tar.gz",
+        UnknownMemberPolicy::Keep,
+        true,
+    );
 }
 #[test]
 fn policy_omit_targz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Omit, true);
+    run_policy_cell(
+        "application/gzip",
+        "tar.gz",
+        UnknownMemberPolicy::Omit,
+        true,
+    );
 }
 #[test]
 fn policy_abort_targz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/gzip", "tar.gz", UnknownMemberPolicy::Abort, false);
+    run_policy_cell(
+        "application/gzip",
+        "tar.gz",
+        UnknownMemberPolicy::Abort,
+        false,
+    );
 }
 
 #[test]
@@ -3032,15 +3059,30 @@ fn policy_abort_tarbz2() {
 #[test]
 fn policy_keep_tarxz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Keep, true);
+    run_policy_cell(
+        "application/x-xz",
+        "tar.xz",
+        UnknownMemberPolicy::Keep,
+        true,
+    );
 }
 #[test]
 fn policy_omit_tarxz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Omit, true);
+    run_policy_cell(
+        "application/x-xz",
+        "tar.xz",
+        UnknownMemberPolicy::Omit,
+        true,
+    );
 }
 #[test]
 fn policy_abort_tarxz() {
     use traceless_core::UnknownMemberPolicy;
-    run_policy_cell("application/x-xz", "tar.xz", UnknownMemberPolicy::Abort, false);
+    run_policy_cell(
+        "application/x-xz",
+        "tar.xz",
+        UnknownMemberPolicy::Abort,
+        false,
+    );
 }

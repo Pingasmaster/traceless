@@ -333,9 +333,18 @@ mod tests {
     fn make_dirty_torrent(path: &Path) {
         // d8:announce8:test.com7:comment6:secret10:created by13:mktorrent 1.04:infod4:name4:test12:piece lengthi16384eee
         let mut torrent = BTreeMap::new();
-        torrent.insert(b"announce".to_vec(), BencodeValue::Bytes(b"http://test.com/announce".to_vec()));
-        torrent.insert(b"comment".to_vec(), BencodeValue::Bytes(b"secret-comment".to_vec()));
-        torrent.insert(b"created by".to_vec(), BencodeValue::Bytes(b"mktorrent 1.0".to_vec()));
+        torrent.insert(
+            b"announce".to_vec(),
+            BencodeValue::Bytes(b"http://test.com/announce".to_vec()),
+        );
+        torrent.insert(
+            b"comment".to_vec(),
+            BencodeValue::Bytes(b"secret-comment".to_vec()),
+        );
+        torrent.insert(
+            b"created by".to_vec(),
+            BencodeValue::Bytes(b"mktorrent 1.0".to_vec()),
+        );
         torrent.insert(b"creation date".to_vec(), BencodeValue::Int(1_522_397_702));
         torrent.insert(b"encoding".to_vec(), BencodeValue::Bytes(b"UTF-8".to_vec()));
 

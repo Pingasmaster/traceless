@@ -16,16 +16,16 @@ use std::fs::File;
 use std::io::{BufReader, BufWriter, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
+use flate2::Compression;
 use flate2::read::GzDecoder;
 use flate2::write::GzEncoder;
-use flate2::Compression;
-use tar::{Builder as TarBuilder, Archive as TarArchive, EntryType, Header as TarHeader};
+use tar::{Archive as TarArchive, Builder as TarBuilder, EntryType, Header as TarHeader};
 
-use crate::config::{archive_unknown_policy, UnknownMemberPolicy};
+use crate::config::{UnknownMemberPolicy, archive_unknown_policy};
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::{zip_util, FormatHandler};
+use super::{FormatHandler, zip_util};
 
 pub struct ArchiveHandler;
 
@@ -225,10 +225,7 @@ fn describe_zip_meta(entry: &zip::read::ZipFile<'_, BufReader<File>>) -> String 
         ));
     }
     if !entry.comment().is_empty() {
-        bits.push(format!(
-            "comment {:?}",
-            entry.comment().to_string()
-        ));
+        bits.push(format!("comment {:?}", entry.comment().to_string()));
     }
     if bits.is_empty() {
         "normalized".to_string()
@@ -323,12 +320,11 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         path: path.to_path_buf(),
         source: e,
     })?;
-    let mut archive = zip::ZipArchive::new(BufReader::new(f)).map_err(|e| {
-        CoreError::CleanError {
+    let mut archive =
+        zip::ZipArchive::new(BufReader::new(f)).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("bad zip: {e}"),
-        }
-    })?;
+        })?;
 
     // Gather entry names and sort lexicographically (kills member-
     // order fingerprinting). Surface any header-parse failure as a
@@ -369,11 +365,10 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         }
 
         let (bytes, compression) = {
-            let mut entry =
-                archive.by_name(name).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("read entry {name}: {e}"),
-                })?;
+            let mut entry = archive.by_name(name).map_err(|e| CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!("read entry {name}: {e}"),
+            })?;
             if entry.is_dir() {
                 continue;
             }
@@ -471,13 +466,10 @@ fn read_tar_entries(
     let mut out = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
 
-    for entry in archive
-        .entries()
-        .map_err(|e| CoreError::ParseError {
-            path: path.to_path_buf(),
-            detail: format!("tar: {e}"),
-        })?
-    {
+    for entry in archive.entries().map_err(|e| CoreError::ParseError {
+        path: path.to_path_buf(),
+        detail: format!("tar: {e}"),
+    })? {
         let entry = entry.map_err(|e| CoreError::ParseError {
             path: path.to_path_buf(),
             detail: format!("tar entry: {e}"),
@@ -724,7 +716,10 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
             let action = dispatch_member(&name, buf, tmpdir.path(), path)?;
             match action {
                 ArchiveAction::Write(cleaned) => {
-                    cleaned_members.push(CleanedTarEntry::Regular { name, data: cleaned });
+                    cleaned_members.push(CleanedTarEntry::Regular {
+                        name,
+                        data: cleaned,
+                    });
                 }
                 ArchiveAction::Drop => {}
             }
@@ -742,9 +737,10 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     let writer: Box<dyn Write> = match fmt {
         ArchiveFormat::Tar => Box::new(buf_out),
         ArchiveFormat::TarGz => Box::new(GzEncoder::new(buf_out, Compression::default())),
-        ArchiveFormat::TarBz2 => {
-            Box::new(bzip2::write::BzEncoder::new(buf_out, bzip2::Compression::default()))
-        }
+        ArchiveFormat::TarBz2 => Box::new(bzip2::write::BzEncoder::new(
+            buf_out,
+            bzip2::Compression::default(),
+        )),
         ArchiveFormat::TarXz => Box::new(xz2::write::XzEncoder::new(buf_out, 6)),
         ArchiveFormat::TarZst => Box::new(
             zstd::stream::write::Encoder::new(buf_out, 3)
@@ -872,9 +868,7 @@ fn dispatch_member(
     // matched. Surface the error instead.
     std::fs::write(&in_path, &bytes).map_err(|e| CoreError::CleanError {
         path: archive_path.to_path_buf(),
-        detail: format!(
-            "failed to stage archive member '{entry_name}' for dispatch: {e}"
-        ),
+        detail: format!("failed to stage archive member '{entry_name}' for dispatch: {e}"),
     })?;
 
     let mime = crate::format_support::detect_mime(&in_path);
@@ -929,9 +923,7 @@ fn dispatch_member(
             // and the caller explicitly asked us to process it.
             Err(CoreError::CleanError {
                 path: archive_path.to_path_buf(),
-                detail: format!(
-                    "failed to clean archive member {entry_name} ({mime}): {e}"
-                ),
+                detail: format!("failed to clean archive member {entry_name} ({mime}): {e}"),
             })
         }
     }
@@ -954,9 +946,7 @@ fn apply_unknown_policy(
         }
         UnknownMemberPolicy::Abort => Err(CoreError::CleanError {
             path: archive_path.to_path_buf(),
-            detail: format!(
-                "unknown archive member '{entry_name}': aborting per policy"
-            ),
+            detail: format!("unknown archive member '{entry_name}': aborting per policy"),
         }),
     }
 }
@@ -1096,11 +1086,7 @@ mod tests {
         for entry in archive.entries().unwrap() {
             let entry = entry.unwrap();
             let header = entry.header();
-            let name = entry
-                .path()
-                .unwrap()
-                .to_string_lossy()
-                .into_owned();
+            let name = entry.path().unwrap().to_string_lossy().into_owned();
             match header.entry_type() {
                 EntryType::Symlink => {
                     assert_eq!(name, "link.txt");
@@ -1120,8 +1106,14 @@ mod tests {
                 other => panic!("unexpected entry type {other:?} in cleaned tar"),
             }
         }
-        assert!(saw_symlink, "cleaned tar must still contain the symlink entry");
-        assert!(saw_regular, "cleaned tar must still contain the regular entry");
+        assert!(
+            saw_symlink,
+            "cleaned tar must still contain the symlink entry"
+        );
+        assert!(
+            saw_regular,
+            "cleaned tar must still contain the regular entry"
+        );
     }
 
     #[test]

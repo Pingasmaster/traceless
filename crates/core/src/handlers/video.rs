@@ -4,8 +4,8 @@ use std::process::Command;
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::sandbox;
 use super::FormatHandler;
+use super::sandbox;
 
 pub struct VideoHandler;
 
@@ -46,19 +46,12 @@ impl FormatHandler for VideoHandler {
 
         let mut set = MetadataSet::default();
         if !items.is_empty() {
-            set.groups.push(MetadataGroup {
-                filename,
-                items,
-            });
+            set.groups.push(MetadataGroup { filename, items });
         }
         Ok(set)
     }
 
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError> {
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         check_tool_available("ffmpeg")?;
 
         // Full strip: copy streams, discard all metadata and chapters.
@@ -281,7 +274,11 @@ mod tests {
         let items = parse_ffprobe_json(json);
         assert_eq!(items.len(), 2);
         assert!(items.iter().any(|i| i.key == "title" && i.value == "Hello"));
-        assert!(items.iter().any(|i| i.key == "author" && i.value == "Alice"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.key == "author" && i.value == "Alice")
+        );
     }
 
     #[test]
@@ -328,7 +325,11 @@ mod tests {
   }
 }"#;
         let items = parse_ffprobe_json(json);
-        assert!(items.iter().any(|i| i.key == "title" && i.value == "My Video"));
+        assert!(
+            items
+                .iter()
+                .any(|i| i.key == "title" && i.value == "My Video")
+        );
         assert!(items.iter().filter(|i| i.key == "language").count() == 2);
     }
 

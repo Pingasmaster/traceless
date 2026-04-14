@@ -12,13 +12,13 @@ pub mod ooxml;
 pub mod pdf;
 pub mod sandbox;
 pub mod svg;
-pub mod torrent;
-pub mod xmp;
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests;
+pub mod torrent;
 pub mod video;
 pub mod xml_util;
+pub mod xmp;
 pub mod zip_util;
 
 use std::path::Path;
@@ -43,11 +43,7 @@ pub trait FormatHandler: Send + Sync {
     ///
     /// Returns an error if the input cannot be read, the cleaned output
     /// cannot be written to `output_path`, or the format cannot be parsed.
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError>;
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError>;
 
     /// MIME types this handler supports.
     fn supported_mime_types(&self) -> &[&str];

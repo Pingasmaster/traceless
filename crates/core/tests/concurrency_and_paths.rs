@@ -12,8 +12,8 @@ mod common;
 
 use std::fs;
 use std::path::Path;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -65,11 +65,7 @@ fn clean_many_mixed_files_concurrently_via_os_threads() {
     {
         let p = dir.path().join("e.odt");
         make_dirty_odt(&p);
-        fixtures.push((
-            "application/vnd.oasis.opendocument.text",
-            "odt",
-            p,
-        ));
+        fixtures.push(("application/vnd.oasis.opendocument.text", "odt", p));
     }
     {
         let p = dir.path().join("f.epub");

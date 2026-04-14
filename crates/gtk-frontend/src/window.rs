@@ -30,8 +30,7 @@ impl Window {
 
         // Shared state
         let store = Rc::new(RefCell::new(FileStore::new()));
-        let tx: Rc<RefCell<Option<Sender<FileStoreEvent>>>> =
-            Rc::new(RefCell::new(None));
+        let tx: Rc<RefCell<Option<Sender<FileStoreEvent>>>> = Rc::new(RefCell::new(None));
         // `FileId` of the file currently being rendered in the details
         // drawer, or `None` when the drawer is hidden. Used by the
         // worker-thread event pump to auto-refresh the drawer when the
@@ -129,12 +128,11 @@ impl Window {
         window.set_content(Some(&split));
 
         // Collapse the split on narrow windows (responsive).
-        let breakpoint =
-            adw::Breakpoint::new(adw::BreakpointCondition::new_length(
-                adw::BreakpointConditionLengthType::MaxWidth,
-                600.0,
-                adw::LengthUnit::Sp,
-            ));
+        let breakpoint = adw::Breakpoint::new(adw::BreakpointCondition::new_length(
+            adw::BreakpointConditionLengthType::MaxWidth,
+            600.0,
+            adw::LengthUnit::Sp,
+        ));
         breakpoint.add_setter(&split, "collapsed", Some(&true.to_value()));
         window.add_breakpoint(breakpoint);
 
@@ -308,9 +306,7 @@ impl Window {
                 let store = store.clone();
                 let tx = tx.clone();
                 dialogs::show_cleaning_warning(&window_clone, move |confirmed| {
-                    if confirmed
-                        && let Some(sender) = tx.borrow().as_ref()
-                    {
+                    if confirmed && let Some(sender) = tx.borrow().as_ref() {
                         store.borrow_mut().clean_files(sender);
                     }
                 });

@@ -23,9 +23,14 @@ impl FileState {
     #[must_use]
     pub const fn simple_state(&self) -> &'static str {
         match self {
-            Self::Initializing | Self::Supported | Self::CheckingMetadata | Self::RemovingMetadata => "working",
-            Self::Unsupported | Self::ErrorWhileInitializing
-            | Self::ErrorWhileCheckingMetadata | Self::ErrorWhileRemovingMetadata => "error",
+            Self::Initializing
+            | Self::Supported
+            | Self::CheckingMetadata
+            | Self::RemovingMetadata => "working",
+            Self::Unsupported
+            | Self::ErrorWhileInitializing
+            | Self::ErrorWhileCheckingMetadata
+            | Self::ErrorWhileRemovingMetadata => "error",
             Self::HasNoMetadata => "warning",
             Self::HasMetadata => "has-metadata",
             Self::Cleaned => "clean",

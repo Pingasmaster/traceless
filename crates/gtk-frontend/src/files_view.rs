@@ -141,8 +141,7 @@ impl FilesView {
             .iter()
             .map(|entry| BoxedAnyObject::new(FileRowData::from_entry(entry)))
             .collect();
-        self.list_store
-            .splice(self.list_store.n_items(), 0, &items);
+        self.list_store.splice(self.list_store.n_items(), 0, &items);
         self.refresh_clean_button(store);
     }
 

@@ -1,5 +1,6 @@
 use std::path::Path;
 
+use crate::handlers::FormatHandler;
 use crate::handlers::archive::ArchiveHandler;
 use crate::handlers::audio::AudioHandler;
 use crate::handlers::css::CssHandler;
@@ -12,21 +13,18 @@ use crate::handlers::pdf::PdfHandler;
 use crate::handlers::svg::SvgHandler;
 use crate::handlers::torrent::TorrentHandler;
 use crate::handlers::video::VideoHandler;
-use crate::handlers::FormatHandler;
 
 /// Return the appropriate format handler for the given MIME type.
 #[must_use]
 pub fn get_handler_for_mime(mime: &str) -> Option<Box<dyn FormatHandler>> {
     match mime {
-        "image/jpeg" | "image/png" | "image/webp" | "image/tiff" | "image/heic"
-        | "image/heif" | "image/jxl" => Some(Box::new(ImageHandler)),
+        "image/jpeg" | "image/png" | "image/webp" | "image/tiff" | "image/heic" | "image/heif"
+        | "image/jxl" => Some(Box::new(ImageHandler)),
         "image/gif" => Some(Box::new(GifHandler)),
         "application/pdf" => Some(Box::new(PdfHandler)),
         "audio/mpeg" | "audio/flac" | "audio/ogg" | "audio/vorbis" | "audio/mp4"
         | "audio/x-wav" | "audio/wav" | "audio/aac" | "audio/x-aiff" | "audio/x-flac"
-        | "audio/x-m4a" | "audio/m4a" | "audio/aiff" | "audio/opus" => {
-            Some(Box::new(AudioHandler))
-        }
+        | "audio/x-m4a" | "audio/m4a" | "audio/aiff" | "audio/opus" => Some(Box::new(AudioHandler)),
         "application/vnd.oasis.opendocument.text"
         | "application/vnd.oasis.opendocument.spreadsheet"
         | "application/vnd.oasis.opendocument.presentation"
@@ -87,18 +85,13 @@ pub const fn supported_extensions() -> &'static [&'static str] {
         // Images
         "jpg", "jpeg", "png", "webp", "tif", "tiff", "heic", "heif", "gif", "jxl",
         // PDF
-        "pdf",
-        // Audio
-        "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "aiff",
-        // Documents
-        "odt", "ods", "odp", "odg", "docx", "xlsx", "pptx", "epub",
-        // Video
+        "pdf", // Audio
+        "mp3", "flac", "ogg", "opus", "wav", "m4a", "aac", "aiff", // Documents
+        "odt", "ods", "odp", "odg", "docx", "xlsx", "pptx", "epub", // Video
         "mp4", "mkv", "webm", "avi", "mov", "wmv", "flv",
         // Harmless (text + trivial images)
-        "txt", "bmp", "ppm", "pgm", "pbm", "pnm",
-        // Vector / web
-        "svg", "css", "html", "htm", "xhtml",
-        // P2P
+        "txt", "bmp", "ppm", "pgm", "pbm", "pnm", // Vector / web
+        "svg", "css", "html", "htm", "xhtml", // P2P
         "torrent",
         // Generic archives. `.tgz` / `.tbz2` / `.txz` and their expanded
         // siblings (`.tar.gz`, `.tar.bz2`, `.tar.xz`) are matched inside

@@ -3,7 +3,7 @@ use std::pin::Pin;
 use std::thread;
 
 use async_channel::Sender;
-use traceless_core::{collect_paths, FileStore, FileStoreEvent};
+use traceless_core::{FileStore, FileStoreEvent, collect_paths};
 
 #[cxx_qt::bridge]
 mod ffi {
@@ -162,17 +162,14 @@ mod ffi {
 
     unsafe extern "RustQt" {
         #[inherit]
-        fn index(
-            self: &FileListModel,
-            row: i32,
-            column: i32,
-            parent: &QModelIndex,
-        ) -> QModelIndex;
+        fn index(self: &FileListModel, row: i32, column: i32, parent: &QModelIndex) -> QModelIndex;
     }
 }
 
 use cxx_qt::{CxxQtType, Threading};
-use cxx_qt_lib::{QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector};
+use cxx_qt_lib::{
+    QByteArray, QHash, QHashPair_i32_QByteArray, QModelIndex, QString, QVariant, QVector,
+};
 
 pub struct FileListModelRust {
     store: FileStore,
@@ -247,7 +244,8 @@ impl ffi::FileListModel {
                         roles.append(ffi::Role::Directory.repr);
                         roles.append(ffi::Role::SimpleState.repr);
                         roles.append(ffi::Role::MetadataCount.repr);
-                        this.as_mut().data_changed(&model_index, &model_index, &roles);
+                        this.as_mut()
+                            .data_changed(&model_index, &model_index, &roles);
                     }
                     this.as_mut().update_aux_properties();
 
@@ -511,9 +509,7 @@ impl ffi::FileListModel {
         match role {
             ffi::Role::Filename => QVariant::from(&QString::from(&entry.filename as &str)),
             ffi::Role::Directory => QVariant::from(&QString::from(&entry.directory as &str)),
-            ffi::Role::SimpleState => {
-                QVariant::from(&QString::from(entry.state.simple_state()))
-            }
+            ffi::Role::SimpleState => QVariant::from(&QString::from(entry.state.simple_state())),
             ffi::Role::MetadataCount => {
                 QVariant::from(&i32::try_from(entry.total_metadata()).unwrap_or(i32::MAX))
             }

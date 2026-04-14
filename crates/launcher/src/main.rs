@@ -33,8 +33,8 @@ fn detect_desktop_environment() -> DesktopEnvironment {
         for de in upper.split(':') {
             match de.trim() {
                 "KDE" | "PLASMA" | "LXQT" => return DesktopEnvironment::Qt,
-                "GNOME" | "UNITY" | "CINNAMON" | "MATE" | "XFCE" | "BUDGIE"
-                | "PANTHEON" | "COSMIC" | "DEEPIN" | "ENLIGHTENMENT" => {
+                "GNOME" | "UNITY" | "CINNAMON" | "MATE" | "XFCE" | "BUDGIE" | "PANTHEON"
+                | "COSMIC" | "DEEPIN" | "ENLIGHTENMENT" => {
                     return DesktopEnvironment::Gtk;
                 }
                 _ => {}
@@ -88,9 +88,7 @@ fn main() {
             // user-facing output channel is stderr, and a fallback
             // notice is genuinely useful information for someone who
             // expected a different frontend to launch.
-            eprintln!(
-                "warning: {binary_name} not found, falling back to {fallback_name}"
-            );
+            eprintln!("warning: {binary_name} not found, falling back to {fallback_name}");
             launch(&fallback_exe);
         } else {
             eprintln!(
@@ -116,13 +114,10 @@ fn launch(exe: &std::path::Path) -> ! {
 #[cfg(not(unix))]
 fn launch(exe: &std::path::Path) {
     let args: Vec<OsString> = env::args_os().skip(1).collect();
-    let status = Command::new(exe)
-        .args(&args)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("Failed to launch {}: {e}", exe.display());
-            std::process::exit(1);
-        });
+    let status = Command::new(exe).args(&args).status().unwrap_or_else(|e| {
+        eprintln!("Failed to launch {}: {e}", exe.display());
+        std::process::exit(1);
+    });
     std::process::exit(status.code().unwrap_or(1));
 }
 

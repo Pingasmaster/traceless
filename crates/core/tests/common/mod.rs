@@ -7,7 +7,6 @@
 //! minimal CI images.
 
 #![allow(dead_code)]
-
 #![allow(clippy::unwrap_used)]
 use std::io::{BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -64,7 +63,11 @@ pub fn have_ffprobe() -> bool {
 macro_rules! skip_if_no {
     ($tool:expr) => {
         if !$tool() {
-            eprintln!("[SKIP] {}: {} not available", module_path!(), stringify!($tool));
+            eprintln!(
+                "[SKIP] {}: {} not available",
+                module_path!(),
+                stringify!($tool)
+            );
             return;
         }
     };
@@ -343,8 +346,8 @@ pub fn make_dirty_pdf(path: &Path) {
 // ---------- Dirty-office builders ----------
 
 pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ZipWriter::new(file);
@@ -395,19 +398,27 @@ pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
 </cp:coreProperties>"#).unwrap();
 
     writer.start_file("docProps/app.xml", options).unwrap();
-    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
   <Application>Microsoft Office Word</Application>
   <AppVersion>16.0</AppVersion>
   <Company>Evil Corp</Company>
   <Manager>Bob Evil</Manager>
-</Properties>"#).unwrap();
+</Properties>"#,
+        )
+        .unwrap();
 
     writer.start_file("docProps/custom.xml", options).unwrap();
-    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
 <Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties">
   <property name="SecretCustomField">leak-me</property>
-</Properties>"#).unwrap();
+</Properties>"#,
+        )
+        .unwrap();
 
     writer.start_file("word/document.xml", options).unwrap();
     writer.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
@@ -445,9 +456,7 @@ pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
         .unwrap();
     writer.write_all(b"some bytes").unwrap();
 
-    writer
-        .start_file("word/theme/theme1.xml", options)
-        .unwrap();
+    writer.start_file("word/theme/theme1.xml", options).unwrap();
     writer.write_all(b"<theme/>").unwrap();
 
     // Embedded media — the EXIF-recursion vector
@@ -460,8 +469,8 @@ pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
 }
 
 pub fn make_dirty_odt(path: &Path) {
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ZipWriter::new(file);
@@ -503,7 +512,9 @@ pub fn make_dirty_odt(path: &Path) {
         .unwrap();
 
     writer.start_file("content.xml", options).unwrap();
-    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
 <office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
                          xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
   <office:body>
@@ -521,7 +532,9 @@ pub fn make_dirty_odt(path: &Path) {
       <text:p>visible-body</text:p>
     </office:text>
   </office:body>
-</office:document-content>"#).unwrap();
+</office:document-content>"#,
+        )
+        .unwrap();
 
     writer.start_file("styles.xml", options).unwrap();
     writer
@@ -548,8 +561,8 @@ pub fn make_dirty_odt(path: &Path) {
 }
 
 pub fn make_dirty_epub(path: &Path) {
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ZipWriter::new(file);
@@ -559,14 +572,18 @@ pub fn make_dirty_epub(path: &Path) {
     writer.start_file("mimetype", stored).unwrap();
     writer.write_all(b"application/epub+zip").unwrap();
 
-    writer.start_file("META-INF/container.xml", options).unwrap();
+    writer
+        .start_file("META-INF/container.xml", options)
+        .unwrap();
     writer.write_all(br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
 </container>"#).unwrap();
 
     writer.start_file("OEBPS/content.opf", options).unwrap();
-    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
 <package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/" xmlns:opf="http://www.idpf.org/2007/opf">
     <dc:title>Secret Book Title</dc:title>
@@ -582,7 +599,9 @@ pub fn make_dirty_epub(path: &Path) {
     <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
   </manifest>
   <spine toc="toc"><itemref idref="ch1"/></spine>
-</package>"#).unwrap();
+</package>"#,
+        )
+        .unwrap();
 
     writer.start_file("OEBPS/toc.ncx", options).unwrap();
     writer.write_all(br#"<?xml version="1.0"?>
@@ -596,7 +615,9 @@ pub fn make_dirty_epub(path: &Path) {
 </ncx>"#).unwrap();
 
     writer.start_file("OEBPS/chapter1.xhtml", options).unwrap();
-    writer.write_all(b"<html><head/><body><p>text</p></body></html>").unwrap();
+    writer
+        .write_all(b"<html><head/><body><p>text</p></body></html>")
+        .unwrap();
 
     // Junk that must be dropped
     writer.start_file("iTunesMetadata.plist", options).unwrap();
@@ -613,8 +634,8 @@ pub fn make_dirty_epub(path: &Path) {
 /// Make an encrypted-EPUB fixture (contains META-INF/encryption.xml).
 /// These should be rejected by the cleaner.
 pub fn make_encrypted_epub(path: &Path) {
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let file = std::fs::File::create(path).unwrap();
     let mut writer = ZipWriter::new(file);
@@ -636,7 +657,10 @@ pub fn make_encrypted_epub(path: &Path) {
 /// through lofty. Returns Ok(()) on success and bubbles failure up so
 /// the test can assert it.
 pub fn make_dirty_wav(path: &Path) -> std::io::Result<()> {
-    ffmpeg_synthesize(path, &["-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1"])?;
+    ffmpeg_synthesize(
+        path,
+        &["-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1"],
+    )?;
     inject_audio_tag(path, "mat2-parity-artist")
 }
 
@@ -644,8 +668,16 @@ pub fn make_dirty_mp3(path: &Path) -> std::io::Result<()> {
     ffmpeg_synthesize(
         path,
         &[
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=44100", "-t", "0.2", "-codec:a", "libmp3lame",
-            "-b:a", "32k",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.2",
+            "-codec:a",
+            "libmp3lame",
+            "-b:a",
+            "32k",
         ],
     )?;
     inject_audio_tag(path, "mat2-parity-artist")
@@ -655,7 +687,14 @@ pub fn make_dirty_flac(path: &Path) -> std::io::Result<()> {
     ffmpeg_synthesize(
         path,
         &[
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=44100", "-t", "0.1", "-codec:a", "flac",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-codec:a",
+            "flac",
         ],
     )?;
     inject_audio_tag(path, "mat2-parity-artist")
@@ -665,8 +704,16 @@ pub fn make_dirty_ogg(path: &Path) -> std::io::Result<()> {
     ffmpeg_synthesize(
         path,
         &[
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=44100", "-t", "0.1", "-codec:a",
-            "libvorbis", "-b:a", "32k",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-codec:a",
+            "libvorbis",
+            "-b:a",
+            "32k",
         ],
     )?;
     inject_audio_tag(path, "mat2-parity-artist")
@@ -676,7 +723,14 @@ pub fn make_dirty_aiff(path: &Path) -> std::io::Result<()> {
     ffmpeg_synthesize(
         path,
         &[
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1", "-f", "aiff",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=8000",
+            "-t",
+            "0.1",
+            "-f",
+            "aiff",
         ],
     )?;
     // Lofty's AIFF tag support is limited; for AIFF we accept the file
@@ -1151,12 +1205,7 @@ pub fn zip_entry_names(path: &Path) -> Vec<String> {
     let file = std::fs::File::open(path).unwrap();
     let mut archive = zip::ZipArchive::new(BufReader::new(file)).unwrap();
     (0..archive.len())
-        .filter_map(|i| {
-            archive
-                .by_index_raw(i)
-                .ok()
-                .map(|e| e.name().to_string())
-        })
+        .filter_map(|i| archive.by_index_raw(i).ok().map(|e| e.name().to_string()))
         .collect()
 }
 

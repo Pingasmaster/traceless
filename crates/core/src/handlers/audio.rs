@@ -57,21 +57,13 @@ impl FormatHandler for AudioHandler {
             for (i, pic) in tag.pictures().iter().enumerate() {
                 items.push(MetadataItem {
                     key: format!("[{tag_label}] Picture #{}", i + 1),
-                    value: format!(
-                        "{:?}, {} bytes",
-                        pic.pic_type(),
-                        pic.data().len()
-                    ),
+                    value: format!("{:?}, {} bytes", pic.pic_type(), pic.data().len()),
                 });
                 // Recursively scan the cover art for its own metadata.
                 if let Some(inner) = probe_picture_metadata(pic.mime_type(), pic.data()) {
                     for item in inner {
                         items.push(MetadataItem {
-                            key: format!(
-                                "[{tag_label}] Picture #{} → {}",
-                                i + 1,
-                                item.key
-                            ),
+                            key: format!("[{tag_label}] Picture #{} → {}", i + 1, item.key),
                             value: item.value,
                         });
                     }
@@ -81,19 +73,12 @@ impl FormatHandler for AudioHandler {
 
         let mut set = MetadataSet::default();
         if !items.is_empty() {
-            set.groups.push(MetadataGroup {
-                filename,
-                items,
-            });
+            set.groups.push(MetadataGroup { filename, items });
         }
         Ok(set)
     }
 
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError> {
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         // M4A / MP4-audio containers carry metadata in two separate
         // places: the iTunes `ilst` atom tree (which lofty handles
         // cleanly) and user-data atoms outside `ilst` like
@@ -133,7 +118,11 @@ impl FormatHandler for AudioHandler {
                     path: path.to_path_buf(),
                     detail: format!("Failed to read audio file: {e}"),
                 })?;
-            tagged_file.tags().iter().map(lofty::tag::Tag::tag_type).collect()
+            tagged_file
+                .tags()
+                .iter()
+                .map(lofty::tag::Tag::tag_type)
+                .collect()
         };
 
         for tag_type in tag_types {

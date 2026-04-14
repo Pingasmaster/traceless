@@ -37,10 +37,7 @@ impl FormatHandler for ImageHandler {
                     let tag_str = format!("{tag:?}");
                     // Debug output includes the value, extract tag name and value
                     if let Some((name, value)) = split_debug_tag(&tag_str) {
-                        items.push(MetadataItem {
-                            key: name,
-                            value,
-                        });
+                        items.push(MetadataItem { key: name, value });
                     } else {
                         items.push(MetadataItem {
                             key: tag_str.clone(),
@@ -73,8 +70,7 @@ impl FormatHandler for ImageHandler {
                         let marker = segment.marker();
                         let seg_data = segment.contents();
                         // APP1 with Adobe XMP namespace marker
-                        if marker == 0xE1
-                            && seg_data.starts_with(b"http://ns.adobe.com/xap/1.0/\0")
+                        if marker == 0xE1 && seg_data.starts_with(b"http://ns.adobe.com/xap/1.0/\0")
                         {
                             // Strip the 29-byte namespace header.
                             let xmp_body = &seg_data[29..];
@@ -89,9 +85,7 @@ impl FormatHandler for ImageHandler {
                             }
                         }
                         // APP13 with Photoshop 3.0 marker (IPTC 8BIM block)
-                        if marker == 0xED
-                            && seg_data.starts_with(b"Photoshop 3.0\0")
-                        {
+                        if marker == 0xED && seg_data.starts_with(b"Photoshop 3.0\0") {
                             // Skip the 14-byte "Photoshop 3.0\0" marker
                             let body = &seg_data[14..];
                             let parsed = super::xmp::parse_iptc_8bim(body);
@@ -104,10 +98,7 @@ impl FormatHandler for ImageHandler {
                                 items.extend(parsed);
                             }
                         }
-                        if !saw_icc
-                            && marker == 0xE2
-                            && seg_data.starts_with(b"ICC_PROFILE\0")
-                        {
+                        if !saw_icc && marker == 0xE2 && seg_data.starts_with(b"ICC_PROFILE\0") {
                             items.push(MetadataItem {
                                 key: "ICC Profile".to_string(),
                                 value: "present".to_string(),
@@ -174,11 +165,7 @@ impl FormatHandler for ImageHandler {
         Ok(set)
     }
 
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError> {
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
 
         // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.
@@ -193,11 +180,9 @@ impl FormatHandler for ImageHandler {
                 path: path.to_path_buf(),
                 detail: format!("Failed to copy file: {e}"),
             })?;
-            ExifMetadata::file_clear_metadata(output_path).map_err(|e| {
-                CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to clear metadata: {e}"),
-                }
+            ExifMetadata::file_clear_metadata(output_path).map_err(|e| CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!("Failed to clear metadata: {e}"),
             })?;
             return Ok(());
         }
@@ -231,23 +216,20 @@ impl FormatHandler for ImageHandler {
                 let final_data = if mime == "image/jpeg" {
                     strip_jpeg_extra_segments(&buf).ok_or_else(|| CoreError::CleanError {
                         path: path.to_path_buf(),
-                        detail:
-                            "JPEG post-strip failed; refusing to ship partially-stripped image"
-                                .to_string(),
+                        detail: "JPEG post-strip failed; refusing to ship partially-stripped image"
+                            .to_string(),
                     })?
                 } else if mime == "image/png" {
                     strip_png_text_chunks(&buf).ok_or_else(|| CoreError::CleanError {
                         path: path.to_path_buf(),
-                        detail:
-                            "PNG post-strip failed; refusing to ship partially-stripped image"
-                                .to_string(),
+                        detail: "PNG post-strip failed; refusing to ship partially-stripped image"
+                            .to_string(),
                     })?
                 } else if mime == "image/webp" {
                     strip_webp_extra_chunks(&buf).ok_or_else(|| CoreError::CleanError {
                         path: path.to_path_buf(),
-                        detail:
-                            "WebP post-strip failed; refusing to ship partially-stripped image"
-                                .to_string(),
+                        detail: "WebP post-strip failed; refusing to ship partially-stripped image"
+                            .to_string(),
                     })?
                 } else {
                     buf
@@ -595,11 +577,7 @@ mod tests {
         let mut out: Vec<u8> = Vec::new();
         out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
         // IHDR: 1x1 grayscale
-        append(
-            &mut out,
-            *b"IHDR",
-            &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0],
-        );
+        append(&mut out, *b"IHDR", &[0, 0, 0, 1, 0, 0, 0, 1, 8, 0, 0, 0, 0]);
         append(&mut out, *b"tEXt", b"Author\0alice");
         append(&mut out, *b"iTXt", b"Copyright\0\0\0\0\0secret");
         append(&mut out, *b"zTXt", b"Title\0\0compressed");
@@ -677,7 +655,11 @@ mod tests {
         // Must not panic. Must return Ok (the file is valid but has
         // no metadata beyond the JFIF APP0, which isn't surfaced).
         let meta = ImageHandler.read_metadata(&path).unwrap();
-        assert!(meta.groups.iter().all(|g| g.items.is_empty() || !g.items.is_empty()));
+        assert!(
+            meta.groups
+                .iter()
+                .all(|g| g.items.is_empty() || !g.items.is_empty())
+        );
     }
 
     #[test]

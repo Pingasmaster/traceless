@@ -163,10 +163,7 @@ fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
                     }
                     let identifier = bytes[id_start..id_end].to_vec();
                     let (blocks, next) = collect_sub_blocks(bytes, id_end);
-                    out.push(Extension::Application {
-                        identifier,
-                        blocks,
-                    });
+                    out.push(Extension::Application { identifier, blocks });
                     i = next;
                 }
                 _ => {
@@ -183,7 +180,11 @@ fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
             }
             let packed = bytes[i + 9];
             let has_lct = (packed & 0x80) != 0;
-            let lct_size = if has_lct { 3 * (1 << ((packed & 0x07) + 1)) } else { 0 };
+            let lct_size = if has_lct {
+                3 * (1 << ((packed & 0x07) + 1))
+            } else {
+                0
+            };
             i += 10 + lct_size;
             if i >= bytes.len() {
                 break;
@@ -260,7 +261,11 @@ fn gif_header_size(bytes: &[u8]) -> Option<usize> {
     // 6 signature + 7 logical screen descriptor = 13
     let packed = bytes[10];
     let has_gct = (packed & 0x80) != 0;
-    let gct_size = if has_gct { 3 * (1 << ((packed & 0x07) + 1)) } else { 0 };
+    let gct_size = if has_gct {
+        3 * (1 << ((packed & 0x07) + 1))
+    } else {
+        0
+    };
     Some(13 + gct_size)
 }
 
@@ -331,7 +336,11 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
             }
             let packed = bytes[i + 9];
             let has_lct = (packed & 0x80) != 0;
-            let lct_size = if has_lct { 3 * (1 << ((packed & 0x07) + 1)) } else { 0 };
+            let lct_size = if has_lct {
+                3 * (1 << ((packed & 0x07) + 1))
+            } else {
+                0
+            };
             let header_copy_end = i + 10 + lct_size;
             if header_copy_end + 1 > bytes.len() {
                 return None;
@@ -421,7 +430,10 @@ mod tests {
         let h = GifHandler;
         let meta = h.read_metadata(&src).unwrap();
         let dump = format!("{meta:?}");
-        assert!(dump.contains("secret-comment"), "comment not surfaced: {dump}");
+        assert!(
+            dump.contains("secret-comment"),
+            "comment not surfaced: {dump}"
+        );
         assert!(dump.contains("XMP"), "XMP app ext not surfaced: {dump}");
         // NETSCAPE2.0 must NOT show up
         assert!(!dump.contains("NETSCAPE"));
@@ -483,9 +495,7 @@ mod tests {
         // 1x1, no GCT
         g.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
         // Image Descriptor: 1x1 at (0,0), no LCT
-        g.extend_from_slice(&[
-            0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00,
-        ]);
+        g.extend_from_slice(&[0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
         // LZW min code size
         g.push(0x02);
         // First sub-block: length 5, 5 bytes of data
@@ -518,9 +528,7 @@ mod tests {
                     "expected GIF parse error, got: {detail}"
                 );
             }
-            other => panic!(
-                "expected CoreError::CleanError for truncated GIF, got: {other:?}"
-            ),
+            other => panic!("expected CoreError::CleanError for truncated GIF, got: {other:?}"),
         }
     }
 
@@ -534,6 +542,8 @@ mod tests {
         let src = dir.path().join("truncated.gif");
         fs::write(&src, make_truncated_subblock_gif()).unwrap();
         let h = GifHandler;
-        let _ = h.read_metadata(&src).expect("reader must not panic on truncated GIF");
+        let _ = h
+            .read_metadata(&src)
+            .expect("reader must not panic on truncated GIF");
     }
 }

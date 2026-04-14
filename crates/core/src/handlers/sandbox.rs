@@ -71,11 +71,7 @@ fn which(cmd: &str) -> Option<String> {
 /// Both paths should be absolute. The caller MUST use these same paths
 /// verbatim in the argv of the wrapped tool so the bind destinations
 /// match what the tool opens inside the sandbox.
-pub fn sandboxed_command(
-    program: &str,
-    input_path: &Path,
-    output_path: &Path,
-) -> Command {
+pub fn sandboxed_command(program: &str, input_path: &Path, output_path: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
         log::debug!(
             "bwrap not found; running {program} without sandbox. \

@@ -56,7 +56,7 @@ const CATALOG_KEYS_TO_STRIP: &[&[u8]] = &[
 const NAMES_KEYS_TO_STRIP: &[&[u8]] = &[
     b"EmbeddedFiles",
     b"JavaScript",
-    b"AP",             // Appearance streams named dest
+    b"AP", // Appearance streams named dest
     b"AlternatePresentations",
     b"Renditions",
 ];
@@ -81,7 +81,7 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
     b"UserUnit",
     b"ID",
     b"AA",
-    b"B",           // Beads (article threads)
+    b"B", // Beads (article threads)
 ];
 
 impl FormatHandler for PdfHandler {
@@ -138,7 +138,11 @@ impl FormatHandler for PdfHandler {
         let xmp_bytes: Option<Vec<u8>> = doc
             .catalog()
             .ok()
-            .and_then(|cat| cat.get(b"Metadata").ok().and_then(|o| o.as_reference().ok()))
+            .and_then(|cat| {
+                cat.get(b"Metadata")
+                    .ok()
+                    .and_then(|o| o.as_reference().ok())
+            })
             .and_then(|id| doc.get_object(id).ok())
             .and_then(|obj| obj.as_stream().ok())
             .map(|s| {
@@ -224,19 +228,12 @@ impl FormatHandler for PdfHandler {
 
         let mut set = MetadataSet::default();
         if !items.is_empty() {
-            set.groups.push(MetadataGroup {
-                filename,
-                items,
-            });
+            set.groups.push(MetadataGroup { filename, items });
         }
         Ok(set)
     }
 
-    fn clean_metadata(
-        &self,
-        path: &Path,
-        output_path: &Path,
-    ) -> Result<(), CoreError> {
+    fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         let mut doc = Document::load(path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to load PDF: {e}"),
@@ -257,10 +254,8 @@ impl FormatHandler for PdfHandler {
         // Some viewers require /ID to be present, so we replace it with a
         // deterministic pair of zero-byte strings rather than removing it.
         let zero = Object::string_literal("");
-        doc.trailer.set(
-            "ID",
-            Object::Array(vec![zero.clone(), zero]),
-        );
+        doc.trailer
+            .set("ID", Object::Array(vec![zero.clone(), zero]));
 
         // --- 3. Walk the catalog and remove every metadata-bearing key. ----
         // First collect the referenced object ids so we can delete those
@@ -290,12 +285,10 @@ impl FormatHandler for PdfHandler {
         // Most producers emit an indirect ref, but a crafted fixture
         // (or a hand-written PDF) can put the dict inline and used to
         // slip its children past the stripper.
-        let names_loc: Option<NamesLoc> = doc.catalog().ok().and_then(|c| {
-            match c.get(b"Names") {
-                Ok(Object::Reference(id)) => Some(NamesLoc::Indirect(*id)),
-                Ok(Object::Dictionary(_)) => Some(NamesLoc::Direct),
-                _ => None,
-            }
+        let names_loc: Option<NamesLoc> = doc.catalog().ok().and_then(|c| match c.get(b"Names") {
+            Ok(Object::Reference(id)) => Some(NamesLoc::Indirect(*id)),
+            Ok(Object::Dictionary(_)) => Some(NamesLoc::Direct),
+            _ => None,
         });
         if let Some(loc) = names_loc {
             let mut child_ids_to_delete: Vec<ObjectId> = Vec::new();
@@ -304,12 +297,10 @@ impl FormatHandler for PdfHandler {
             {
                 let names_dict_ref: Option<&lopdf::Dictionary> = match loc {
                     NamesLoc::Indirect(id) => doc.get_dictionary(id).ok(),
-                    NamesLoc::Direct => {
-                        doc.catalog().ok().and_then(|c| match c.get(b"Names") {
-                            Ok(Object::Dictionary(d)) => Some(d),
-                            _ => None,
-                        })
-                    }
+                    NamesLoc::Direct => doc.catalog().ok().and_then(|c| match c.get(b"Names") {
+                        Ok(Object::Dictionary(d)) => Some(d),
+                        _ => None,
+                    }),
                 };
                 if let Some(nd) = names_dict_ref {
                     for key in NAMES_KEYS_TO_STRIP {
@@ -512,10 +503,7 @@ mod tests {
     #[test]
     fn pdf_object_to_string_handles_primitive_variants() {
         assert_eq!(pdf_object_to_string(&Object::string_literal("hi")), "hi");
-        assert_eq!(
-            pdf_object_to_string(&Object::Name(b"Foo".to_vec())),
-            "Foo"
-        );
+        assert_eq!(pdf_object_to_string(&Object::Name(b"Foo".to_vec())), "Foo");
         assert_eq!(pdf_object_to_string(&Object::Integer(42)), "42");
         assert_eq!(pdf_object_to_string(&Object::Real(3.5)), "3.5");
         assert_eq!(pdf_object_to_string(&Object::Boolean(true)), "true");
@@ -553,7 +541,10 @@ mod tests {
         assert_eq!(arr.len(), 2);
         for entry in arr {
             if let Object::String(bytes, _) = entry {
-                assert!(bytes.is_empty(), "ID component must be zero-length, got {bytes:?}");
+                assert!(
+                    bytes.is_empty(),
+                    "ID component must be zero-length, got {bytes:?}"
+                );
             } else {
                 panic!("trailer /ID entry must be a string, got {entry:?}");
             }
@@ -826,8 +817,7 @@ mod tests {
         });
         doc.trailer.set("Root", Object::Reference(catalog_id));
         // Dangling /Info reference
-        doc.trailer
-            .set("Info", Object::Reference((9999, 0)));
+        doc.trailer.set("Info", Object::Reference((9999, 0)));
         doc.save(&src).unwrap();
 
         // Should not panic. Result can be ok or err, but not a panic.
@@ -898,14 +888,8 @@ mod tests {
         xobj_dict.set("Width", Object::Integer(1));
         xobj_dict.set("Height", Object::Integer(1));
         xobj_dict.set("Metadata", Object::Reference(xmp_id));
-        xobj_dict.set(
-            "LastModified",
-            Object::string_literal("D:20240101000000Z"),
-        );
-        let xobj_id = doc.add_object(Object::Stream(Stream::new(
-            xobj_dict,
-            b"pixel".to_vec(),
-        )));
+        xobj_dict.set("LastModified", Object::string_literal("D:20240101000000Z"));
+        let xobj_id = doc.add_object(Object::Stream(Stream::new(xobj_dict, b"pixel".to_vec())));
 
         let pages_id = doc.new_object_id();
         let page_id = doc.new_object_id();
@@ -946,9 +930,8 @@ mod tests {
         // /LastModified survived on any XObject.
         for obj in reloaded.objects.values() {
             if let Object::Stream(s) = obj {
-                let is_xobject =
-                    matches!(s.dict.get(b"Type"), Ok(Object::Name(n)) if n == b"XObject")
-                        || (s.dict.has(b"Subtype") && s.dict.has(b"Width"));
+                let is_xobject = matches!(s.dict.get(b"Type"), Ok(Object::Name(n)) if n == b"XObject")
+                    || (s.dict.has(b"Subtype") && s.dict.has(b"Width"));
                 if is_xobject {
                     assert!(
                         s.dict.get(b"Metadata").is_err(),

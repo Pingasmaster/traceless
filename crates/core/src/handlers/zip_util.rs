@@ -191,10 +191,14 @@ mod tests {
         assert!(is_office_junk_path("Thumbnails/thumbnail.png"));
         assert!(is_office_junk_path("docProps/custom.xml"));
         assert!(is_office_junk_path("customXml/item1.xml"));
-        assert!(is_office_junk_path("word/printerSettings/printerSettings1.bin"));
+        assert!(is_office_junk_path(
+            "word/printerSettings/printerSettings1.bin"
+        ));
         assert!(is_office_junk_path("word/comments.xml"));
         assert!(is_office_junk_path("word/comments12.xml"));
-        assert!(is_office_junk_path("word/threadedComments/threadedComment1.xml"));
+        assert!(is_office_junk_path(
+            "word/threadedComments/threadedComment1.xml"
+        ));
         assert!(is_office_junk_path("iTunesMetadata.plist"));
         assert!(is_office_junk_path("META-INF/calibre_bookmarks.txt"));
         assert!(is_office_junk_path("meta.xml"));
@@ -211,17 +215,44 @@ mod tests {
 
     #[test]
     fn media_detection_maps_extensions() {
-        assert_eq!(is_cleanable_media("word/media/image1.jpg"), Some("image/jpeg"));
-        assert_eq!(is_cleanable_media("word/media/image2.PNG"), Some("image/png"));
-        assert_eq!(is_cleanable_media("OPS/images/cover.webp"), Some("image/webp"));
-        assert_eq!(is_cleanable_media("word/media/photo.GIF"), Some("image/gif"));
+        assert_eq!(
+            is_cleanable_media("word/media/image1.jpg"),
+            Some("image/jpeg")
+        );
+        assert_eq!(
+            is_cleanable_media("word/media/image2.PNG"),
+            Some("image/png")
+        );
+        assert_eq!(
+            is_cleanable_media("OPS/images/cover.webp"),
+            Some("image/webp")
+        );
+        assert_eq!(
+            is_cleanable_media("word/media/photo.GIF"),
+            Some("image/gif")
+        );
         assert_eq!(is_cleanable_media("xl/media/scan.TIFF"), Some("image/tiff"));
         assert_eq!(is_cleanable_media("xl/media/scan.tif"), Some("image/tiff"));
-        assert_eq!(is_cleanable_media("ppt/media/diagram.bmp"), Some("image/bmp"));
-        assert_eq!(is_cleanable_media("OPS/images/vector.svg"), Some("image/svg+xml"));
-        assert_eq!(is_cleanable_media("word/media/cover.heic"), Some("image/heic"));
-        assert_eq!(is_cleanable_media("word/media/cover.heif"), Some("image/heif"));
-        assert_eq!(is_cleanable_media("word/media/cover.JXL"), Some("image/jxl"));
+        assert_eq!(
+            is_cleanable_media("ppt/media/diagram.bmp"),
+            Some("image/bmp")
+        );
+        assert_eq!(
+            is_cleanable_media("OPS/images/vector.svg"),
+            Some("image/svg+xml")
+        );
+        assert_eq!(
+            is_cleanable_media("word/media/cover.heic"),
+            Some("image/heic")
+        );
+        assert_eq!(
+            is_cleanable_media("word/media/cover.heif"),
+            Some("image/heif")
+        );
+        assert_eq!(
+            is_cleanable_media("word/media/cover.JXL"),
+            Some("image/jxl")
+        );
         assert_eq!(is_cleanable_media("word/document.xml"), None);
     }
 

@@ -226,18 +226,17 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
         // consumes the real `</title>` as part of a bogus empty-name
         // tag, leaks the `< Bob` suffix through the cleaner, and hides
         // the title from the reader entirely.
-        let rawtext_needle: Option<&[u8]> =
-            if !self_closing && local_name == "script" {
-                Some(b"script")
-            } else if !self_closing && local_name == "style" {
-                Some(b"style")
-            } else if !self_closing && local_name == "textarea" {
-                Some(b"textarea")
-            } else if !self_closing && local_name == "title" {
-                Some(b"title")
-            } else {
-                None
-            };
+        let rawtext_needle: Option<&[u8]> = if !self_closing && local_name == "script" {
+            Some(b"script")
+        } else if !self_closing && local_name == "style" {
+            Some(b"style")
+        } else if !self_closing && local_name == "textarea" {
+            Some(b"textarea")
+        } else if !self_closing && local_name == "title" {
+            Some(b"title")
+        } else {
+            None
+        };
         tokens.push(Token::Open {
             raw: &src[start..i],
             local_name,
@@ -346,11 +345,8 @@ fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
                     let label = attrs
                         .iter()
                         .find_map(|(k, v)| {
-                            matches!(
-                                k.as_str(),
-                                "name" | "http-equiv" | "property" | "itemprop"
-                            )
-                            .then(|| v.clone())
+                            matches!(k.as_str(), "name" | "http-equiv" | "property" | "itemprop")
+                                .then(|| v.clone())
                         })
                         .unwrap_or_else(|| "(meta)".to_string());
                     let value = attrs
@@ -492,10 +488,7 @@ fn parse_attrs(tag_raw: &str) -> Vec<(String, String)> {
     }
     // Skip `<tagname`
     let mut i = 1usize;
-    while i < bytes.len()
-        && !bytes[i].is_ascii_whitespace()
-        && bytes[i] != b'>'
-        && bytes[i] != b'/'
+    while i < bytes.len() && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/'
     {
         i += 1;
     }
@@ -570,15 +563,7 @@ fn parse_attrs(tag_raw: &str) -> Vec<(String, String)> {
 fn is_drop_tag(name: &str) -> bool {
     matches!(
         name,
-        "meta"
-            | "link"
-            | "base"
-            | "script"
-            | "style"
-            | "noscript"
-            | "iframe"
-            | "object"
-            | "embed"
+        "meta" | "link" | "base" | "script" | "style" | "noscript" | "iframe" | "object" | "embed"
     )
 }
 
@@ -708,11 +693,7 @@ fn strip_on_handlers(raw: &str) -> Cow<'_, str> {
 
     // Copy `<tagname` verbatim.
     let mut i = 0usize;
-    while i < len
-        && !bytes[i].is_ascii_whitespace()
-        && bytes[i] != b'>'
-        && bytes[i] != b'/'
-    {
+    while i < len && !bytes[i].is_ascii_whitespace() && bytes[i] != b'>' && bytes[i] != b'/' {
         i += 1;
     }
     out.push_str(&raw[..i]);
@@ -800,9 +781,7 @@ fn contains_on_attribute(raw: &str) -> bool {
             let c0 = bytes[i + 1];
             let c1 = bytes[i + 2];
             let c2 = bytes[i + 3];
-            if (c0 == b'o' || c0 == b'O')
-                && (c1 == b'n' || c1 == b'N')
-                && c2.is_ascii_alphabetic()
+            if (c0 == b'o' || c0 == b'O') && (c1 == b'n' || c1 == b'N') && c2.is_ascii_alphabetic()
             {
                 return true;
             }
@@ -915,7 +894,10 @@ mod tests {
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert_eq!(out, r#"<html><body><div class="a"><span>inner</span></div></body></html>"#);
+        assert_eq!(
+            out,
+            r#"<html><body><div class="a"><span>inner</span></div></body></html>"#
+        );
     }
 
     #[test]
@@ -963,23 +945,16 @@ mod tests {
             dump.contains("rel=author"),
             "link rel=author missing: {dump}"
         );
+        assert!(dump.contains("<base>"), "base entry missing: {dump}");
         assert!(
-            dump.contains("<base>"),
-            "base entry missing: {dump}"
-        );
-        assert!(
-            dump.contains("<script>")
-                && dump.contains("external.js"),
+            dump.contains("<script>") && dump.contains("external.js"),
             "script src missing: {dump}"
         );
         assert!(
             dump.contains("inline") && dump.contains("bytes"),
             "inline script byte-length summary missing: {dump}"
         );
-        assert!(
-            dump.contains("<style>"),
-            "style entry missing: {dump}"
-        );
+        assert!(dump.contains("<style>"), "style entry missing: {dump}");
         assert!(
             dump.contains("<noscript>"),
             "noscript entry missing: {dump}"
@@ -1015,11 +990,20 @@ mod tests {
         let out = fs::read_to_string(&dst).unwrap();
         assert!(!out.contains("<script"), "<script> tag survived: {out}");
         assert!(!out.contains("</script"), "</script> tag survived: {out}");
-        assert!(!out.contains("leak-from-script"), "script body survived: {out}");
+        assert!(
+            !out.contains("leak-from-script"),
+            "script body survived: {out}"
+        );
         assert!(!out.contains("<style"), "<style> tag survived: {out}");
         assert!(!out.contains("</style"), "</style> tag survived: {out}");
-        assert!(!out.contains("leak-from-style"), "style body survived: {out}");
-        assert!(out.contains("<p>visible</p>"), "body content must survive: {out}");
+        assert!(
+            !out.contains("leak-from-style"),
+            "style body survived: {out}"
+        );
+        assert!(
+            out.contains("<p>visible</p>"),
+            "body content must survive: {out}"
+        );
     }
 
     #[test]
@@ -1049,14 +1033,23 @@ mod tests {
         assert!(!out.contains("<base"), "<base> survived: {out}");
         assert!(!out.contains("<iframe"), "<iframe> survived: {out}");
         assert!(!out.contains("</iframe"), "</iframe> survived: {out}");
-        assert!(!out.contains("inside iframe"), "iframe body survived: {out}");
+        assert!(
+            !out.contains("inside iframe"),
+            "iframe body survived: {out}"
+        );
         assert!(!out.contains("<object"), "<object> survived: {out}");
         assert!(!out.contains("<param"), "object param survived: {out}");
         assert!(!out.contains("secret"), "object secret survived: {out}");
         assert!(!out.contains("<embed"), "<embed> survived: {out}");
         assert!(!out.contains("<noscript"), "<noscript> survived: {out}");
-        assert!(!out.contains("noscript content"), "noscript body survived: {out}");
-        assert!(out.contains("<p>survivor</p>"), "body content must survive: {out}");
+        assert!(
+            !out.contains("noscript content"),
+            "noscript body survived: {out}"
+        );
+        assert!(
+            out.contains("<p>survivor</p>"),
+            "body content must survive: {out}"
+        );
     }
 
     #[test]
@@ -1078,7 +1071,10 @@ mod tests {
         assert!(!out.contains("onerror"), "onerror survived: {out}");
         assert!(!out.contains("track()"), "handler body survived: {out}");
         assert!(out.contains(r#"class="a""#), "class must survive: {out}");
-        assert!(out.contains(r#"data-x="keep""#), "data-* must survive: {out}");
+        assert!(
+            out.contains(r#"data-x="keep""#),
+            "data-* must survive: {out}"
+        );
         assert!(out.contains(r#"href="/x""#), "href must survive: {out}");
         assert!(out.contains(">link</a>"), "body text must survive: {out}");
     }
@@ -1125,7 +1121,10 @@ mod tests {
         let h = HtmlHandler;
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
-        assert!(out.contains("<p>keep</p>"), "body prefix must survive: {out}");
+        assert!(
+            out.contains("<p>keep</p>"),
+            "body prefix must survive: {out}"
+        );
         assert!(!out.contains("<script"), "<script> survived: {out}");
         assert!(!out.contains("var s"), "script body survived: {out}");
     }
@@ -1147,7 +1146,10 @@ mod tests {
         let out = fs::read_to_string(&dst).unwrap();
         assert!(!out.contains("<SCRIPT"), "<SCRIPT> survived: {out}");
         assert!(!out.contains("var s"), "script body survived: {out}");
-        assert!(out.contains("<p>after</p>"), "post-script text must survive: {out}");
+        assert!(
+            out.contains("<p>after</p>"),
+            "post-script text must survive: {out}"
+        );
     }
 
     #[test]

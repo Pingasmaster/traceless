@@ -117,9 +117,7 @@ fn find_xmp_pairs(text: &str) -> Vec<(String, String)> {
         // Opening tag — extract qualified name
         let name_start = i + 1;
         let mut j = name_start;
-        while j < bytes.len()
-            && !matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/')
-        {
+        while j < bytes.len() && !matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/') {
             j += 1;
         }
         if j >= bytes.len() {
@@ -409,7 +407,10 @@ mod tests {
         // No following bytes: the header claims ~4 GiB of IPTC data
         // but none is present. Must not panic.
         let items = parse_iptc_8bim(&app13);
-        assert!(items.is_empty(), "overflowing 8BIM header must yield no items");
+        assert!(
+            items.is_empty(),
+            "overflowing 8BIM header must yield no items"
+        );
     }
 
     #[test]

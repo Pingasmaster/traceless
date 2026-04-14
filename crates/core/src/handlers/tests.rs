@@ -3,10 +3,10 @@ use std::io::Write;
 use std::path::Path;
 use tempfile::TempDir;
 
-use crate::format_support::{detect_mime, get_handler_for_mime, supported_extensions};
-use crate::handlers::FormatHandler;
 use crate::file::{FileEntry, FileId, FileState};
 use crate::file_store::FileStore;
+use crate::format_support::{detect_mime, get_handler_for_mime, supported_extensions};
+use crate::handlers::FormatHandler;
 use crate::metadata::MetadataSet;
 
 // ===== Format Support Tests =====
@@ -100,9 +100,12 @@ fn test_handler_for_video() {
 fn test_handler_for_documents() {
     assert!(get_handler_for_mime("application/vnd.oasis.opendocument.text").is_some());
     assert!(get_handler_for_mime("application/vnd.oasis.opendocument.graphics").is_some());
-    assert!(get_handler_for_mime(
-        "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ).is_some());
+    assert!(
+        get_handler_for_mime(
+            "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+        .is_some()
+    );
 }
 
 #[test]
@@ -139,8 +142,14 @@ fn test_file_state_simple_state() {
     assert_eq!(FileState::RemovingMetadata.simple_state(), "working");
     assert_eq!(FileState::Unsupported.simple_state(), "error");
     assert_eq!(FileState::ErrorWhileInitializing.simple_state(), "error");
-    assert_eq!(FileState::ErrorWhileCheckingMetadata.simple_state(), "error");
-    assert_eq!(FileState::ErrorWhileRemovingMetadata.simple_state(), "error");
+    assert_eq!(
+        FileState::ErrorWhileCheckingMetadata.simple_state(),
+        "error"
+    );
+    assert_eq!(
+        FileState::ErrorWhileRemovingMetadata.simple_state(),
+        "error"
+    );
     assert_eq!(FileState::HasNoMetadata.simple_state(), "warning");
     assert_eq!(FileState::HasMetadata.simple_state(), "has-metadata");
     assert_eq!(FileState::Cleaned.simple_state(), "clean");
@@ -503,10 +512,22 @@ fn test_document_handler_clean_xml_lightweight_drops_empty_tags() {
   <Keeper>kept</Keeper>
 </Properties>"#;
     let out = clean_xml_metadata_lightweight_for_tests(xml);
-    assert!(!out.contains("Manager"), "empty <Manager/> should be removed, got: {out}");
-    assert!(!out.contains("Application"), "open/close Application should be removed");
-    assert!(!out.contains("Company"), "empty <Company/> variant handling must still drop Company");
-    assert!(!out.contains("AppVersion"), "empty <AppVersion/> should be removed");
+    assert!(
+        !out.contains("Manager"),
+        "empty <Manager/> should be removed, got: {out}"
+    );
+    assert!(
+        !out.contains("Application"),
+        "open/close Application should be removed"
+    );
+    assert!(
+        !out.contains("Company"),
+        "empty <Company/> variant handling must still drop Company"
+    );
+    assert!(
+        !out.contains("AppVersion"),
+        "empty <AppVersion/> should be removed"
+    );
     assert!(out.contains("Keeper"), "unrelated elements must survive");
     assert!(out.contains("kept"), "unrelated text nodes must survive");
 }
@@ -516,9 +537,9 @@ fn test_document_handler_supported_types() {
     let handler = crate::handlers::document::DocumentHandler;
     let types = handler.supported_mime_types();
     assert!(types.contains(&"application/vnd.oasis.opendocument.text"));
-    assert!(types.contains(
-        &"application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-    ));
+    assert!(
+        types.contains(&"application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+    );
 }
 
 // ===== Deep-clean coverage tests (mat2 parity) =====
@@ -567,9 +588,13 @@ fn build_fake_docx(path: &std::path::Path, jpeg_bytes: &[u8]) {
     writer.write_all(b"<junk>should be dropped</junk>").unwrap();
 
     writer.start_file("word/comments.xml", options).unwrap();
-    writer.write_all(b"<junk>should also be dropped</junk>").unwrap();
+    writer
+        .write_all(b"<junk>should also be dropped</junk>")
+        .unwrap();
 
-    writer.start_file("word/media/image1.jpeg", options).unwrap();
+    writer
+        .start_file("word/media/image1.jpeg", options)
+        .unwrap();
     writer.write_all(jpeg_bytes).unwrap();
 
     writer.finish().unwrap();
@@ -603,16 +628,25 @@ fn test_docx_deep_clean_strips_rsid_revisions_and_junk() {
 
     // core.xml must be empty-stubbed
     let core = String::from_utf8(read_entry(&output, "docProps/core.xml").unwrap()).unwrap();
-    assert!(!core.contains("Secret Author"), "creator must be gone: {core}");
+    assert!(
+        !core.contains("Secret Author"),
+        "creator must be gone: {core}"
+    );
     assert!(!core.contains("Alice"), "lastModifiedBy must be gone");
 
     // document.xml must have rsid / tracked changes / comment refs gone
     let doc = String::from_utf8(read_entry(&output, "word/document.xml").unwrap()).unwrap();
     assert!(!doc.contains("rsidR"), "rsid attribute leaked: {doc}");
     assert!(!doc.contains("rsidRDefault"), "rsid attribute leaked");
-    assert!(!doc.contains("removed-secret"), "w:del content leaked: {doc}");
+    assert!(
+        !doc.contains("removed-secret"),
+        "w:del content leaked: {doc}"
+    );
     assert!(!doc.contains("w:del"), "w:del wrapper leaked");
-    assert!(doc.contains("inserted-ok"), "w:ins children must survive: {doc}");
+    assert!(
+        doc.contains("inserted-ok"),
+        "w:ins children must survive: {doc}"
+    );
     assert!(!doc.contains("commentRangeStart"), "comment range leaked");
     assert!(!doc.contains("commentReference"), "comment ref leaked");
     assert!(!doc.contains("mc:Ignorable"), "mc:Ignorable leaked: {doc}");
@@ -693,7 +727,9 @@ fn test_docx_with_unparseable_png_errors_instead_of_leaking() {
         // the clean path copied these through silently; now it must
         // surface a `CleanError`.
         writer.start_file("word/media/image1.png", options).unwrap();
-        writer.write_all(b"not a real png, just random bytes").unwrap();
+        writer
+            .write_all(b"not a real png, just random bytes")
+            .unwrap();
 
         writer.finish().unwrap();
     }
@@ -747,23 +783,33 @@ fn test_odf_drops_thumbnails_and_tracked_changes() {
     let options = zip::write::SimpleFileOptions::default();
 
     writer.start_file("mimetype", options).unwrap();
-    writer.write_all(b"application/vnd.oasis.opendocument.text").unwrap();
+    writer
+        .write_all(b"application/vnd.oasis.opendocument.text")
+        .unwrap();
 
     writer.start_file("meta.xml", options).unwrap();
     writer.write_all(br#"<office:document-meta xmlns:office="o"><dc:creator xmlns:dc="d">Secret</dc:creator></office:document-meta>"#).unwrap();
 
     writer.start_file("content.xml", options).unwrap();
-    writer.write_all(br#"<office:document-content xmlns:office="o" xmlns:text="t">
+    writer
+        .write_all(
+            br#"<office:document-content xmlns:office="o" xmlns:text="t">
         <office:body><office:text>
             <text:tracked-changes><text:p>deleted</text:p></text:tracked-changes>
             <text:p>kept</text:p>
         </office:text></office:body>
-    </office:document-content>"#).unwrap();
+    </office:document-content>"#,
+        )
+        .unwrap();
 
-    writer.start_file("Thumbnails/thumbnail.png", options).unwrap();
+    writer
+        .start_file("Thumbnails/thumbnail.png", options)
+        .unwrap();
     writer.write_all(b"fake thumbnail").unwrap();
 
-    writer.start_file("Configurations2/accelerator/current.xml", options).unwrap();
+    writer
+        .start_file("Configurations2/accelerator/current.xml", options)
+        .unwrap();
     writer.write_all(b"<junk/>").unwrap();
 
     writer.finish().unwrap();
@@ -771,7 +817,10 @@ fn test_odf_drops_thumbnails_and_tracked_changes() {
     let handler = crate::handlers::document::DocumentHandler;
     handler.clean_metadata(&path, &output).unwrap();
 
-    assert!(read_entry(&output, "meta.xml").is_none(), "meta.xml must be dropped");
+    assert!(
+        read_entry(&output, "meta.xml").is_none(),
+        "meta.xml must be dropped"
+    );
     assert!(
         read_entry(&output, "Thumbnails/thumbnail.png").is_none(),
         "Thumbnails/ must be dropped"
@@ -782,7 +831,10 @@ fn test_odf_drops_thumbnails_and_tracked_changes() {
     );
 
     let content = String::from_utf8(read_entry(&output, "content.xml").unwrap()).unwrap();
-    assert!(!content.contains("tracked-changes"), "tracked-changes must be gone: {content}");
+    assert!(
+        !content.contains("tracked-changes"),
+        "tracked-changes must be gone: {content}"
+    );
     assert!(!content.contains("deleted"), "deleted text must be gone");
     assert!(content.contains("kept"), "kept text must survive");
 }
@@ -799,10 +851,14 @@ fn test_epub_regenerates_uuid_and_rejects_encryption() {
 
     writer.start_file("mimetype", options).unwrap();
     writer.write_all(b"application/epub+zip").unwrap();
-    writer.start_file("META-INF/container.xml", options).unwrap();
+    writer
+        .start_file("META-INF/container.xml", options)
+        .unwrap();
     writer.write_all(br#"<?xml version="1.0"?><container><rootfiles><rootfile full-path="content.opf"/></rootfiles></container>"#).unwrap();
     writer.start_file("content.opf", options).unwrap();
-    writer.write_all(br#"<?xml version="1.0"?>
+    writer
+        .write_all(
+            br#"<?xml version="1.0"?>
 <package xmlns="http://www.idpf.org/2007/opf">
   <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
     <dc:title>Secret Book</dc:title>
@@ -810,7 +866,9 @@ fn test_epub_regenerates_uuid_and_rejects_encryption() {
     <dc:identifier>old-id-leaking-info</dc:identifier>
   </metadata>
   <manifest/>
-</package>"#).unwrap();
+</package>"#,
+        )
+        .unwrap();
     writer.finish().unwrap();
 
     let handler = crate::handlers::document::DocumentHandler;
@@ -819,8 +877,14 @@ fn test_epub_regenerates_uuid_and_rejects_encryption() {
     let opf = String::from_utf8(read_entry(&output, "content.opf").unwrap()).unwrap();
     assert!(!opf.contains("Jane Doe"), "author must be removed: {opf}");
     assert!(!opf.contains("Secret Book"), "title must be removed");
-    assert!(!opf.contains("old-id-leaking-info"), "old identifier must be gone");
-    assert!(opf.contains("urn:uuid:"), "fresh UUID must be present: {opf}");
+    assert!(
+        !opf.contains("old-id-leaking-info"),
+        "old identifier must be gone"
+    );
+    assert!(
+        opf.contains("urn:uuid:"),
+        "fresh UUID must be present: {opf}"
+    );
 
     // Second EPUB: encrypted — must fail
     let enc_path = dir.path().join("enc.epub");
@@ -829,7 +893,9 @@ fn test_epub_regenerates_uuid_and_rejects_encryption() {
     let mut writer = zip::ZipWriter::new(file);
     writer.start_file("mimetype", options).unwrap();
     writer.write_all(b"application/epub+zip").unwrap();
-    writer.start_file("META-INF/encryption.xml", options).unwrap();
+    writer
+        .start_file("META-INF/encryption.xml", options)
+        .unwrap();
     writer.write_all(b"<encryption/>").unwrap();
     writer.finish().unwrap();
 
@@ -1078,7 +1144,10 @@ fn drain_until(
             Err(_) => break,
         }
     }
-    assert!(predicate(store), "predicate not satisfied after {max_events} events");
+    assert!(
+        predicate(store),
+        "predicate not satisfied after {max_events} events"
+    );
 }
 
 /// Writes the embedded test JPEG, adds an Artist EXIF tag via `little_exif`,
@@ -1246,9 +1315,7 @@ fn test_document_clean_rejects_non_utf8_non_stub_xml() {
         // A .rels file is XML-like, so it hits the XML branch, but it
         // is NOT a stub path, so the cleaner must refuse to ship it.
         // 0xFF / 0xFE / 0xFD are all invalid UTF-8 lead bytes.
-        writer
-            .start_file("_rels/.rels", options)
-            .unwrap();
+        writer.start_file("_rels/.rels", options).unwrap();
         writer.write_all(&[0xFFu8, 0xFE, 0xFD, 0x00, 0xFF]).unwrap();
         writer.start_file("word/document.xml", options).unwrap();
         writer
@@ -1383,8 +1450,8 @@ fn test_docx_embedded_webp_xmp_is_stripped() {
     // `strip_embedded_image` path. A DOCX that embeds a `.webp`
     // inside `word/media/` must have the inner WebP's XMP chunk
     // stripped exactly like the standalone image case.
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let dir = TempDir::new().unwrap();
     let inner_webp = dir.path().join("inner.webp");
@@ -1408,7 +1475,9 @@ fn test_docx_embedded_webp_xmp_is_stripped() {
         writer
             .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
             .unwrap();
-        writer.start_file("word/media/image1.webp", options).unwrap();
+        writer
+            .start_file("word/media/image1.webp", options)
+            .unwrap();
         writer.write_all(&webp_bytes).unwrap();
         writer.finish().unwrap();
     }
@@ -1524,8 +1593,8 @@ fn test_document_handler_rejects_oversized_zip_member() {
     // override on `archive::MAX_ENTRY_DECOMPRESSED_BYTES`) so we
     // can exercise the error path with a 5 MiB fixture that is
     // still small enough for CI.
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("bomb.docx");
@@ -1539,8 +1608,8 @@ fn test_document_handler_rejects_oversized_zip_member() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut writer = ZipWriter::new(file);
-        let stored = SimpleFileOptions::default()
-            .compression_method(zip::CompressionMethod::Stored);
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
         writer.start_file("[Content_Types].xml", stored).unwrap();
         writer
@@ -1645,8 +1714,8 @@ fn test_docx_embedded_gif_comment_is_stripped() {
     // verbatim because only jpg/png/webp routed to strip_embedded_image.
     // A GIF carrying a Comment Extension leaked its payload into the
     // cleaned archive.
-    use zip::write::SimpleFileOptions;
     use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
 
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("dirty.docx");

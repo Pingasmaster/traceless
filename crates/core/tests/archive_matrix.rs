@@ -51,7 +51,8 @@ fn build_inner_zip_with_jpeg() -> Vec<u8> {
     {
         let cursor = std::io::Cursor::new(&mut buf);
         let mut w = zip::ZipWriter::new(cursor);
-        w.start_file("photo.jpg", SimpleFileOptions::default()).unwrap();
+        w.start_file("photo.jpg", SimpleFileOptions::default())
+            .unwrap();
         w.write_all(TEST_JPEG).unwrap();
         w.finish().unwrap();
     }
@@ -68,7 +69,8 @@ fn zip_containing_tar_cleans_without_error() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut w = zip::ZipWriter::new(file);
-        w.start_file("inner.tar", SimpleFileOptions::default()).unwrap();
+        w.start_file("inner.tar", SimpleFileOptions::default())
+            .unwrap();
         let inner = build_inner_tar_with_jpeg();
         w.write_all(&inner).unwrap();
         w.finish().unwrap();
@@ -136,7 +138,8 @@ fn zip_containing_tar_containing_zip_cleans() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut w = zip::ZipWriter::new(file);
-        w.start_file("level1.tar", SimpleFileOptions::default()).unwrap();
+        w.start_file("level1.tar", SimpleFileOptions::default())
+            .unwrap();
         w.write_all(&middle).unwrap();
         w.finish().unwrap();
     }
@@ -297,12 +300,7 @@ fn tar_rejects_escaping_symlink_member() {
     let dir = tempfile::tempdir().unwrap();
     let src = dir.path().join("symesc.tar");
     // Typeflag '2' = symlink, with `../../etc/passwd` as target.
-    let block = hand_crafted_tar_header(
-        b"link",
-        b'2',
-        *b"0000644",
-        Some(b"../../etc/passwd"),
-    );
+    let block = hand_crafted_tar_header(b"link", b'2', *b"0000644", Some(b"../../etc/passwd"));
     write_tar_archive(&src, &[block]);
     assert_tar_rejected(&src, "escaping-symlink");
 }
@@ -452,9 +450,11 @@ fn zip_with_unicode_member_names_cleans() {
     {
         let file = fs::File::create(&src).unwrap();
         let mut w = zip::ZipWriter::new(file);
-        w.start_file("café.jpg", SimpleFileOptions::default()).unwrap();
+        w.start_file("café.jpg", SimpleFileOptions::default())
+            .unwrap();
         w.write_all(TEST_JPEG).unwrap();
-        w.start_file("日本語.jpg", SimpleFileOptions::default()).unwrap();
+        w.start_file("日本語.jpg", SimpleFileOptions::default())
+            .unwrap();
         w.write_all(TEST_JPEG).unwrap();
         w.finish().unwrap();
     }
@@ -471,4 +471,3 @@ fn zip_with_unicode_member_names_cleans() {
     assert!(names.iter().any(|n| n.contains("caf")));
     assert!(names.iter().any(|n| n.contains("日本語")));
 }
-
