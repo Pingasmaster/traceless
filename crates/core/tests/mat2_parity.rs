@@ -1654,6 +1654,70 @@ fn video_clean_bitexact_removes_encoder_fingerprint() {
     }
 }
 
+#[test]
+fn video_clean_works_when_parent_path_contains_a_symlink() {
+    // Regression: handlers::sandbox::sandboxed_command used to call
+    // `.canonicalize()` on the input/output paths and use the real
+    // resolved path as the bind destination, while video.rs kept using
+    // the *raw* symlinked path in the ffmpeg argv. Inside the sandbox
+    // the symlinked path does not exist, so ffmpeg fails with ENOENT
+    // on any file whose parent chain contains a symlink. Fix: sandbox
+    // no longer canonicalizes; bind dest matches argv path. bwrap's
+    // own source-side resolution still follows the symlink on the
+    // host, so the file is accessible inside the sandbox under the
+    // same path the caller uses.
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let bwrap = ["/usr/bin/bwrap", "/usr/local/bin/bwrap", "/bin/bwrap"]
+        .iter()
+        .any(|p| Path::new(p).exists());
+    if !bwrap {
+        eprintln!("[SKIP] bwrap not available; fallback path does not exercise the bug");
+        return;
+    }
+
+    // Real directory with the fixture.
+    let real = tempfile::tempdir().unwrap();
+    let dirty_real = real.path().join("dirty.mp4");
+    if make_dirty_mp4(&dirty_real).is_err() {
+        eprintln!("[SKIP] ffmpeg failed to synthesize MP4");
+        return;
+    }
+
+    // Symlink living in a sibling tempdir, pointing at the real dir.
+    // We must create the symlink outside `real` itself, because
+    // placing a `link -> real/` entry *inside* `real` would make
+    // `real.path().canonicalize()` still resolve to `real` and the
+    // pre-fix path would accidentally work.
+    let link_parent = tempfile::tempdir().unwrap();
+    let link = link_parent.path().join("link");
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(real.path(), &link).unwrap();
+    #[cfg(not(unix))]
+    {
+        eprintln!("[SKIP] symlink regression test is unix-only");
+        return;
+    }
+
+    // Use the path that routes through the symlink for both input
+    // and output. With the pre-fix sandbox this fails with an
+    // ENOENT from ffmpeg because the bind destination is the real
+    // path but argv uses the symlinked path.
+    let dirty_via_link = link.join("dirty.mp4");
+    let cleaned_via_link = link.join("cleaned.mp4");
+
+    let handler = get_handler_for_mime("video/mp4").unwrap();
+    handler
+        .clean_metadata(&dirty_via_link, &cleaned_via_link)
+        .expect("clean_metadata must succeed when the parent path contains a symlink");
+    assert!(
+        cleaned_via_link.exists(),
+        "cleaned output file must exist at the symlinked path"
+    );
+}
+
 // ================================================================
 // §22. Idempotence + determinism for every new format
 // ================================================================

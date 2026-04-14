@@ -13,8 +13,19 @@
 //!    read-only bind of the input path, and a writable bind of the
 //!    output path's *parent* directory so ffmpeg can create the file.
 //!
-//! All I/O goes through argv — no env vars — to minimize accidental
+//! All I/O goes through argv - no env vars - to minimize accidental
 //! data leakage.
+//!
+//! Bind paths are used verbatim, without `canonicalize()`. The caller
+//! appends the *same* raw path to the argv of the wrapped tool, so the
+//! destination of each `--ro-bind` / `--bind` must match byte-for-byte
+//! what the tool will try to open inside the sandbox. Canonicalizing
+//! the dest would resolve host-side symlinks and emit a real-path
+//! destination that doesn't match the symlinked path the tool is
+//! asked to open, producing an ENOENT inside the sandbox. bwrap
+//! already resolves the bind *source* at open time, so host-side
+//! symlinks on the source side are followed transparently; no
+//! user-space canonicalization is needed.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -57,8 +68,9 @@ fn which(cmd: &str) -> Option<String> {
 /// read-write so the tool can create the output file. Additional
 /// argv items must be appended by the caller after this returns.
 ///
-/// Both paths must be *absolute*, or the caller must pre-canonicalize
-/// them — relative paths break the `--bind` targets.
+/// Both paths should be absolute. The caller MUST use these same paths
+/// verbatim in the argv of the wrapped tool so the bind destinations
+/// match what the tool opens inside the sandbox.
 pub fn sandboxed_command(
     program: &str,
     input_path: &Path,
@@ -72,18 +84,9 @@ pub fn sandboxed_command(
         return Command::new(program);
     };
 
-    let input_abs: PathBuf = input_path
-        .canonicalize()
-        .unwrap_or_else(|_| input_path.to_path_buf());
     let output_parent: PathBuf = output_path
         .parent()
-        .map(Path::to_path_buf)
-        .and_then(|p| p.canonicalize().ok())
-        .unwrap_or_else(|| {
-            output_path
-                .parent()
-                .map_or_else(|| PathBuf::from("/tmp"), Path::to_path_buf)
-        });
+        .map_or_else(|| PathBuf::from("/tmp"), Path::to_path_buf);
 
     let mut cmd = Command::new(bwrap);
     cmd.args([
@@ -126,7 +129,7 @@ pub fn sandboxed_command(
         "--tmpfs",
         "/tmp",
     ]);
-    cmd.arg("--ro-bind").arg(&input_abs).arg(&input_abs);
+    cmd.arg("--ro-bind").arg(input_path).arg(input_path);
     cmd.arg("--bind").arg(&output_parent).arg(&output_parent);
     // The actual program
     cmd.arg("--");
@@ -136,16 +139,14 @@ pub fn sandboxed_command(
 
 /// Run `program` under a bubblewrap sandbox *without* any bind mounts
 /// for specific paths. Used by probe-only tools (e.g. `ffprobe -show_format`)
-/// that only need read access. The input path is bound read-only.
+/// that only need read access. The input path is bound read-only. As
+/// with `sandboxed_command`, the caller must use `input_path` verbatim
+/// in the tool's argv so the bind destination matches.
 pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Command {
     let Some(bwrap) = bwrap_path() else {
         log::debug!("bwrap not found; running {program} without sandbox.");
         return Command::new(program);
     };
-
-    let input_abs: PathBuf = input_path
-        .canonicalize()
-        .unwrap_or_else(|_| input_path.to_path_buf());
 
     let mut cmd = Command::new(bwrap);
     cmd.args([
@@ -184,7 +185,7 @@ pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Command {
         "--tmpfs",
         "/tmp",
     ]);
-    cmd.arg("--ro-bind").arg(&input_abs).arg(&input_abs);
+    cmd.arg("--ro-bind").arg(input_path).arg(input_path);
     cmd.arg("--");
     cmd.arg(program);
     cmd
