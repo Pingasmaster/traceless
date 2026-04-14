@@ -67,7 +67,17 @@ It detects your distribution, installs any missing system packages, installs Rus
 <summary><b>Arch Linux / Manjaro</b></summary>
 
 ```bash
-sudo pacman -S gtk4 libadwaita qt6-base qt6-declarative qt6-quickcontrols2 cmake ffmpeg bubblewrap
+# GTK frontend
+sudo pacman -S gtk4 libadwaita
+
+# Qt frontend
+sudo pacman -S qt6-base qt6-declarative qt6-quickcontrols2 cmake
+
+# Video support (optional)
+sudo pacman -S ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo pacman -S bubblewrap
 ```
 </details>
 
@@ -75,7 +85,17 @@ sudo pacman -S gtk4 libadwaita qt6-base qt6-declarative qt6-quickcontrols2 cmake
 <summary><b>Fedora</b></summary>
 
 ```bash
-sudo dnf install gtk4-devel libadwaita-devel qt6-qtbase-devel qt6-qtdeclarative-devel cmake ffmpeg-free bubblewrap
+# GTK frontend
+sudo dnf install gtk4-devel libadwaita-devel
+
+# Qt frontend
+sudo dnf install qt6-qtbase-devel qt6-qtdeclarative-devel cmake
+
+# Video support (optional)
+sudo dnf install ffmpeg-free  # or ffmpeg from RPM Fusion
+
+# Sandboxing (optional, recommended)
+sudo dnf install bubblewrap
 ```
 </details>
 
@@ -83,7 +103,17 @@ sudo dnf install gtk4-devel libadwaita-devel qt6-qtbase-devel qt6-qtdeclarative-
 <summary><b>Ubuntu / Debian / Linux Mint / Pop!_OS</b></summary>
 
 ```bash
-sudo apt install libgtk-4-dev libadwaita-1-dev qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls cmake ffmpeg bubblewrap
+# GTK frontend
+sudo apt install libgtk-4-dev libadwaita-1-dev
+
+# Qt frontend
+sudo apt install qt6-base-dev qt6-declarative-dev qml6-module-qtquick-controls cmake
+
+# Video support (optional)
+sudo apt install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo apt install bubblewrap
 ```
 </details>
 
@@ -91,7 +121,17 @@ sudo apt install libgtk-4-dev libadwaita-1-dev qt6-base-dev qt6-declarative-dev 
 <summary><b>openSUSE</b></summary>
 
 ```bash
-sudo zypper install gtk4-devel libadwaita-devel qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-devel cmake ffmpeg bubblewrap
+# GTK frontend
+sudo zypper install gtk4-devel libadwaita-devel
+
+# Qt frontend
+sudo zypper install qt6-base-devel qt6-declarative-devel qt6-quickcontrols2-devel cmake
+
+# Video support (optional)
+sudo zypper install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo zypper install bubblewrap
 ```
 </details>
 
@@ -99,7 +139,17 @@ sudo zypper install gtk4-devel libadwaita-devel qt6-base-devel qt6-declarative-d
 <summary><b>Void Linux</b></summary>
 
 ```bash
-sudo xbps-install gtk4-devel libadwaita-devel qt6-base-devel qt6-declarative-devel cmake ffmpeg bubblewrap
+# GTK frontend
+sudo xbps-install gtk4-devel libadwaita-devel
+
+# Qt frontend
+sudo xbps-install qt6-base-devel qt6-declarative-devel cmake
+
+# Video support (optional)
+sudo xbps-install ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo xbps-install bubblewrap
 ```
 </details>
 
@@ -107,7 +157,17 @@ sudo xbps-install gtk4-devel libadwaita-devel qt6-base-devel qt6-declarative-dev
 <summary><b>Alpine Linux</b></summary>
 
 ```bash
-sudo apk add gtk4.0-dev libadwaita-dev qt6-qtbase-dev qt6-qtdeclarative-dev cmake ffmpeg bubblewrap
+# GTK frontend
+sudo apk add gtk4.0-dev libadwaita-dev
+
+# Qt frontend
+sudo apk add qt6-qtbase-dev qt6-qtdeclarative-dev cmake
+
+# Video support (optional)
+sudo apk add ffmpeg
+
+# Sandboxing (optional, recommended)
+sudo apk add bubblewrap
 ```
 </details>
 
