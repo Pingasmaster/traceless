@@ -217,3 +217,51 @@ test = false
 doc = false
 doctest = false
 bench = false
+
+[[bin]]
+name = "handler_aiff"
+path = "fuzz_targets/handler_aiff.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_aac"
+path = "fuzz_targets/handler_aac.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_heic"
+path = "fuzz_targets/handler_heic.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_heif"
+path = "fuzz_targets/handler_heif.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_jxl"
+path = "fuzz_targets/handler_jxl.rs"
+test = false
+doc = false
+doctest = false
+bench = false
+
+[[bin]]
+name = "handler_bmp"
+path = "fuzz_targets/handler_bmp.rs"
+test = false
+doc = false
+doctest = false
+bench = false

@@ -306,44 +306,136 @@ fn local_from_close(inner: &str) -> String {
 
 // ---------- Reader ----------
 
-/// Extract author/description/keywords/etc from `<meta>` tags plus
-/// `<title>` text content. Returns the items as a flat vec.
+/// Extract every metadata-bearing element the cleaner will drop so
+/// the pre-clean view shows the user exactly what is about to vanish.
+///
+/// Surfaces:
+/// - `<meta>`: parsed `name` / `http-equiv` / `property` / `itemprop`
+///   pair with the `content` value.
+/// - `<title>`: trimmed body text.
+/// - `<link>` / `<base>`: `rel` / `href` / `src` attribute summary.
+/// - `<iframe>` / `<object>` / `<embed>`: `src` / `data` attribute
+///   summary.
+/// - `<script>` / `<style>` / `<noscript>`: either the `src` attribute
+///   (external reference) or a byte-length summary of the inline body,
+///   so the user sees that a code block exists without leaking the
+///   body contents into the UI.
+///
+/// The reader must stay aligned with `clean_html`: anything the
+/// cleaner drops should show up here, so the UI can warn the user
+/// before any bytes are rewritten.
 fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
     let tokens = tokenize(src);
     let mut items: Vec<MetadataItem> = Vec::new();
     let mut in_title = false;
     let mut title_text = String::new();
+    // Name of the rawtext drop-tag we're currently inside (script /
+    // style / noscript), so the reader can attribute the Text body to
+    // the right element when emitting the byte-length summary.
+    let mut in_rawtext_drop: Option<String> = None;
 
     for tok in &tokens {
         match tok {
-            Token::Open { local_name, raw, .. } => {
-                match local_name.as_str() {
-                    "meta" => {
-                        // Parse `name="…" content="…"` or `http-equiv`/`property`
-                        let attrs = parse_attrs(raw);
-                        let label = attrs
-                            .iter()
-                            .find_map(|(k, v)| {
-                                matches!(k.as_str(), "name" | "http-equiv" | "property" | "itemprop")
-                                    .then(|| v.clone())
-                            })
-                            .unwrap_or_else(|| "(meta)".to_string());
-                        let value = attrs
-                            .iter()
-                            .find_map(|(k, v)| (k == "content").then(|| v.clone()))
-                            .unwrap_or_default();
-                        items.push(MetadataItem {
-                            key: label,
-                            value,
-                        });
-                    }
-                    "title" => {
-                        in_title = true;
-                        title_text.clear();
-                    }
-                    _ => {}
+            Token::Open {
+                local_name,
+                raw,
+                self_closing,
+            } => match local_name.as_str() {
+                "meta" => {
+                    let attrs = parse_attrs(raw);
+                    let label = attrs
+                        .iter()
+                        .find_map(|(k, v)| {
+                            matches!(
+                                k.as_str(),
+                                "name" | "http-equiv" | "property" | "itemprop"
+                            )
+                            .then(|| v.clone())
+                        })
+                        .unwrap_or_else(|| "(meta)".to_string());
+                    let value = attrs
+                        .iter()
+                        .find_map(|(k, v)| (k == "content").then(|| v.clone()))
+                        .unwrap_or_default();
+                    items.push(MetadataItem { key: label, value });
                 }
-            }
+                "title" => {
+                    in_title = true;
+                    title_text.clear();
+                }
+                "link" => {
+                    let attrs = parse_attrs(raw);
+                    let rel = find_attr(&attrs, "rel");
+                    let href = find_attr(&attrs, "href");
+                    let mut value = String::new();
+                    if let Some(rel) = rel {
+                        value.push_str("rel=");
+                        value.push_str(&rel);
+                    }
+                    if let Some(href) = href {
+                        if !value.is_empty() {
+                            value.push(' ');
+                        }
+                        value.push_str("href=");
+                        value.push_str(&href);
+                    }
+                    items.push(MetadataItem {
+                        key: "<link>".to_string(),
+                        value,
+                    });
+                }
+                "base" => {
+                    let attrs = parse_attrs(raw);
+                    let href = find_attr(&attrs, "href").unwrap_or_default();
+                    items.push(MetadataItem {
+                        key: "<base>".to_string(),
+                        value: format!("href={href}"),
+                    });
+                }
+                "iframe" => {
+                    let attrs = parse_attrs(raw);
+                    let src_attr = find_attr(&attrs, "src").unwrap_or_default();
+                    items.push(MetadataItem {
+                        key: "<iframe>".to_string(),
+                        value: format!("src={src_attr}"),
+                    });
+                }
+                "object" => {
+                    let attrs = parse_attrs(raw);
+                    let data = find_attr(&attrs, "data").unwrap_or_default();
+                    items.push(MetadataItem {
+                        key: "<object>".to_string(),
+                        value: format!("data={data}"),
+                    });
+                }
+                "embed" => {
+                    let attrs = parse_attrs(raw);
+                    let src_attr = find_attr(&attrs, "src").unwrap_or_default();
+                    items.push(MetadataItem {
+                        key: "<embed>".to_string(),
+                        value: format!("src={src_attr}"),
+                    });
+                }
+                name @ ("script" | "style" | "noscript") => {
+                    let attrs = parse_attrs(raw);
+                    if let Some(src_attr) = find_attr(&attrs, "src") {
+                        items.push(MetadataItem {
+                            key: format!("<{name}>"),
+                            value: format!("src={src_attr}"),
+                        });
+                    } else if !self_closing {
+                        // Placeholder entry; replaced with the real
+                        // byte-length summary once the body Text token
+                        // is consumed below.
+                        items.push(MetadataItem {
+                            key: format!("<{name}>"),
+                            value: "inline (0 bytes)".to_string(),
+                        });
+                        in_rawtext_drop = Some(name.to_string());
+                    }
+                }
+                _ => {}
+            },
             Token::Close { local_name, .. } => {
                 if local_name == "title" && in_title {
                     in_title = false;
@@ -356,10 +448,27 @@ fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
                     }
                     title_text.clear();
                 }
+                if let Some(open) = in_rawtext_drop.as_ref()
+                    && local_name == open
+                {
+                    in_rawtext_drop = None;
+                }
             }
             Token::Text(t) => {
                 if in_title {
                     title_text.push_str(t);
+                }
+                if let Some(open) = in_rawtext_drop.as_ref() {
+                    // Replace the placeholder entry we just pushed
+                    // with a real byte-length summary. The placeholder
+                    // is always the last item since we push it on the
+                    // open token and nothing else inserts between the
+                    // open and the rawtext body.
+                    if let Some(last) = items.last_mut()
+                        && last.key == format!("<{open}>")
+                    {
+                        last.value = format!("inline ({} bytes)", t.len());
+                    }
                 }
             }
             _ => {}
@@ -367,6 +476,12 @@ fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
     }
 
     items
+}
+
+fn find_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
+    attrs
+        .iter()
+        .find_map(|(k, v)| (k == name).then(|| v.clone()))
 }
 
 fn parse_attrs(tag_raw: &str) -> Vec<(String, String)> {
@@ -801,6 +916,86 @@ mod tests {
         h.clean_metadata(&src, &dst).unwrap();
         let out = fs::read_to_string(&dst).unwrap();
         assert_eq!(out, r#"<html><body><div class="a"><span>inner</span></div></body></html>"#);
+    }
+
+    #[test]
+    fn html_reader_surfaces_every_blocklist_element() {
+        // The reader must mirror the cleaner: any element the cleaner
+        // drops should appear in the pre-clean metadata view so the
+        // UI can warn the user before any bytes are rewritten.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("page.html");
+        fs::write(
+            &src,
+            r#"<!DOCTYPE html>
+<html><head>
+<meta name="author" content="jvoisin">
+<link rel="canonical" href="https://example.invalid/canonical">
+<link rel="author" href="https://example.invalid/me">
+<base href="https://example.invalid/">
+<script src="external.js"></script>
+<script>var inlineCode = 42;</script>
+<style>.x { color: red; }</style>
+<noscript>no js fallback</noscript>
+</head><body>
+<iframe src="https://tracker.invalid/"><p>fallback</p></iframe>
+<object data="leak.swf"></object>
+<embed src="leak.mov"/>
+<p>visible body</p>
+</body></html>"#,
+        )
+        .unwrap();
+        let h = HtmlHandler;
+        let meta = h.read_metadata(&src).unwrap();
+        let dump = format!("{meta:?}");
+
+        // Every blocklist element must be surfaced.
+        assert!(dump.contains("jvoisin"), "meta content missing: {dump}");
+        assert!(
+            dump.contains("rel=canonical"),
+            "link rel=canonical missing: {dump}"
+        );
+        assert!(
+            dump.contains("example.invalid/canonical"),
+            "link href missing: {dump}"
+        );
+        assert!(
+            dump.contains("rel=author"),
+            "link rel=author missing: {dump}"
+        );
+        assert!(
+            dump.contains("<base>"),
+            "base entry missing: {dump}"
+        );
+        assert!(
+            dump.contains("<script>")
+                && dump.contains("external.js"),
+            "script src missing: {dump}"
+        );
+        assert!(
+            dump.contains("inline") && dump.contains("bytes"),
+            "inline script byte-length summary missing: {dump}"
+        );
+        assert!(
+            dump.contains("<style>"),
+            "style entry missing: {dump}"
+        );
+        assert!(
+            dump.contains("<noscript>"),
+            "noscript entry missing: {dump}"
+        );
+        assert!(
+            dump.contains("<iframe>") && dump.contains("tracker.invalid"),
+            "iframe src missing: {dump}"
+        );
+        assert!(
+            dump.contains("<object>") && dump.contains("leak.swf"),
+            "object data missing: {dump}"
+        );
+        assert!(
+            dump.contains("<embed>") && dump.contains("leak.mov"),
+            "embed src missing: {dump}"
+        );
     }
 
     #[test]

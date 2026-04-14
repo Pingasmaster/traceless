@@ -457,6 +457,95 @@ fn docx_round_trip_strips_every_fingerprint() {
 }
 
 #[test]
+fn docx_embedded_tiff_has_exif_stripped() {
+    // Regression guard for finding #2 of the 10-agent audit: before
+    // `is_cleanable_media` learned TIFF, an embedded `word/media/*.tiff`
+    // was copied through verbatim along with its EXIF. Now the entry
+    // rides the temp-file handler round-trip and goes through
+    // `little_exif::file_clear_metadata` via the ImageHandler.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available for TIFF synthesis");
+        return;
+    }
+
+    use std::io::Write as _;
+    use zip::write::SimpleFileOptions;
+    use zip::ZipWriter;
+
+    let dir = tempfile::tempdir().unwrap();
+    let inner_tiff = dir.path().join("inner.tiff");
+    if make_dirty_tiff(&inner_tiff).is_err() {
+        eprintln!("[SKIP] ffmpeg failed to synthesize TIFF");
+        return;
+    }
+    let tiff_bytes = fs::read(&inner_tiff).unwrap();
+
+    // Pre-condition: the synthesized TIFF must actually carry the
+    // injected EXIF, otherwise the post-clean assertion is vacuous.
+    assert!(
+        tiff_bytes
+            .windows(b"mat2-parity-artist".len())
+            .any(|w| w == b"mat2-parity-artist"),
+        "synthesized TIFF fixture must carry the Artist EXIF tag"
+    );
+
+    let src = dir.path().join("dirty.docx");
+    let dst = dir.path().join("cleaned.docx");
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let options = SimpleFileOptions::default();
+        writer.start_file("[Content_Types].xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><Types xmlns=\"http://schemas.openxmlformats.org/package/2006/content-types\"/>")
+            .unwrap();
+        writer.start_file("word/document.xml", options).unwrap();
+        writer
+            .write_all(b"<?xml version=\"1.0\" encoding=\"UTF-8\"?><w:document xmlns:w=\"http://schemas.openxmlformats.org/wordprocessingml/2006/main\"><w:body/></w:document>")
+            .unwrap();
+        writer.start_file("word/media/image1.tiff", options).unwrap();
+        writer.write_all(&tiff_bytes).unwrap();
+        writer.finish().unwrap();
+    }
+
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    let cleaned_tiff = read_zip_entry(&dst, "word/media/image1.tiff")
+        .expect("cleaned TIFF member must still be present");
+
+    // Ground-truth byte scan: if either injected EXIF string survives,
+    // the embedded-image round-trip let a leak through.
+    assert!(
+        !cleaned_tiff
+            .windows(b"mat2-parity-artist".len())
+            .any(|w| w == b"mat2-parity-artist"),
+        "embedded TIFF Artist EXIF survived DOCX clean"
+    );
+    assert!(
+        !cleaned_tiff
+            .windows(b"secret-camera".len())
+            .any(|w| w == b"secret-camera"),
+        "embedded TIFF Software EXIF survived DOCX clean"
+    );
+    // Cross-check via the reader: little_exif must report no tags.
+    let probe = dir.path().join("probe.tiff");
+    fs::write(&probe, &cleaned_tiff).unwrap();
+    let reader_view = get_handler_for_mime("image/tiff")
+        .unwrap()
+        .read_metadata(&probe)
+        .unwrap_or_default();
+    let dump = format!("{reader_view:?}");
+    assert!(
+        !dump.contains("mat2-parity-artist") && !dump.contains("secret-camera"),
+        "reader surfaces residual TIFF metadata after clean: {dump}"
+    );
+}
+
+#[test]
 fn docx_cleaning_is_byte_deterministic() {
     let dir = tempfile::tempdir().unwrap();
     let dirty = dir.path().join("dirty.docx");
