@@ -284,16 +284,41 @@ fn clean_single_file(
         return;
     };
 
-    // Write cleaned file to a temp path, then atomically replace the original.
-    // Keep the original extension on the temp file: several backends
-    // (little_exif, lofty, ffmpeg) dispatch on extension, so overwriting it
-    // here would make them refuse the file.
-    let temp_path = make_temp_path(path);
+    // Write the cleaned file into a *private* tempdir sitting alongside
+    // the original, then atomically rename it into place. The private
+    // tempdir (`tempfile::Builder::tempdir_in`, mkdir'd with 0700) is
+    // what prevents a local attacker from pre-creating a symlink at a
+    // predictable path and redirecting the handler's writes: the old
+    // scheme wrote to `.{stem}.traceless-tmp.{ext}` next to the original,
+    // which any user with write access to the parent directory could
+    // squat on before the clean started. Keeping the original filename
+    // (inside the private dir) preserves the extension for
+    // `little_exif` / `lofty` / `ffmpeg`, all of which dispatch on it.
+    let parent = path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."));
+    let tempdir = match tempfile::Builder::new()
+        .prefix(".traceless-")
+        .tempdir_in(parent)
+    {
+        Ok(d) => d,
+        Err(e) => {
+            let _ = tx.send_blocking(FileStoreEvent::FileError {
+                id,
+                state: FileState::ErrorWhileRemovingMetadata,
+                message: format!("Failed to create temp directory: {e}"),
+            });
+            return;
+        }
+    };
+    let file_name = path.file_name().unwrap_or_default();
+    let temp_path = tempdir.path().join(file_name);
 
     match handler.clean_metadata(path, &temp_path) {
         Ok(()) => {
             if let Err(e) = fs::rename(&temp_path, path) {
-                let _ = fs::remove_file(&temp_path);
+                // tempdir Drop removes the temp file + directory.
                 let _ = tx.send_blocking(FileStoreEvent::FileError {
                     id,
                     state: FileState::ErrorWhileRemovingMetadata,
@@ -308,7 +333,7 @@ fn clean_single_file(
             });
         }
         Err(e) => {
-            let _ = fs::remove_file(&temp_path);
+            // tempdir Drop removes the temp file + directory.
             let _ = tx.send_blocking(FileStoreEvent::FileError {
                 id,
                 state: FileState::ErrorWhileRemovingMetadata,
@@ -316,26 +341,6 @@ fn clean_single_file(
             });
         }
     }
-}
-
-/// Build a sibling temp-file path that keeps the original extension so
-/// extension-sniffing libraries (`little_exif`, `lofty`, `ffmpeg`) still
-/// recognise the format. `photo.jpg` → `.photo.traceless-tmp.jpg`.
-fn make_temp_path(path: &Path) -> PathBuf {
-    let stem = path
-        .file_stem()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let ext = path
-        .extension()
-        .map(|e| e.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let name = if ext.is_empty() {
-        format!(".{stem}.traceless-tmp")
-    } else {
-        format!(".{stem}.traceless-tmp.{ext}")
-    };
-    path.with_file_name(name)
 }
 
 fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
@@ -364,28 +369,61 @@ fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
 
 #[cfg(test)]
 mod tests {
-    use super::make_temp_path;
-    use std::path::Path;
+    use super::{clean_single_file, FileId, FileStoreEvent};
+    use async_channel::unbounded;
+    use std::os::unix::fs::symlink;
 
     #[test]
-    fn make_temp_path_preserves_extension() {
-        let p = make_temp_path(Path::new("/tmp/photo.jpg"));
-        assert_eq!(p, Path::new("/tmp/.photo.traceless-tmp.jpg"));
-        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("jpg"));
-    }
+    fn clean_single_file_ignores_preexisting_predictable_tmp_symlink() {
+        // Regression: the cleaner used to write its intermediate file
+        // to `.{stem}.traceless-tmp.{ext}` alongside the original. A
+        // local attacker who could write the same directory could
+        // pre-create that exact path as a symlink pointing at a
+        // sensitive file, and the handler's `fs::write` (O_CREAT |
+        // O_TRUNC, follows symlinks) would then overwrite the symlink
+        // target. The fix is to write inside a private mkdir'd-0700
+        // tempdir whose name is not predictable, so no pre-created
+        // squat at the old path can ever be opened.
 
-    #[test]
-    fn make_temp_path_no_extension() {
-        let p = make_temp_path(Path::new("/tmp/README"));
-        assert_eq!(p, Path::new("/tmp/.README.traceless-tmp"));
-    }
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("note.txt");
+        std::fs::write(&src, b"hello world\n").unwrap();
 
-    #[test]
-    fn make_temp_path_dotted_stem() {
-        let p = make_temp_path(Path::new("/srv/archive.tar.gz"));
-        // `with_file_name` only looks at the last component, and `file_stem`
-        // strips the final dot-component, so the helper keeps the final `.gz`.
-        assert_eq!(p, Path::new("/srv/.archive.tar.traceless-tmp.gz"));
-        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("gz"));
+        let honeypot = dir.path().join("honeypot.txt");
+        std::fs::write(&honeypot, b"do-not-touch").unwrap();
+        let old_predictable = dir.path().join(".note.traceless-tmp.txt");
+        symlink(&honeypot, &old_predictable).unwrap();
+
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        clean_single_file(FileId(1), &src, &tx);
+        drop(tx);
+        while rx.try_recv().is_ok() {}
+
+        // 1. The honeypot the old scheme would have clobbered is intact.
+        let honeypot_content = std::fs::read(&honeypot).unwrap();
+        assert_eq!(honeypot_content, b"do-not-touch");
+
+        // 2. The symlink we pre-created also still exists unchanged.
+        assert!(old_predictable.is_symlink());
+
+        // 3. The original file round-tripped through the harmless
+        //    text/plain handler (a byte-for-byte copy) and is still there.
+        assert!(src.is_file());
+        assert_eq!(std::fs::read(&src).unwrap(), b"hello world\n");
+
+        // 4. No stray `.traceless-*` tempdir left behind.
+        let leftovers: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .filter_map(Result::ok)
+            .map(|e| e.file_name())
+            .filter(|n| {
+                let s = n.to_string_lossy();
+                s.starts_with(".traceless-")
+            })
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "expected no leftover .traceless-* entries, found {leftovers:?}"
+        );
     }
 }

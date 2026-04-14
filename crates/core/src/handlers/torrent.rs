@@ -151,6 +151,7 @@ pub enum BencodeError {
     InvalidString,
     InvalidDictKey,
     TrailingGarbage,
+    DepthExceeded,
 }
 
 impl std::fmt::Display for BencodeError {
@@ -162,21 +163,33 @@ impl std::fmt::Display for BencodeError {
             Self::InvalidString => write!(f, "invalid string"),
             Self::InvalidDictKey => write!(f, "invalid dictionary key"),
             Self::TrailingGarbage => write!(f, "trailing garbage"),
+            Self::DepthExceeded => write!(f, "nesting depth exceeded"),
         }
     }
 }
+
+/// Maximum allowed nesting depth for bencode lists/dicts. An adversarial
+/// `llll...` or `dddd...` input with thousands of levels would otherwise
+/// recurse deep enough to blow the worker thread's stack; 256 is well
+/// above anything a legal torrent file needs and well below the point
+/// where a default 2 MiB thread stack runs out.
+const MAX_DEPTH: usize = 256;
 
 /// Decode a single bencode value from the start of `input`. Returns
 /// `(value, remainder)` — if `remainder` isn't empty the caller can
 /// decide whether to reject.
 pub fn decode(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
+    decode_at(input, 0)
+}
+
+fn decode_at(input: &[u8], depth: usize) -> Result<(BencodeValue, &[u8]), BencodeError> {
     if input.is_empty() {
         return Err(BencodeError::Eof);
     }
     match input[0] {
         b'i' => decode_int(input),
-        b'l' => decode_list(input),
-        b'd' => decode_dict(input),
+        b'l' => decode_list(input, depth),
+        b'd' => decode_dict(input, depth),
         b'0'..=b'9' => decode_bytes(input),
         _ => Err(BencodeError::BadPrefix),
     }
@@ -233,12 +246,15 @@ fn decode_bytes(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
     Ok((BencodeValue::Bytes(bytes), &input[end..]))
 }
 
-fn decode_list(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
+fn decode_list(input: &[u8], depth: usize) -> Result<(BencodeValue, &[u8]), BencodeError> {
+    if depth >= MAX_DEPTH {
+        return Err(BencodeError::DepthExceeded);
+    }
     debug_assert_eq!(input[0], b'l');
     let mut rest = &input[1..];
     let mut out = Vec::new();
     while !rest.is_empty() && rest[0] != b'e' {
-        let (v, r) = decode(rest)?;
+        let (v, r) = decode_at(rest, depth + 1)?;
         out.push(v);
         rest = r;
     }
@@ -248,7 +264,10 @@ fn decode_list(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
     Ok((BencodeValue::List(out), &rest[1..]))
 }
 
-fn decode_dict(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
+fn decode_dict(input: &[u8], depth: usize) -> Result<(BencodeValue, &[u8]), BencodeError> {
+    if depth >= MAX_DEPTH {
+        return Err(BencodeError::DepthExceeded);
+    }
     debug_assert_eq!(input[0], b'd');
     let mut rest = &input[1..];
     let mut map: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
@@ -257,7 +276,7 @@ fn decode_dict(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
         let BencodeValue::Bytes(key) = k_val else {
             return Err(BencodeError::InvalidDictKey);
         };
-        let (v, r2) = decode(r1)?;
+        let (v, r2) = decode_at(r1, depth + 1)?;
         map.insert(key, v);
         rest = r2;
     }
@@ -406,6 +425,51 @@ mod tests {
         let mut input = max.into_bytes();
         input.extend_from_slice(b":x");
         assert!(decode(&input).is_err());
+    }
+
+    #[test]
+    fn bencode_rejects_deeply_nested_lists() {
+        // Regression: a bencoded `l`*N + `i0e` + `e`*N recurses once
+        // per nesting level, which used to blow the worker thread's
+        // stack for large N. The decoder now rejects anything beyond
+        // MAX_DEPTH with BencodeError::DepthExceeded.
+        let n = MAX_DEPTH + 50;
+        let mut input = vec![b'l'; n];
+        input.extend_from_slice(b"i0e");
+        input.extend(std::iter::repeat_n(b'e', n));
+        match decode(&input) {
+            Err(BencodeError::DepthExceeded) => {}
+            other => panic!("expected DepthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bencode_rejects_deeply_nested_dicts() {
+        // Same regression via `d1:xd1:x...d1:x0:e...ee` - dict values
+        // are bencoded recursively through the same dispatch.
+        let n = MAX_DEPTH + 50;
+        let mut input = Vec::new();
+        for _ in 0..n {
+            input.extend_from_slice(b"d1:x");
+        }
+        input.extend_from_slice(b"0:");
+        input.extend(std::iter::repeat_n(b'e', n));
+        match decode(&input) {
+            Err(BencodeError::DepthExceeded) => {}
+            other => panic!("expected DepthExceeded, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bencode_accepts_just_under_depth_limit() {
+        // Sanity: a nesting depth of MAX_DEPTH - 1 must still decode.
+        // Pinning this guarantees we don't silently tighten the cap
+        // and break legitimate inputs.
+        let n = MAX_DEPTH - 1;
+        let mut input = vec![b'l'; n];
+        input.extend_from_slice(b"i0e");
+        input.extend(std::iter::repeat_n(b'e', n));
+        decode(&input).expect("nesting just under MAX_DEPTH must decode");
     }
 
     #[test]
