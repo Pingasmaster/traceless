@@ -1,6 +1,7 @@
 use std::path::Path;
 
 use lopdf::{Document, Object, ObjectId};
+use rand::Rng;
 
 use crate::error::CoreError;
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
@@ -250,12 +251,27 @@ impl FormatHandler for PdfHandler {
         }
         doc.trailer.remove(b"Info");
 
-        // --- 2. Trailer /ID is a per-document fingerprint. Null it. --------
-        // Some viewers require /ID to be present, so we replace it with a
-        // deterministic pair of zero-byte strings rather than removing it.
-        let zero = Object::string_literal("");
-        doc.trailer
-            .set("ID", Object::Array(vec![zero.clone(), zero]));
+        // --- 2. Trailer /ID is a per-document fingerprint. Replace it. -----
+        // ISO 32000-1 §14.4 defines /ID as a two-element array of byte
+        // strings. Some viewers require /ID to be present, so we write a
+        // fresh pair of 16-byte random strings rather than removing it
+        // or leaving zero-byte literals. Randomizing instead of zeroing
+        // matches mat2's behaviour and prevents cleaned PDFs from
+        // sharing a trivially-detectable "`/ID []`" marker across every
+        // file cleaned by traceless, which would otherwise enable batch
+        // linking attacks against a corpus of cleaned files.
+        let mut rng = rand::rng();
+        let mut id_a = [0u8; 16];
+        let mut id_b = [0u8; 16];
+        rng.fill_bytes(&mut id_a);
+        rng.fill_bytes(&mut id_b);
+        doc.trailer.set(
+            "ID",
+            Object::Array(vec![
+                Object::String(id_a.to_vec(), lopdf::StringFormat::Hexadecimal),
+                Object::String(id_b.to_vec(), lopdf::StringFormat::Hexadecimal),
+            ]),
+        );
 
         // --- 3. Walk the catalog and remove every metadata-bearing key. ----
         // First collect the referenced object ids so we can delete those
@@ -525,30 +541,60 @@ mod tests {
     }
 
     #[test]
-    fn clean_zeros_trailer_id() {
+    fn clean_randomizes_trailer_id() {
+        // Regression for MEDIUM-1 in the audit: the trailer /ID used to
+        // be set to a deterministic pair of zero-byte string literals.
+        // That wiped the original fingerprint (good) but made every
+        // cleaned PDF byte-identical on /ID, which is itself a "cleaned
+        // by traceless" marker and weaker than mat2's randomized /ID
+        // against cross-file batch linking. The cleaner now writes two
+        // fresh 16-byte random strings on every run.
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("in.pdf");
-        let dst = dir.path().join("out.pdf");
+        let dst_a = dir.path().join("out_a.pdf");
+        let dst_b = dir.path().join("out_b.pdf");
         make_pdf_with_catalog_keys(&src, &[]);
 
-        PdfHandler.clean_metadata(&src, &dst).unwrap();
-        let reloaded = reload_catalog(&dst);
-        let id = reloaded
-            .trailer
-            .get(b"ID")
-            .expect("trailer /ID must still exist (required by some readers)");
-        let arr = id.as_array().unwrap();
-        assert_eq!(arr.len(), 2);
-        for entry in arr {
-            if let Object::String(bytes, _) = entry {
-                assert!(
-                    bytes.is_empty(),
-                    "ID component must be zero-length, got {bytes:?}"
-                );
-            } else {
-                panic!("trailer /ID entry must be a string, got {entry:?}");
-            }
-        }
+        PdfHandler.clean_metadata(&src, &dst_a).unwrap();
+        PdfHandler.clean_metadata(&src, &dst_b).unwrap();
+
+        let id_bytes = |path: &std::path::Path| -> Vec<Vec<u8>> {
+            let reloaded = reload_catalog(path);
+            let id = reloaded
+                .trailer
+                .get(b"ID")
+                .expect("trailer /ID must still exist (required by some readers)");
+            let arr = id.as_array().unwrap();
+            assert_eq!(arr.len(), 2);
+            arr.iter()
+                .map(|entry| match entry {
+                    Object::String(bytes, _) => bytes.clone(),
+                    other => panic!("/ID entry must be a string, got {other:?}"),
+                })
+                .collect()
+        };
+
+        let a = id_bytes(&dst_a);
+        let b = id_bytes(&dst_b);
+
+        // Original fingerprints are gone.
+        assert!(
+            !a[0].windows(13).any(|w| w == b"fingerprint-a"),
+            "original ID leaked into cleaned /ID[0]"
+        );
+        assert!(
+            !a[1].windows(13).any(|w| w == b"fingerprint-b"),
+            "original ID leaked into cleaned /ID[1]"
+        );
+        // Non-empty and 16 bytes each.
+        assert_eq!(a[0].len(), 16, "/ID[0] must be 16 random bytes");
+        assert_eq!(a[1].len(), 16, "/ID[1] must be 16 random bytes");
+        // Two independent clean runs produce different /ID values.
+        // (Birthday collision on 16 random bytes is ~1 in 2^128.)
+        assert_ne!(a[0], b[0], "/ID[0] must differ between clean runs");
+        assert_ne!(a[1], b[1], "/ID[1] must differ between clean runs");
+        // The two halves are themselves independent.
+        assert_ne!(a[0], a[1], "/ID[0] and /ID[1] must be independent");
     }
 
     /// Parameterised stripping test: for each catalog key we claim to

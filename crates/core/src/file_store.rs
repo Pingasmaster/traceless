@@ -415,12 +415,12 @@ fn clean_single_file(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
 
     match handler.clean_metadata(path, &temp_path) {
         Ok(()) => {
-            if let Err(e) = fs::rename(&temp_path, path) {
+            if let Err(e) = finalize_cleaned_file(path, &temp_path) {
                 // tempdir Drop removes the temp file + directory.
                 let _ = tx.send_blocking(FileStoreEvent::FileError {
                     id,
                     state: FileState::ErrorWhileRemovingMetadata,
-                    message: format!("Failed to replace original file: {e}"),
+                    message: e,
                 });
                 return;
             }
@@ -439,6 +439,52 @@ fn clean_single_file(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
             });
         }
     }
+}
+
+/// Atomically move a freshly-cleaned temp file into the original's
+/// place, first copying the original's Unix mode bits onto the temp
+/// and fsync'ing the temp to durable storage.
+///
+/// Mode preservation: the handler writes the cleaned output via
+/// `File::create` / `fs::write`, which applies `0o666 & !umask`
+/// (typically `0o644`). If the original file was `0o600` (e.g. a
+/// private keyring export or a restricted-share-directory PDF) the
+/// rename would otherwise publish the cleaned contents at `0o644`,
+/// making the metadata-free bytes world-readable. We read the
+/// original's mode and re-apply it before the rename.
+///
+/// fsync: on power loss between the handler's last write and the
+/// filesystem journal commit, a bare `rename(tmp, dst)` can leave the
+/// user with a renamed-but-zero-tailed file where the original used
+/// to be. A `sync_all` on the temp file before the rename makes that
+/// window impossible on any POSIX-compliant filesystem.
+#[cfg(unix)]
+fn finalize_cleaned_file(path: &Path, temp_path: &Path) -> Result<(), String> {
+    use std::os::unix::fs::PermissionsExt;
+    if let Ok(orig_meta) = fs::metadata(path) {
+        let mode = orig_meta.permissions().mode();
+        let new_perms = std::fs::Permissions::from_mode(mode);
+        fs::set_permissions(temp_path, new_perms)
+            .map_err(|e| format!("Failed to preserve file mode bits: {e}"))?;
+    }
+    let temp_file = fs::File::open(temp_path)
+        .map_err(|e| format!("Failed to reopen temp file for fsync: {e}"))?;
+    temp_file
+        .sync_all()
+        .map_err(|e| format!("Failed to sync cleaned file: {e}"))?;
+    drop(temp_file);
+    fs::rename(temp_path, path).map_err(|e| format!("Failed to replace original file: {e}"))
+}
+
+#[cfg(not(unix))]
+fn finalize_cleaned_file(path: &Path, temp_path: &Path) -> Result<(), String> {
+    let temp_file = fs::File::open(temp_path)
+        .map_err(|e| format!("Failed to reopen temp file for fsync: {e}"))?;
+    temp_file
+        .sync_all()
+        .map_err(|e| format!("Failed to sync cleaned file: {e}"))?;
+    drop(temp_file);
+    fs::rename(temp_path, path).map_err(|e| format!("Failed to replace original file: {e}"))
 }
 
 fn collect_files_from_dir(dir: &Path, recursive: bool) -> Vec<PathBuf> {
@@ -527,6 +573,38 @@ mod tests {
         assert!(
             leftovers.is_empty(),
             "expected no leftover .traceless-* entries, found {leftovers:?}"
+        );
+    }
+
+    #[test]
+    fn clean_single_file_preserves_restrictive_mode_bits() {
+        // Regression: before this fix the cleaner wrote its output via
+        // `File::create` / `fs::write` (both apply `0o666 & !umask` -
+        // typically `0o644`), then atomically renamed the temp file into
+        // place. A user cleaning a `0o600` private file (e.g. an
+        // exported password list or a diary PDF stored in a
+        // group-readable parent directory) would find the cleaned
+        // output published at `0o644`, quietly world-readable to any
+        // local user. The fix copies the original's Unix mode onto the
+        // temp file before the rename.
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join("secret.txt");
+        std::fs::write(&src, b"top-secret bytes\n").unwrap();
+        std::fs::set_permissions(&src, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        let (tx, rx) = unbounded::<FileStoreEvent>();
+        clean_single_file(FileId(1), &src, &tx);
+        drop(tx);
+        while rx.try_recv().is_ok() {}
+
+        assert!(src.is_file(), "cleaned file should still exist");
+        let mode = std::fs::metadata(&src).unwrap().permissions().mode();
+        assert_eq!(
+            mode & 0o777,
+            0o600,
+            "cleaned file lost its restrictive mode: {mode:o}"
         );
     }
 

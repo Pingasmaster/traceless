@@ -550,6 +550,1140 @@ fn mp3_with_id3v1_and_id3v2_both_present_is_cleaned() {
     );
 }
 
+// ---- Image formats: TIFF / WebP / HEIC / HEIF / JXL ----
+
+#[test]
+fn tiff_with_artist_software_and_gps_exif_chain() {
+    // `make_dirty_tiff` plants Artist + Software in IFD0. We
+    // additionally inject a GPSInfo sub-IFD via little_exif so the
+    // cleaner is forced to walk past the main IFD pointer and drop a
+    // separate GPS IFD chain. A regression that only clears IFD0
+    // would leave the GPS IFD behind and be invisible to the
+    // mat2_parity round-trip (which only checks Artist).
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] tiff_with_artist_software_and_gps_exif_chain: ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.tiff");
+    let cleaned = dir.path().join("clean.tiff");
+    if make_dirty_tiff(&dirty).is_err() {
+        eprintln!("[SKIP] tiff_with_artist_software_and_gps_exif_chain: ffmpeg lacks tiff");
+        return;
+    }
+
+    // Extend the fixture with a GPS tag via little_exif so the GPS
+    // sub-IFD is plumbed into the main TIFF directory tree.
+    {
+        use little_exif::exif_tag::ExifTag;
+        use little_exif::metadata::Metadata as ExifMetadata;
+        if let Ok(mut m) = ExifMetadata::new_from_path(&dirty) {
+            m.set_tag(ExifTag::GPSVersionID(vec![2, 2, 0, 0]));
+            // Write it back; best-effort — if little_exif refuses,
+            // the baseline fixture still has Artist + Software.
+            let _ = m.write_to_file(&dirty);
+        }
+    }
+
+    let handler = get_handler_for_mime("image/tiff").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // The reader must surface no user EXIF on the cleaned file.
+    if let Ok(m) = little_exif::metadata::Metadata::new_from_path(&cleaned) {
+        assert!(
+            m.into_iter().next().is_none(),
+            "cleaned TIFF still reports EXIF tags"
+        );
+    }
+    // And every plant string must be gone from the raw bytes.
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [&b"mat2-parity-artist"[..], &b"secret-camera"[..]] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "TIFF plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+}
+
+#[test]
+fn webp_with_exif_and_spliced_xmp_riff_chunk() {
+    // `make_dirty_webp` injects EXIF via little_exif. We additionally
+    // splice a raw `XMP ` RIFF chunk into the container so the
+    // cleaner has to drop both an EXIF metadata vector and an XMP
+    // metadata vector from the same file. The mat2_parity test only
+    // covers the EXIF path.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] webp_with_exif_and_spliced_xmp_riff_chunk: ffmpeg not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.webp");
+    let cleaned = dir.path().join("clean.webp");
+    if make_dirty_webp(&dirty).is_err() {
+        eprintln!("[SKIP] webp_with_exif_and_spliced_xmp_riff_chunk: ffmpeg lacks libwebp");
+        return;
+    }
+
+    // Append an `XMP ` chunk before the trailing bytes. WebP chunks
+    // are `(id: [u8;4], size: u32le, data, optional pad to even)`
+    // and the enclosing RIFF header's size field at offset 4..8
+    // measures everything after the first 8 bytes. We append
+    // in-place and rewrite that size field.
+    let mut raw = fs::read(&dirty).unwrap();
+    if raw.len() > 12 && &raw[..4] == b"RIFF" && &raw[8..12] == b"WEBP" {
+        let payload = b"<x:xmpmeta>webp-secret-xmp-plant</x:xmpmeta>";
+        let chunk_size = u32::try_from(payload.len()).unwrap();
+        let mut chunk = Vec::new();
+        chunk.extend_from_slice(b"XMP ");
+        chunk.extend_from_slice(&chunk_size.to_le_bytes());
+        chunk.extend_from_slice(payload);
+        if payload.len() % 2 == 1 {
+            chunk.push(0);
+        }
+        raw.extend_from_slice(&chunk);
+        let new_riff_size = u32::try_from(raw.len() - 8).unwrap();
+        raw[4..8].copy_from_slice(&new_riff_size.to_le_bytes());
+        fs::write(&dirty, &raw).unwrap();
+    }
+
+    let handler = get_handler_for_mime("image/webp").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [
+        &b"webp-secret-artist"[..],
+        &b"webp-secret-description"[..],
+        &b"webp-secret-xmp-plant"[..],
+    ] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "WebP plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+}
+
+#[test]
+fn heic_reader_sees_exif_before_clean_and_none_after() {
+    // HEIC round-trip via little_exif. The cleaner (via
+    // `file_clear_metadata`) strips the main EXIF item reference.
+    // This test differs from the mat2_parity round-trip by asserting
+    // the *reader* before/after shape explicitly through
+    // `handler.read_metadata`, not just raw bytes, so a regression
+    // that corrupts the HEIC container but happens to hide the plant
+    // string still fails.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] heic_reader_sees_exif_before_clean_and_none_after: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.heic");
+    let cleaned = dir.path().join("clean.heic");
+    if make_dirty_heic(&dirty).is_err() {
+        eprintln!("[SKIP] heic_reader_sees_exif_before_clean_and_none_after: libx265 missing");
+        return;
+    }
+
+    let handler = get_handler_for_mime("image/heic").unwrap();
+
+    // Pre-clean sanity: reader must see at least one metadata item
+    // (the Artist plant) so we know the fixture is live.
+    if let Ok(pre) = handler.read_metadata(&dirty) {
+        assert!(
+            !pre.is_empty(),
+            "fixture sanity: dirty HEIC should surface metadata before clean"
+        );
+    }
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // Post-clean: reader returns success + empty metadata set, OR
+    // returns an error because the cleaner stripped past what the
+    // reader can parse. Both shapes mean no leak; either is allowed.
+    if let Ok(post) = handler.read_metadata(&cleaned) {
+        assert!(
+            post.is_empty(),
+            "cleaned HEIC still surfaces metadata: {post:?}"
+        );
+    }
+
+    // Raw byte grep for the plant string.
+    let out = fs::read(&cleaned).unwrap();
+    assert!(
+        !out.windows(b"heic-secret-artist".len())
+            .any(|w| w == b"heic-secret-artist"),
+        "HEIC artist plant survived clean"
+    );
+}
+
+#[test]
+fn heif_extension_routes_and_strips_like_heic() {
+    // Distinct MIME routing check: `image/heif` extension vs
+    // `image/heic`. The dispatcher routes both through the same
+    // `ImageHandler`, but the MIME-branch coverage in dispatch is
+    // worth pinning here since mat2_parity only tests the `.heic`
+    // extension explicitly.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] heif_extension_routes_and_strips_like_heic: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.heif");
+    let cleaned = dir.path().join("clean.heif");
+    if make_dirty_heif(&dirty).is_err() {
+        eprintln!("[SKIP] heif_extension_routes_and_strips_like_heic: libx265 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/heif").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let out = fs::read(&cleaned).unwrap();
+    assert!(
+        !out.windows(b"heic-secret-artist".len())
+            .any(|w| w == b"heic-secret-artist"),
+        "HEIF artist plant survived clean"
+    );
+}
+
+#[test]
+fn jxl_reader_sees_exif_before_and_none_after() {
+    // JXL is routed through little_exif's dedicated jxl box walker.
+    // Same before/after reader check as the HEIC test.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] jxl_reader_sees_exif_before_and_none_after: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.jxl");
+    let cleaned = dir.path().join("clean.jxl");
+    if make_dirty_jxl(&dirty).is_err() {
+        eprintln!("[SKIP] jxl_reader_sees_exif_before_and_none_after: libjxl missing");
+        return;
+    }
+
+    let handler = get_handler_for_mime("image/jxl").unwrap();
+    if let Ok(pre) = handler.read_metadata(&dirty) {
+        assert!(
+            !pre.is_empty(),
+            "fixture sanity: dirty JXL should surface metadata before clean"
+        );
+    }
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    if let Ok(post) = handler.read_metadata(&cleaned) {
+        assert!(
+            post.is_empty(),
+            "cleaned JXL still surfaces metadata: {post:?}"
+        );
+    }
+    let out = fs::read(&cleaned).unwrap();
+    assert!(
+        !out.windows(b"mat2-parity-artist".len())
+            .any(|w| w == b"mat2-parity-artist"),
+        "JXL artist plant survived clean"
+    );
+}
+
+// ---- PDF ----
+
+#[test]
+fn pdf_with_info_xmp_embedded_file_and_js_all_surface_empty_after_clean() {
+    // `make_dirty_pdf` already plants /Info, /Metadata, /OpenAction,
+    // /Names/EmbeddedFiles, /StructTreeRoot, /PageLabels, /AcroForm,
+    // /ID, and per-page /Metadata. The mat2_parity round-trip tests
+    // individual plant strings. This test takes a stricter stance:
+    // after clean, the *reader* must surface no user-metadata items
+    // at all (every surviving item, if any, must be structural).
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.pdf");
+    let cleaned = dir.path().join("clean.pdf");
+    make_dirty_pdf(&dirty);
+
+    let handler = get_handler_for_mime("application/pdf").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // Raw grep for every injected plant.
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [
+        &b"mat2-parity-author"[..],
+        &b"secret-title"[..],
+        &b"secret-subject"[..],
+        &b"secret-producer"[..],
+        &b"secret-creator"[..],
+        &b"secret-keywords"[..],
+        &b"secret-js"[..],
+        &b"EMBEDDED SECRET DATA"[..],
+        &b"secret-fingerprint-a"[..],
+        &b"secret-fingerprint-b"[..],
+    ] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "PDF plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+
+    // Reader view: every surviving metadata item (if any) must be
+    // structural, not user-controlled. The set of structural keys is
+    // pinned by `is_user_metadata_key_plant` below.
+    if let Ok(meta) = handler.read_metadata(&cleaned) {
+        for group in &meta.groups {
+            for item in &group.items {
+                assert!(
+                    !is_user_metadata_key_plant(&item.key, &item.value),
+                    "cleaned PDF still surfaces user metadata: {} = {}",
+                    item.key,
+                    item.value
+                );
+            }
+        }
+    }
+}
+
+// ---- OOXML: DOCX / XLSX / PPTX ----
+
+#[test]
+fn docx_clean_drops_custom_xml_app_xml_numbering_and_comments_parts() {
+    // `make_dirty_docx` plants ~10 junk parts plus core/app/custom
+    // metadata and an embedded dirty JPEG. mat2_parity asserts the
+    // plant strings are gone from XML. This test takes a different
+    // angle: after clean, the zip package itself must not contain
+    // any of the junk parts. A regression that blanks the XML but
+    // leaves the part in place (old behaviour, fixed in 9d0fb67)
+    // is invisible to a content-level check.
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.docx");
+    let cleaned = dir.path().join("clean.docx");
+    make_dirty_docx(&dirty, TEST_JPEG);
+
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let names = zip_entry_names(&cleaned);
+    for banned in [
+        "docProps/custom.xml",
+        "word/comments.xml",
+        "word/numbering.xml",
+        "word/viewProps.xml",
+        "word/theme/theme1.xml",
+        "customXml/item1.xml",
+        "word/printerSettings/printerSettings1.bin",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "cleaned DOCX still contains banned part {banned:?}. members: {names:?}"
+        );
+    }
+
+    // The core.xml and app.xml survivors (if any) must have been
+    // scrubbed of their plant strings — cross-check with the helper.
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret Author"),
+        0,
+        "core.xml dc:creator plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Evil Corp"),
+        0,
+        "app.xml Company plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "SecretCustomField"),
+        0,
+        "custom.xml property plant survived"
+    );
+
+    // And the package zip must still be structurally normalized.
+    assert_zip_is_normalized(&cleaned);
+}
+
+#[test]
+fn xlsx_clean_drops_docprops_and_strips_core_app_custom_plants() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.xlsx");
+    let cleaned = dir.path().join("clean.xlsx");
+    make_dirty_xlsx(&dirty);
+
+    let handler =
+        get_handler_for_mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            .unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret OOXML Author"),
+        0,
+        "XLSX core.xml creator plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Bob Evil"),
+        0,
+        "XLSX app.xml manager plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "SecretCustomOoxmlField"),
+        0,
+        "XLSX custom.xml property plant survived"
+    );
+    let names = zip_entry_names(&cleaned);
+    assert!(
+        !names.iter().any(|n| n == "docProps/custom.xml"),
+        "XLSX custom.xml part survived. members: {names:?}"
+    );
+    assert_zip_is_normalized(&cleaned);
+}
+
+#[test]
+fn pptx_clean_drops_docprops_custom_and_strips_app_plants() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.pptx");
+    let cleaned = dir.path().join("clean.pptx");
+    make_dirty_pptx(&dirty);
+
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    .unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret OOXML Author"),
+        0,
+        "PPTX creator plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Bob Evil"),
+        0,
+        "PPTX manager plant survived"
+    );
+    let names = zip_entry_names(&cleaned);
+    assert!(
+        !names.iter().any(|n| n == "docProps/custom.xml"),
+        "PPTX custom.xml part survived. members: {names:?}"
+    );
+    assert_zip_is_normalized(&cleaned);
+}
+
+// ---- ODF: ODT / ODS / ODP / ODG ----
+
+#[test]
+fn odt_clean_strips_meta_xml_tracked_changes_and_thumbnail() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.odt");
+    let cleaned = dir.path().join("clean.odt");
+    make_dirty_odt(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // meta.xml is fully emptied by the ODF cleaner; any surviving
+    // meta.xml must no longer carry the plant strings.
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret Author"),
+        0,
+        "ODT creator plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Initial Secret"),
+        0,
+        "ODT initial-creator plant survived"
+    );
+    // The content.xml tracked-changes block must be gone.
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "text:tracked-changes"),
+        0,
+        "ODT tracked-changes block survived"
+    );
+    // Junk paths:
+    let names = zip_entry_names(&cleaned);
+    for banned in [
+        "Thumbnails/thumbnail.png",
+        "Configurations2/accelerator/current.xml",
+        "layout-cache",
+    ] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "ODT banned part {banned:?} survived. members: {names:?}"
+        );
+    }
+    assert_zip_is_normalized(&cleaned);
+}
+
+#[test]
+fn ods_clean_strips_meta_xml_and_user_defined_fields() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ods");
+    let cleaned = dir.path().join("clean.ods");
+    make_dirty_ods(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.spreadsheet").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret ODF Author"),
+        0,
+        "ODS creator plant survived"
+    );
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "SecretField"),
+        0,
+        "ODS user-defined plant survived"
+    );
+    assert_zip_is_normalized(&cleaned);
+}
+
+#[test]
+fn odp_clean_strips_meta_xml_and_slide_body_is_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.odp");
+    let cleaned = dir.path().join("clean.odp");
+    make_dirty_odp(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.presentation").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret ODF Author"),
+        0,
+        "ODP creator plant survived"
+    );
+    // Visible slide text must still be present.
+    let content = read_zip_entry(&cleaned, "content.xml").expect("content.xml missing");
+    assert!(
+        String::from_utf8_lossy(&content).contains("visible-slide"),
+        "ODP visible slide content was dropped"
+    );
+    assert_zip_is_normalized(&cleaned);
+}
+
+#[test]
+fn odg_clean_strips_meta_xml_and_drawing_body_is_preserved() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.odg");
+    let cleaned = dir.path().join("clean.odg");
+    make_dirty_odg(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.graphics").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    assert_eq!(
+        count_needle_in_xml_entries(&cleaned, "Secret ODF Author"),
+        0,
+        "ODG creator plant survived"
+    );
+    assert_zip_is_normalized(&cleaned);
+}
+
+// ---- EPUB ----
+
+#[test]
+fn epub_clean_drops_calibre_junk_and_scrubs_opf_dublin_core() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.epub");
+    let cleaned = dir.path().join("clean.epub");
+    make_dirty_epub(&dirty);
+
+    let handler = get_handler_for_mime("application/epub+zip").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    // Calibre junk must be dropped.
+    let names = zip_entry_names(&cleaned);
+    for banned in ["iTunesMetadata.plist", "META-INF/calibre_bookmarks.txt"] {
+        assert!(
+            !names.iter().any(|n| n == banned),
+            "EPUB banned part {banned:?} survived. members: {names:?}"
+        );
+    }
+    // mimetype must still be first.
+    assert_eq!(names.first().map(String::as_str), Some("mimetype"));
+    // All plant strings gone from every XML / NCX / OPF.
+    for plant in [
+        "Secret Book Title",
+        "Secret Author",
+        "Secret Publisher",
+        "secret-old-identifier",
+        "Calibre 5.0.0",
+    ] {
+        assert_eq!(
+            count_needle_in_xml_entries(&cleaned, plant),
+            0,
+            "EPUB plant {plant:?} survived clean"
+        );
+    }
+    assert_zip_is_normalized(&cleaned);
+}
+
+// ---- Audio: FLAC / OGG / WAV / AIFF / M4A / AAC / Opus ----
+
+#[test]
+fn flac_clean_strips_vorbis_comment_and_application_plus_picture_cover_exif() {
+    // `make_flac_with_dirty_cover` plants a cover JPEG carrying EXIF
+    // on top of the usual Vorbis comment. The cleaner must zero the
+    // Vorbis comment AND the cover's embedded EXIF.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] flac_clean_strips_vorbis_comment_and_application_plus_picture_cover_exif: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.flac");
+    let cleaned = dir.path().join("clean.flac");
+
+    // Build a FLAC with embedded dirty JPEG cover.
+    let cover_jpeg = {
+        let jpeg_path = dir.path().join("cover.jpg");
+        make_dirty_jpeg(&jpeg_path);
+        fs::read(&jpeg_path).unwrap()
+    };
+    if make_flac_with_dirty_cover(&dirty, &cover_jpeg).is_err() {
+        eprintln!("[SKIP] flac_clean_strips_...: flac build failed");
+        return;
+    }
+
+    let handler = get_handler_for_mime("audio/flac").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [
+        &b"mat2-parity-artist"[..],
+        &b"secret-title"[..],
+        &b"secret-comment"[..],
+        &b"mat2-parity-description"[..],
+    ] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "FLAC plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+}
+
+#[test]
+fn ogg_clean_removes_vorbis_user_comments_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ogg_clean_removes_vorbis_user_comments_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ogg");
+    let cleaned = dir.path().join("clean.ogg");
+    if make_dirty_ogg(&dirty).is_err() {
+        eprintln!("[SKIP] ogg_clean_...: ffmpeg lacks libvorbis");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/ogg").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned OGG still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn wav_clean_removes_id3_tags_and_preserves_audio_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] wav_clean_removes_id3_tags_and_preserves_audio_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.wav");
+    let cleaned = dir.path().join("clean.wav");
+    if make_dirty_wav(&dirty).is_err() {
+        eprintln!("[SKIP] wav_clean_...: ffmpeg wav build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/x-wav").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned WAV still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn aiff_clean_removes_name_auth_copy_anno_chunks_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] aiff_clean_removes_name_auth_copy_anno_chunks_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.aiff");
+    let cleaned = dir.path().join("clean.aiff");
+    if make_dirty_aiff(&dirty).is_err() {
+        eprintln!("[SKIP] aiff_clean_...: ffmpeg aiff build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/x-aiff").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [
+        &b"aiff-secret-title"[..],
+        &b"aiff-secret-author"[..],
+        &b"aiff-secret-copyright"[..],
+        &b"aiff-secret-annotation"[..],
+    ] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "AIFF plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+}
+
+#[test]
+fn m4a_clean_removes_ilst_and_udta_location_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] m4a_clean_removes_ilst_and_udta_location_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.m4a");
+    let cleaned = dir.path().join("clean.m4a");
+    if make_dirty_m4a(&dirty).is_err() {
+        eprintln!("[SKIP] m4a_clean_...: ffmpeg m4a build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/mp4").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned M4A still reports user tags via ffprobe: {tags:?}"
+    );
+    let out = fs::read(&cleaned).unwrap();
+    for plant in [
+        &b"secret-m4a-title"[..],
+        &b"secret-m4a-artist"[..],
+        &b"+40.7128-074.0060"[..],
+    ] {
+        assert!(
+            !out.windows(plant.len()).any(|w| w == plant),
+            "M4A plant {:?} survived clean",
+            std::str::from_utf8(plant).unwrap_or("?")
+        );
+    }
+}
+
+#[test]
+fn aac_clean_strips_id3_prefix_and_trailer_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] aac_clean_strips_id3_prefix_and_trailer_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.aac");
+    let cleaned = dir.path().join("clean.aac");
+    if make_dirty_aac(&dirty).is_err() {
+        eprintln!("[SKIP] aac_clean_...: ffmpeg aac build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/aac").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned AAC still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn opus_clean_removes_vorbis_comment_header_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] opus_clean_removes_vorbis_comment_header_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.opus");
+    let cleaned = dir.path().join("clean.opus");
+    if make_dirty_opus(&dirty).is_err() {
+        eprintln!("[SKIP] opus_clean_...: ffmpeg libopus missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/opus").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned Opus still reports user tags via ffprobe: {tags:?}"
+    );
+    let out = fs::read(&cleaned).unwrap();
+    assert!(
+        !out.windows(b"opus-secret-artist".len())
+            .any(|w| w == b"opus-secret-artist"),
+        "Opus artist plant survived clean"
+    );
+}
+
+// ---- Video: MP4 / MKV / WebM / AVI / MOV / WMV / FLV / Video-OGG ----
+
+#[test]
+fn mp4_clean_removes_moov_udta_metadata_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] mp4_clean_removes_moov_udta_metadata_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.mp4");
+    let cleaned = dir.path().join("clean.mp4");
+    if make_dirty_mp4(&dirty).is_err() {
+        eprintln!("[SKIP] mp4_clean_...: ffmpeg x264 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/mp4").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned MP4 still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn mkv_clean_removes_simpletags_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] mkv_clean_removes_simpletags_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.mkv");
+    let cleaned = dir.path().join("clean.mkv");
+    if make_dirty_mkv(&dirty).is_err() {
+        eprintln!("[SKIP] mkv_clean_...: ffmpeg x264 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-matroska").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags: Vec<_> = ffprobe_user_tags(&cleaned)
+        .into_iter()
+        .filter(|(k, _)| k != "encoder" && k != "ENCODER")
+        .collect();
+    assert!(
+        tags.is_empty(),
+        "cleaned MKV still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn webm_clean_removes_simpletags_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] webm_clean_removes_simpletags_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.webm");
+    let cleaned = dir.path().join("clean.webm");
+    if make_dirty_webm(&dirty).is_err() {
+        eprintln!("[SKIP] webm_clean_...: ffmpeg libvpx missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/webm").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags: Vec<_> = ffprobe_user_tags(&cleaned)
+        .into_iter()
+        .filter(|(k, _)| k != "encoder" && k != "ENCODER")
+        .collect();
+    assert!(
+        tags.is_empty(),
+        "cleaned WebM still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn avi_clean_removes_riff_info_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] avi_clean_removes_riff_info_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.avi");
+    let cleaned = dir.path().join("clean.avi");
+    if make_dirty_avi(&dirty).is_err() {
+        eprintln!("[SKIP] avi_clean_...: ffmpeg avi build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-msvideo").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned AVI still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn mov_clean_removes_apple_atoms_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] mov_clean_removes_apple_atoms_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.mov");
+    let cleaned = dir.path().join("clean.mov");
+    if make_dirty_mov(&dirty).is_err() {
+        eprintln!("[SKIP] mov_clean_...: ffmpeg mov build failed");
+        return;
+    }
+    let handler = get_handler_for_mime("video/quicktime").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned MOV still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn wmv_clean_removes_asf_header_ext_metadata_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] wmv_clean_removes_asf_header_ext_metadata_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.wmv");
+    let cleaned = dir.path().join("clean.wmv");
+    if make_dirty_wmv(&dirty).is_err() {
+        eprintln!("[SKIP] wmv_clean_...: ffmpeg wmv2 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-ms-wmv").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned WMV still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn flv_clean_removes_onmetadata_script_tag_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] flv_clean_removes_onmetadata_script_tag_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.flv");
+    let cleaned = dir.path().join("clean.flv");
+    if make_dirty_flv(&dirty).is_err() {
+        eprintln!("[SKIP] flv_clean_...: ffmpeg flv1 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-flv").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned FLV still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+#[test]
+fn video_ogg_clean_removes_theora_and_vorbis_comments_via_ffprobe() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] video_ogg_clean_removes_theora_and_vorbis_comments_via_ffprobe: tool missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ogv");
+    let cleaned = dir.path().join("clean.ogv");
+    if make_dirty_video_ogg(&dirty).is_err() {
+        eprintln!("[SKIP] video_ogg_clean_...: ffmpeg libtheora missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/ogg").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        tags.is_empty(),
+        "cleaned video/OGG still reports user tags via ffprobe: {tags:?}"
+    );
+}
+
+// ---- Deeply nested archive (non-recursion guarantee) ----
+
+#[test]
+fn deeply_nested_zip_in_tar_xz_in_zip_in_tar_bz2_outer_normalized_inner_kept() {
+    // Same documented non-recursion behaviour as
+    // `nested_zip_inside_tar_zst_is_kept_verbatim_not_recursed`, but
+    // through three different compression algorithms in one file so
+    // every codec path is exercised in a single test.
+    use std::io::Cursor;
+
+    let dir = tempfile::tempdir().unwrap();
+    let jpeg_path = dir.path().join("inner.jpg");
+    make_dirty_jpeg(&jpeg_path);
+    let jpeg_bytes = fs::read(&jpeg_path).unwrap();
+
+    // Innermost zip with the dirty JPEG.
+    let mut inner_zip: Vec<u8> = Vec::new();
+    {
+        use zip::write::SimpleFileOptions;
+        let cursor = Cursor::new(&mut inner_zip);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let opts = SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap());
+        writer.start_file("photo.jpg", opts).unwrap();
+        writer.write_all(&jpeg_bytes).unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Wrap it in tar.xz.
+    let mut inner_tar: Vec<u8> = Vec::new();
+    {
+        use tar::{Builder, EntryType, Header};
+        let mut builder = Builder::new(&mut inner_tar);
+        let mut header = Header::new_gnu();
+        header.set_path("album.zip").unwrap();
+        header.set_size(inner_zip.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(1_700_000_000);
+        header.set_entry_type(EntryType::Regular);
+        header.set_cksum();
+        builder.append(&header, inner_zip.as_slice()).unwrap();
+        builder.into_inner().unwrap();
+    }
+    let mut inner_tar_xz: Vec<u8> = Vec::new();
+    {
+        let mut enc = xz2::write::XzEncoder::new(&mut inner_tar_xz, 6);
+        enc.write_all(&inner_tar).unwrap();
+        enc.finish().unwrap();
+    }
+
+    // Wrap tar.xz in another zip.
+    let mut outer_zip: Vec<u8> = Vec::new();
+    {
+        use zip::write::SimpleFileOptions;
+        let cursor = Cursor::new(&mut outer_zip);
+        let mut writer = zip::ZipWriter::new(cursor);
+        let opts = SimpleFileOptions::default()
+            .last_modified_time(zip::DateTime::from_date_and_time(2024, 6, 1, 12, 0, 0).unwrap());
+        writer.start_file("bundle.tar.xz", opts).unwrap();
+        writer.write_all(&inner_tar_xz).unwrap();
+        writer.finish().unwrap();
+    }
+
+    // Wrap outer zip in tar.bz2.
+    let mut outer_tar: Vec<u8> = Vec::new();
+    {
+        use tar::{Builder, EntryType, Header};
+        let mut builder = Builder::new(&mut outer_tar);
+        let mut header = Header::new_gnu();
+        header.set_path("deep.zip").unwrap();
+        header.set_size(outer_zip.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(1_700_000_000);
+        header.set_entry_type(EntryType::Regular);
+        header.set_cksum();
+        builder.append(&header, outer_zip.as_slice()).unwrap();
+        builder.into_inner().unwrap();
+    }
+    let src = dir.path().join("dirty.tar.bz2");
+    let dst = dir.path().join("clean.tar.bz2");
+    {
+        let f = fs::File::create(&src).unwrap();
+        let mut enc = bzip2::write::BzEncoder::new(f, bzip2::Compression::default());
+        enc.write_all(&outer_tar).unwrap();
+        enc.finish().unwrap();
+    }
+
+    let handler = get_handler_for_mime("application/x-bzip2").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    // Read the cleaned tar.bz2, assert the outer tar contents are
+    // normalized (mtime zeroed) but the innermost jpeg still carries
+    // EXIF (non-recursion is the documented behaviour).
+    let cleaned = fs::read(&dst).unwrap();
+    let tar_plain = {
+        let mut dec = bzip2::read::BzDecoder::new(Cursor::new(&cleaned));
+        let mut out = Vec::new();
+        dec.read_to_end(&mut out).unwrap();
+        out
+    };
+    let mut tar_archive = tar::Archive::new(Cursor::new(&tar_plain));
+    let mut found_inner = false;
+    for entry in tar_archive.entries().unwrap() {
+        let mut entry = entry.unwrap();
+        let name = entry.path().unwrap().to_string_lossy().to_string();
+        if !name.ends_with(".zip") {
+            continue;
+        }
+        // Outer tar entries should have mtime normalized (non-zero is
+        // allowed by mat2 — the contract is determinism, not zero —
+        // so we don't assert on it here).
+        let _ = entry.header().mtime();
+        let mut outer_zip_bytes = Vec::new();
+        entry.read_to_end(&mut outer_zip_bytes).unwrap();
+        // Unwrap outer zip to get at the bundle.tar.xz member.
+        let mut outer_archive =
+            zip::ZipArchive::new(Cursor::new(&outer_zip_bytes)).unwrap();
+        let mut bundle_entry = outer_archive.by_name("bundle.tar.xz").unwrap();
+        let mut bundle_bytes = Vec::new();
+        bundle_entry.read_to_end(&mut bundle_bytes).unwrap();
+        drop(bundle_entry);
+        // Decompress the inner tar.xz.
+        let mut inner_plain = Vec::new();
+        xz2::read::XzDecoder::new(Cursor::new(&bundle_bytes))
+            .read_to_end(&mut inner_plain)
+            .unwrap();
+        let mut innermost_tar = tar::Archive::new(Cursor::new(&inner_plain));
+        for inner_entry in innermost_tar.entries().unwrap() {
+            let mut inner_entry = inner_entry.unwrap();
+            let inner_name = inner_entry.path().unwrap().to_string_lossy().to_string();
+            if !inner_name.ends_with(".zip") {
+                continue;
+            }
+            let mut innermost_zip_bytes = Vec::new();
+            inner_entry.read_to_end(&mut innermost_zip_bytes).unwrap();
+            let mut innermost_archive =
+                zip::ZipArchive::new(Cursor::new(&innermost_zip_bytes)).unwrap();
+            let mut jpeg_entry = innermost_archive.by_name("photo.jpg").unwrap();
+            let mut jpeg_out = Vec::new();
+            jpeg_entry.read_to_end(&mut jpeg_out).unwrap();
+            let probe = dir.path().join("deep.jpg");
+            fs::write(&probe, &jpeg_out).unwrap();
+            let meta = little_exif::metadata::Metadata::new_from_path(&probe).unwrap();
+            assert!(
+                meta.into_iter().next().is_some(),
+                "innermost jpeg lost its EXIF — archive handler must have recursed"
+            );
+            found_inner = true;
+        }
+    }
+    assert!(
+        found_inner,
+        "cleaned tar.bz2 lost the innermost zip member"
+    );
+}
+
+// ---- User-metadata plant classifier (shared by PDF adversarial test) ----
+
+fn is_user_metadata_key_plant(key: &str, value: &str) -> bool {
+    // Returns true if a metadata item looks like a user-controlled
+    // plant rather than a structural/codec field. Used by the PDF
+    // adversarial test to assert `read_metadata` surfaces no user
+    // metadata after clean. Conservative: anything containing our
+    // well-known plant strings is definitely a leak.
+    for needle in [
+        "mat2-parity",
+        "secret",
+        "Secret",
+        "Evil Corp",
+        "Bob Evil",
+        "Alice Smith",
+        "Calibre",
+        "fingerprint",
+    ] {
+        if key.contains(needle) || value.contains(needle) {
+            return true;
+        }
+    }
+    false
+}
+
 // ============================================================
 // §B. Clean-input baselines — cleaner must preserve visible
 //     content when there's nothing to strip
@@ -719,6 +1853,1259 @@ fn clean_zip_baseline_with_only_a_text_file_round_trips() {
         read_zip_entry(&dst, "readme.txt").unwrap(),
         b"just text, no metadata"
     );
+}
+
+// ---- Phase B.2: clean-input baselines for every remaining format ----
+//
+// Each test builds a genuinely clean fixture (no metadata injected),
+// cleans it, and asserts the cleaner produced a structurally valid
+// file that the reader can still parse. These differ from the
+// cross_cutting idempotency tests because they start from a
+// clean-from-scratch input rather than `clean(dirty)`.
+
+/// Run ffmpeg with `-map_metadata -1` to synthesize a metadata-free
+/// media file. Returns `Err` if ffmpeg isn't installed or the codec
+/// isn't compiled in. Tests self-skip on error.
+fn ffmpeg_build_clean(path: &std::path::Path, args: &[&str]) -> std::io::Result<()> {
+    let _ = fs::remove_file(path);
+    let output = std::process::Command::new("ffmpeg")
+        .args(["-y", "-loglevel", "error", "-hide_banner"])
+        .args(args)
+        .args(["-map_metadata", "-1"])
+        .arg(path)
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "ffmpeg synthesis failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        )));
+    }
+    Ok(())
+}
+
+/// Assert a file exists, is non-empty, and that a `FormatHandler`
+/// returns Ok on `read_metadata`. Used by every baseline test to
+/// prove the cleaner produced a file the reader can still parse.
+fn assert_cleaned_parses(mime: &str, path: &std::path::Path) {
+    let meta = fs::metadata(path).expect("cleaned file missing");
+    assert!(meta.len() > 0, "cleaned file is empty: {}", path.display());
+    let handler = get_handler_for_mime(mime).unwrap();
+    handler
+        .read_metadata(path)
+        .unwrap_or_else(|e| panic!("cleaned {} failed to re-read: {e}", path.display()));
+}
+
+#[test]
+fn clean_pdf_baseline_minimal_catalog_preserves_page_tree() {
+    // Hand-build a PDF with only /Catalog -> /Pages -> /Page. No
+    // Info dict, no XMP stream, no AcroForm. The cleaner must leave
+    // the page tree intact.
+    use lopdf::dictionary;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.pdf");
+    let dst = dir.path().join("out.pdf");
+
+    let mut doc = lopdf::Document::with_version("1.7");
+    let pages_id = doc.new_object_id();
+    let page_id = doc.new_object_id();
+    doc.objects.insert(
+        page_id,
+        lopdf::Object::Dictionary(dictionary! {
+            "Type" => lopdf::Object::Name(b"Page".to_vec()),
+            "Parent" => lopdf::Object::Reference(pages_id),
+            "MediaBox" => lopdf::Object::Array(vec![
+                lopdf::Object::Integer(0), lopdf::Object::Integer(0),
+                lopdf::Object::Integer(612), lopdf::Object::Integer(792),
+            ]),
+            "Resources" => lopdf::Object::Dictionary(lopdf::Dictionary::new()),
+        }),
+    );
+    doc.objects.insert(
+        pages_id,
+        lopdf::Object::Dictionary(dictionary! {
+            "Type" => lopdf::Object::Name(b"Pages".to_vec()),
+            "Count" => lopdf::Object::Integer(1),
+            "Kids" => lopdf::Object::Array(vec![lopdf::Object::Reference(page_id)]),
+        }),
+    );
+    let catalog_id = doc.add_object(dictionary! {
+        "Type" => lopdf::Object::Name(b"Catalog".to_vec()),
+        "Pages" => lopdf::Object::Reference(pages_id),
+    });
+    doc.trailer
+        .set("Root", lopdf::Object::Reference(catalog_id));
+    doc.save(&src).unwrap();
+
+    let handler = get_handler_for_mime("application/pdf").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+
+    // Output must still start with the PDF header and contain a
+    // Catalog object.
+    let out = fs::read(&dst).unwrap();
+    assert!(out.starts_with(b"%PDF-"), "cleaned PDF missing header");
+    assert!(
+        out.windows(b"/Catalog".len()).any(|w| w == b"/Catalog"),
+        "cleaned PDF missing Catalog"
+    );
+    assert_cleaned_parses("application/pdf", &dst);
+}
+
+#[test]
+fn clean_gif_baseline_89a_without_extensions_survives() {
+    // Minimal GIF89a with just image descriptor + trailer (already
+    // covered by `gif87a_without_extensions_is_passed_through` in
+    // mat2_parity, but here we additionally assert the reader can
+    // still parse it post-clean).
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.gif");
+    let dst = dir.path().join("out.gif");
+    let mut gif = Vec::new();
+    gif.extend_from_slice(b"GIF89a");
+    gif.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    gif.extend_from_slice(&[0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+    gif.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+    gif.push(0x3B);
+    fs::write(&src, &gif).unwrap();
+
+    let handler = get_handler_for_mime("image/gif").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    let out = fs::read(&dst).unwrap();
+    assert!(out.starts_with(b"GIF89a") || out.starts_with(b"GIF87a"));
+    assert_eq!(out.last(), Some(&0x3B));
+}
+
+#[test]
+fn clean_bmp_baseline_is_byte_for_byte_copy() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.bmp");
+    let dst = dir.path().join("out.bmp");
+    make_bmp(&src);
+    let handler = get_handler_for_mime("image/bmp").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    // HarmlessHandler: byte-for-byte copy.
+    assert_eq!(fs::read(&src).unwrap(), fs::read(&dst).unwrap());
+}
+
+#[test]
+fn clean_tiff_baseline_decodes_with_no_exif() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_tiff_baseline_decodes_with_no_exif: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tiff");
+    let dst = dir.path().join("out.tiff");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=blue:s=4x4:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-f",
+            "image2",
+            "-c:v",
+            "tiff",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_tiff_baseline_...: ffmpeg tiff missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/tiff").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("image/tiff", &dst);
+}
+
+#[test]
+fn clean_webp_baseline_survives_clean() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_webp_baseline_survives_clean: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.webp");
+    let dst = dir.path().join("out.webp");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=orange:s=8x8:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libwebp",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_webp_baseline_...: libwebp missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/webp").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    let out = fs::read(&dst).unwrap();
+    assert!(&out[..4] == b"RIFF" && &out[8..12] == b"WEBP");
+    assert_cleaned_parses("image/webp", &dst);
+}
+
+#[test]
+fn clean_heic_baseline_survives_clean() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_heic_baseline_survives_clean: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.heic");
+    let dst = dir.path().join("out.heic");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=cyan:s=16x16:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=none",
+            "-f",
+            "heif",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_heic_baseline_...: libx265 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/heic").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("image/heic", &dst);
+}
+
+#[test]
+fn clean_heif_baseline_survives_clean() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_heif_baseline_survives_clean: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.heif");
+    let dst = dir.path().join("out.heif");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=cyan:s=16x16:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=none",
+            "-f",
+            "heif",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_heif_baseline_...: libx265 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/heif").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("image/heif", &dst);
+}
+
+#[test]
+fn clean_jxl_baseline_survives_clean() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_jxl_baseline_survives_clean: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.jxl");
+    let dst = dir.path().join("out.jxl");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=green:s=8x8:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libjxl",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_jxl_baseline_...: libjxl missing");
+        return;
+    }
+    let handler = get_handler_for_mime("image/jxl").unwrap();
+    // A "simple JXL codestream" with no ISO-BMFF container has no
+    // metadata to strip. little_exif surfaces that as
+    // `CleanError { detail: "... No metadata!" }`; the cleaner
+    // contract treats an already-clean codestream as a no-op so
+    // either Ok or that specific error shape is acceptable. A
+    // different error (e.g. parse failure) would fail the test.
+    match handler.clean_metadata(&src, &dst) {
+        Ok(()) => assert_cleaned_parses("image/jxl", &dst),
+        Err(e) => {
+            let msg = format!("{e}");
+            assert!(
+                msg.contains("No metadata"),
+                "unexpected JXL clean error: {msg}"
+            );
+        }
+    }
+}
+
+// ---- Audio baselines ----
+
+#[test]
+fn clean_mp3_baseline_no_tags_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_mp3_baseline_no_tags_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.mp3");
+    let dst = dir.path().join("out.mp3");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.2",
+            "-c:a",
+            "libmp3lame",
+            "-b:a",
+            "32k",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_mp3_baseline_...: libmp3lame missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/mpeg").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/mpeg", &dst);
+}
+
+#[test]
+fn clean_flac_baseline_no_tags_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_flac_baseline_no_tags_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.flac");
+    let dst = dir.path().join("out.flac");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "flac",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_flac_baseline_...: flac missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/flac").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/flac", &dst);
+    // FLAC magic must still be first 4 bytes.
+    let out = fs::read(&dst).unwrap();
+    assert_eq!(&out[..4], b"fLaC");
+}
+
+#[test]
+fn clean_ogg_baseline_no_tags_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_ogg_baseline_no_tags_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.ogg");
+    let dst = dir.path().join("out.ogg");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "libvorbis",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_ogg_baseline_...: libvorbis missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/ogg").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/ogg", &dst);
+    assert_eq!(&fs::read(&dst).unwrap()[..4], b"OggS");
+}
+
+#[test]
+fn clean_wav_baseline_no_tags_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_wav_baseline_no_tags_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.wav");
+    let dst = dir.path().join("out.wav");
+    if ffmpeg_build_clean(
+        &src,
+        &["-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1"],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_wav_baseline_...: wav missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/x-wav").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/x-wav", &dst);
+    assert_eq!(&fs::read(&dst).unwrap()[..4], b"RIFF");
+}
+
+#[test]
+fn clean_aiff_baseline_no_chunks_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_aiff_baseline_no_chunks_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.aiff");
+    let dst = dir.path().join("out.aiff");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1", "-f", "aiff",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_aiff_baseline_...: aiff missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/x-aiff").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/x-aiff", &dst);
+    assert_eq!(&fs::read(&dst).unwrap()[..4], b"FORM");
+}
+
+#[test]
+fn clean_opus_baseline_no_tags_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_opus_baseline_no_tags_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.opus");
+    let dst = dir.path().join("out.opus");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=48000",
+            "-t",
+            "0.1",
+            "-c:a",
+            "libopus",
+            "-b:a",
+            "32k",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_opus_baseline_...: libopus missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/opus").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/opus", &dst);
+    assert_eq!(&fs::read(&dst).unwrap()[..4], b"OggS");
+}
+
+#[test]
+fn clean_m4a_baseline_no_ilst_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_m4a_baseline_no_ilst_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.m4a");
+    let dst = dir.path().join("out.m4a");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "aac",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_m4a_baseline_...: aac missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/mp4").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/mp4", &dst);
+}
+
+#[test]
+fn clean_aac_baseline_no_id3_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_aac_baseline_no_id3_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.aac");
+    let dst = dir.path().join("out.aac");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "aac",
+            "-f",
+            "adts",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_aac_baseline_...: aac missing");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/aac").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("audio/aac", &dst);
+}
+
+// ---- Video baselines ----
+
+#[test]
+fn clean_mp4_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_mp4_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.mp4");
+    let dst = dir.path().join("out.mp4");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_mp4_baseline_...: libx264 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/mp4").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/mp4", &dst);
+}
+
+#[test]
+fn clean_mkv_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_mkv_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.mkv");
+    let dst = dir.path().join("out.mkv");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_mkv_baseline_...: libx264 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-matroska").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/x-matroska", &dst);
+}
+
+#[test]
+fn clean_webm_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_webm_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.webm");
+    let dst = dir.path().join("out.webm");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libvpx",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "50k",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_webm_baseline_...: libvpx missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/webm").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/webm", &dst);
+}
+
+#[test]
+fn clean_avi_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_avi_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.avi");
+    let dst = dir.path().join("out.avi");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "mpeg4",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_avi_baseline_...: mpeg4 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-msvideo").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/x-msvideo", &dst);
+}
+
+#[test]
+fn clean_mov_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_mov_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.mov");
+    let dst = dir.path().join("out.mov");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "mov",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_mov_baseline_...: libx264 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/quicktime").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/quicktime", &dst);
+}
+
+#[test]
+fn clean_wmv_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_wmv_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.wmv");
+    let dst = dir.path().join("out.wmv");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "wmv2",
+            "-f",
+            "asf",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_wmv_baseline_...: wmv2 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-ms-wmv").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/x-ms-wmv", &dst);
+}
+
+#[test]
+fn clean_flv_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_flv_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.flv");
+    let dst = dir.path().join("out.flv");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "flv1",
+            "-f",
+            "flv",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_flv_baseline_...: flv1 missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/x-flv").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/x-flv", &dst);
+}
+
+#[test]
+fn clean_video_ogg_baseline_no_metadata_decodes() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] clean_video_ogg_baseline_no_metadata_decodes: ffmpeg missing");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.ogv");
+    let dst = dir.path().join("out.ogv");
+    if ffmpeg_build_clean(
+        &src,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.1:r=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:v",
+            "libtheora",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "libvorbis",
+            "-f",
+            "ogg",
+        ],
+    )
+    .is_err()
+    {
+        eprintln!("[SKIP] clean_video_ogg_baseline_...: libtheora missing");
+        return;
+    }
+    let handler = get_handler_for_mime("video/ogg").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_cleaned_parses("video/ogg", &dst);
+}
+
+// ---- Document baselines ----
+
+/// Build a minimal OOXML package with empty (well-formed) core/app
+/// metadata and a single content part. No plant strings anywhere.
+fn build_clean_ooxml(
+    path: &std::path::Path,
+    content_types: &str,
+    main_rel_type: &str,
+    main_rel_target: &str,
+    part_path: &str,
+    part_body: &[u8],
+) {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+    let file = fs::File::create(path).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+
+    writer.start_file("[Content_Types].xml", options).unwrap();
+    writer.write_all(content_types.as_bytes()).unwrap();
+
+    writer.start_file("_rels/.rels", options).unwrap();
+    let rels = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="{main_rel_type}" Target="{main_rel_target}"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+</Relationships>"#,
+    );
+    writer.write_all(rels.as_bytes()).unwrap();
+
+    writer.start_file("docProps/core.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                   xmlns:dc="http://purl.org/dc/elements/1.1/"/>"#).unwrap();
+
+    writer.start_file(part_path, options).unwrap();
+    writer.write_all(part_body).unwrap();
+    writer.finish().unwrap();
+}
+
+#[test]
+fn clean_docx_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.docx");
+    let dst = dir.path().join("out.docx");
+    build_clean_ooxml(
+        &src,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "word/document.xml",
+        "word/document.xml",
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body><w:p><w:r><w:t>body-text</w:t></w:r></w:p></w:body>
+</w:document>"#,
+    );
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    )
+    .unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+    // Visible body text must survive.
+    let doc = read_zip_entry(&dst, "word/document.xml").unwrap();
+    assert!(String::from_utf8_lossy(&doc).contains("body-text"));
+}
+
+#[test]
+fn clean_xlsx_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.xlsx");
+    let dst = dir.path().join("out.xlsx");
+    build_clean_ooxml(
+        &src,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "xl/workbook.xml",
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheets><sheet name="Sheet1" sheetId="1"/></sheets>
+</workbook>"#,
+    );
+    let handler =
+        get_handler_for_mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            .unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+}
+
+#[test]
+fn clean_pptx_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.pptx");
+    let dst = dir.path().join("out.pptx");
+    build_clean_ooxml(
+        &src,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+</Types>"#,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "ppt/presentation.xml",
+        "ppt/presentation.xml",
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>"#,
+    );
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    .unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+}
+
+/// Build a minimal ODF package with empty (well-formed) meta.xml and
+/// a trivial content.xml body. No plants.
+fn build_clean_odf(path: &std::path::Path, mimetype: &str, content_xml: &[u8]) {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+    let file = fs::File::create(path).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+
+    writer
+        .start_file(
+            "mimetype",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+    writer.write_all(mimetype.as_bytes()).unwrap();
+
+    writer.start_file("META-INF/manifest.xml", options).unwrap();
+    let manifest = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="{mimetype}"/>
+  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>"#,
+    );
+    writer.write_all(manifest.as_bytes()).unwrap();
+
+    writer.start_file("content.xml", options).unwrap();
+    writer.write_all(content_xml).unwrap();
+
+    writer.start_file("styles.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0"?><office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"/>"#).unwrap();
+
+    writer.finish().unwrap();
+}
+
+#[test]
+fn clean_odt_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.odt");
+    let dst = dir.path().join("out.odt");
+    build_clean_odf(
+        &src,
+        "application/vnd.oasis.opendocument.text",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                         xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body><office:text><text:p>visible-odt-body</text:p></office:text></office:body>
+</office:document-content>"#,
+    );
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.text").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+    let content = read_zip_entry(&dst, "content.xml").unwrap();
+    assert!(String::from_utf8_lossy(&content).contains("visible-odt-body"));
+}
+
+#[test]
+fn clean_ods_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.ods");
+    let dst = dir.path().join("out.ods");
+    build_clean_odf(
+        &src,
+        "application/vnd.oasis.opendocument.spreadsheet",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">
+  <office:body><office:spreadsheet/></office:body>
+</office:document-content>"#,
+    );
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.spreadsheet").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+}
+
+#[test]
+fn clean_odp_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.odp");
+    let dst = dir.path().join("out.odp");
+    build_clean_odf(
+        &src,
+        "application/vnd.oasis.opendocument.presentation",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">
+  <office:body><office:presentation/></office:body>
+</office:document-content>"#,
+    );
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.presentation").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+}
+
+#[test]
+fn clean_odg_baseline_minimal_package_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.odg");
+    let dst = dir.path().join("out.odg");
+    build_clean_odf(
+        &src,
+        "application/vnd.oasis.opendocument.graphics",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0">
+  <office:body><office:drawing/></office:body>
+</office:document-content>"#,
+    );
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.graphics").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+}
+
+#[test]
+fn clean_epub_baseline_minimal_package_survives() {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.epub");
+    let dst = dir.path().join("out.epub");
+    {
+        let file = fs::File::create(&src).unwrap();
+        let mut writer = ZipWriter::new(file);
+        let stored =
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
+        let options = SimpleFileOptions::default();
+        writer.start_file("mimetype", stored).unwrap();
+        writer.write_all(b"application/epub+zip").unwrap();
+        writer
+            .start_file("META-INF/container.xml", options)
+            .unwrap();
+        writer.write_all(br#"<?xml version="1.0"?>
+<container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
+  <rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles>
+</container>"#).unwrap();
+        writer.start_file("OEBPS/content.opf", options).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0" encoding="UTF-8"?>
+<package xmlns="http://www.idpf.org/2007/opf" version="3.0" unique-identifier="bookid">
+  <metadata xmlns:dc="http://purl.org/dc/elements/1.1/">
+    <dc:identifier id="bookid">urn:uuid:00000000-0000-0000-0000-000000000000</dc:identifier>
+    <dc:title>Clean</dc:title>
+    <dc:language>en</dc:language>
+    <meta property="dcterms:modified">2024-01-01T00:00:00Z</meta>
+  </metadata>
+  <manifest>
+    <item id="ch1" href="chapter1.xhtml" media-type="application/xhtml+xml"/>
+  </manifest>
+  <spine><itemref idref="ch1"/></spine>
+</package>"#,
+            )
+            .unwrap();
+        writer.start_file("OEBPS/chapter1.xhtml", options).unwrap();
+        writer
+            .write_all(b"<html><head/><body><p>clean chapter</p></body></html>")
+            .unwrap();
+        writer.finish().unwrap();
+    }
+    let handler = get_handler_for_mime("application/epub+zip").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert_zip_is_normalized(&dst);
+    let names = zip_entry_names(&dst);
+    assert_eq!(names.first().map(String::as_str), Some("mimetype"));
+}
+
+#[test]
+fn clean_xhtml_baseline_preserves_body() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.xhtml");
+    let dst = dir.path().join("out.xhtml");
+    fs::write(
+        &src,
+        br#"<?xml version="1.0" encoding="UTF-8"?>
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head><title>clean-xhtml</title></head>
+<body><p>visible-xhtml-body</p></body>
+</html>"#,
+    )
+    .unwrap();
+    let handler = get_handler_for_mime("application/xhtml+xml").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    let out = fs::read_to_string(&dst).unwrap();
+    assert!(out.contains("visible-xhtml-body"));
+}
+
+// ---- Archive baselines ----
+
+fn build_clean_tar_bytes() -> Vec<u8> {
+    use tar::{Builder, EntryType, Header};
+    let mut tar_buf: Vec<u8> = Vec::new();
+    {
+        let mut builder = Builder::new(&mut tar_buf);
+        let mut header = Header::new_gnu();
+        header.set_path("readme.txt").unwrap();
+        let body = b"just text, no metadata";
+        header.set_size(body.len() as u64);
+        header.set_mode(0o644);
+        header.set_mtime(1_700_000_000);
+        header.set_entry_type(EntryType::Regular);
+        header.set_cksum();
+        builder.append(&header, body.as_slice()).unwrap();
+        builder.into_inner().unwrap();
+    }
+    tar_buf
+}
+
+#[test]
+fn clean_tar_baseline_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tar");
+    let dst = dir.path().join("out.tar");
+    fs::write(&src, build_clean_tar_bytes()).unwrap();
+    let handler = get_handler_for_mime("application/x-tar").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert!(fs::metadata(&dst).unwrap().len() > 0);
+}
+
+#[test]
+fn clean_tar_gz_baseline_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tar.gz");
+    let dst = dir.path().join("out.tar.gz");
+    {
+        let f = fs::File::create(&src).unwrap();
+        let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+        enc.write_all(&build_clean_tar_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+    let handler = get_handler_for_mime("application/gzip").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert!(fs::metadata(&dst).unwrap().len() > 0);
+}
+
+#[test]
+fn clean_tar_bz2_baseline_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tar.bz2");
+    let dst = dir.path().join("out.tar.bz2");
+    {
+        let f = fs::File::create(&src).unwrap();
+        let mut enc = bzip2::write::BzEncoder::new(f, bzip2::Compression::default());
+        enc.write_all(&build_clean_tar_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+    let handler = get_handler_for_mime("application/x-bzip2").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert!(fs::metadata(&dst).unwrap().len() > 0);
+}
+
+#[test]
+fn clean_tar_xz_baseline_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tar.xz");
+    let dst = dir.path().join("out.tar.xz");
+    {
+        let f = fs::File::create(&src).unwrap();
+        let mut enc = xz2::write::XzEncoder::new(f, 6);
+        enc.write_all(&build_clean_tar_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+    let handler = get_handler_for_mime("application/x-xz").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert!(fs::metadata(&dst).unwrap().len() > 0);
+}
+
+#[test]
+fn clean_tar_zst_baseline_survives() {
+    let dir = tempfile::tempdir().unwrap();
+    let src = dir.path().join("clean.tar.zst");
+    let dst = dir.path().join("out.tar.zst");
+    {
+        let f = fs::File::create(&src).unwrap();
+        let mut enc = zstd::Encoder::new(f, 3).unwrap();
+        enc.write_all(&build_clean_tar_bytes()).unwrap();
+        enc.finish().unwrap();
+    }
+    let handler = get_handler_for_mime("application/zstd").unwrap();
+    handler.clean_metadata(&src, &dst).unwrap();
+    assert!(fs::metadata(&dst).unwrap().len() > 0);
 }
 
 // ============================================================

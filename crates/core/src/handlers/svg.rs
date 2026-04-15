@@ -64,6 +64,7 @@ const DROP_ELEMENTS: &[&str] = &[
     "desc",          // often contains description + author
     "namedview",     // sodipodi editor state
     "script",        // embedded JavaScript (content-safety, not metadata)
+    "style",         // CSS block: producer comments + @import / url() beacons
     "foreignObject", // XSS via embedded HTML (iframe / form / object / ...)
     "iframe",        // defense-in-depth - not a native SVG element
 ];
@@ -805,5 +806,51 @@ mod tests {
             out.contains("<rect"),
             "sibling rect element must survive: {out}"
         );
+    }
+
+    #[test]
+    fn svg_clean_drops_style_block() {
+        // `<style>` inside an SVG survived the drop pass because the
+        // element was not in DROP_ELEMENTS. CSS comments and @import
+        // / url() beacons inside a styled SVG are a real leak vector:
+        // a `/* author: jvoisin */` comment fingerprints the editor,
+        // and an `@import url(http://tracker/x.css)` beacons on
+        // every render. Match mat2's outcome (mat2 rasterizes, so
+        // styles are lost) by dropping the whole element subtree.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("styled.svg");
+        let dst = dir.path().join("clean.svg");
+        let xml = br#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">
+  <style>
+    /* author: jvoisin, version: 1.2.3 */
+    @import url(http://tracker.example/beacon.css);
+    rect { fill: url(http://tracker.example/fill.png); }
+  </style>
+  <rect x="0" y="0" width="10" height="10"/>
+</svg>"#;
+        fs::write(&src, xml).unwrap();
+
+        let h = SvgHandler;
+        h.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+
+        for needle in [
+            "<style",
+            "</style>",
+            "author: jvoisin",
+            "version: 1.2.3",
+            "@import",
+            "tracker.example",
+            "beacon.css",
+            "fill.png",
+        ] {
+            assert!(
+                !out.contains(needle),
+                "'{needle}' leaked through SVG clean: {out}"
+            );
+        }
+        // Structural content still there.
+        assert!(out.contains("<rect"), "rect must survive: {out}");
     }
 }

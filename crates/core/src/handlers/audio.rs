@@ -160,7 +160,7 @@ impl FormatHandler for AudioHandler {
                 path: path.to_path_buf(),
                 detail: format!("Failed to blank FLAC vendor: {e}"),
             })?;
-            strip_flac_application_blocks(output_path)?;
+            strip_flac_leaky_blocks(output_path)?;
         }
 
         Ok(())
@@ -241,11 +241,29 @@ fn blank_flac_vendor(path: &Path) -> Result<(), String> {
 /// <https://xiph.org/flac/format.html#metadata_block_header> -
 /// the 7-bit block type field uses these values.
 const FLAC_BLOCK_APPLICATION: u8 = 2;
+const FLAC_BLOCK_PICTURE: u8 = 6;
 
-/// Walk a FLAC file's metadata block list and drop every `APPLICATION`
-/// (type 2) block. The file is only rewritten when at least one such
-/// block is found; the common case (no APPLICATION blocks) is a cheap
-/// read-only scan.
+/// Block types that carry fingerprinting payloads we always want
+/// dropped from a cleaned FLAC.
+///
+/// - `APPLICATION` (type 2): free-form producer slot where mastering
+///   tools (shntool, cuetools, Melodyne, ReplayGain scanners) stuff
+///   arbitrary identifying payloads. mat2 doesn't explicitly strip
+///   these, but they are a real fingerprinting channel.
+/// - `PICTURE` (type 6): embedded cover art. In FLAC these live as
+///   standalone metadata blocks *outside* the VorbisComments block, so
+///   `TagType::VorbisComments::remove_from_path` does not touch them,
+///   and the old APPLICATION-only sweep used to leave them in place.
+///   A cover JPEG can ship its own EXIF `Artist`/`GPSLatitude` leak
+///   (exercised by `flac_reader_recurses_into_embedded_cover` in the
+///   parity suite) so the cleaner must drop the whole block, not just
+///   strip the tag surface around it.
+const FLAC_LEAKY_BLOCK_TYPES: &[u8] = &[FLAC_BLOCK_APPLICATION, FLAC_BLOCK_PICTURE];
+
+/// Walk a FLAC file's metadata block list and drop every block whose
+/// type is in `FLAC_LEAKY_BLOCK_TYPES`. The file is only rewritten
+/// when at least one matching block is found; the common case is a
+/// cheap read-only scan.
 ///
 /// A FLAC stream begins with the ASCII magic `fLaC`, followed by a
 /// sequence of metadata blocks. Each block has a 4-byte header: 1 bit
@@ -259,13 +277,13 @@ const FLAC_BLOCK_APPLICATION: u8 = 2;
 /// On corrupted or non-FLAC input the function is a no-op rather than
 /// returning an error, so a caller that happens to mis-dispatch a
 /// non-FLAC file through this path does not corrupt it.
-fn strip_flac_application_blocks(path: &Path) -> Result<(), CoreError> {
+fn strip_flac_leaky_blocks(path: &Path) -> Result<(), CoreError> {
     let data = std::fs::read(path).map_err(|e| CoreError::CleanError {
         path: path.to_path_buf(),
         detail: format!("Failed to re-read FLAC for block sweep: {e}"),
     })?;
 
-    let Some(rewritten) = rewrite_flac_without_application_blocks(&data) else {
+    let Some(rewritten) = rewrite_flac_without_blocks(&data, FLAC_LEAKY_BLOCK_TYPES) else {
         return Ok(());
     };
 
@@ -276,10 +294,11 @@ fn strip_flac_application_blocks(path: &Path) -> Result<(), CoreError> {
 }
 
 /// Pure function: parse `data` as a FLAC stream and return a rewritten
-/// copy with every `APPLICATION` block removed. Returns `None` when
-/// the input is not a valid FLAC stream, or when there are no
-/// APPLICATION blocks to drop (so the caller can skip the write).
-fn rewrite_flac_without_application_blocks(data: &[u8]) -> Option<Vec<u8>> {
+/// copy with every metadata block whose 7-bit type is in `drop_types`
+/// removed. Returns `None` when the input is not a valid FLAC stream,
+/// or when there are no matching blocks to drop (so the caller can
+/// skip the write).
+fn rewrite_flac_without_blocks(data: &[u8], drop_types: &[u8]) -> Option<Vec<u8>> {
     if data.len() < 4 || &data[..4] != b"fLaC" {
         return None;
     }
@@ -316,21 +335,18 @@ fn rewrite_flac_without_application_blocks(data: &[u8]) -> Option<Vec<u8>> {
         }
     }
 
-    if !blocks
-        .iter()
-        .any(|b| b.block_type == FLAC_BLOCK_APPLICATION)
-    {
+    if !blocks.iter().any(|b| drop_types.contains(&b.block_type)) {
         return None;
     }
 
-    // Filter APPLICATION blocks out. STREAMINFO (type 0) must always
-    // be present as the first block per the FLAC spec; if a crafted
-    // input has marked STREAMINFO itself as an APPLICATION block the
-    // filtered list will be empty and the output would be invalid.
-    // Bail rather than corrupt.
+    // Filter the leaky blocks out. STREAMINFO (type 0) must always be
+    // present as the first block per the FLAC spec; if a crafted
+    // input has marked STREAMINFO itself with one of the dropped
+    // types the filtered list will be empty and the output would be
+    // invalid. Bail rather than corrupt.
     let kept: Vec<&BlockSlice> = blocks
         .iter()
-        .filter(|b| b.block_type != FLAC_BLOCK_APPLICATION)
+        .filter(|b| !drop_types.contains(&b.block_type))
         .collect();
     if kept.is_empty() || kept[0].block_type != 0 {
         return None;
@@ -567,16 +583,17 @@ mod tests {
 
     #[test]
     fn rewrite_flac_returns_none_on_non_flac_magic() {
-        assert!(rewrite_flac_without_application_blocks(b"oggS...").is_none());
-        assert!(rewrite_flac_without_application_blocks(b"").is_none());
+        assert!(rewrite_flac_without_blocks(b"oggS...", FLAC_LEAKY_BLOCK_TYPES).is_none());
+        assert!(rewrite_flac_without_blocks(b"", FLAC_LEAKY_BLOCK_TYPES).is_none());
     }
 
     #[test]
-    fn rewrite_flac_returns_none_when_no_application_blocks() {
-        // STREAMINFO + PADDING + audio frames, no APPLICATION anywhere.
+    fn rewrite_flac_returns_none_when_no_leaky_blocks() {
+        // STREAMINFO + PADDING + audio frames, no APPLICATION or
+        // PICTURE anywhere.
         let flac = synth_flac(&[(1, &[0u8; 16])]);
         assert!(
-            rewrite_flac_without_application_blocks(&flac).is_none(),
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).is_none(),
             "no-op case must skip the write"
         );
     }
@@ -590,7 +607,8 @@ mod tests {
         // before walking into the audio frames.
         let app_body = b"XXXXsecret-producer-data";
         let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, app_body)]);
-        let rewritten = rewrite_flac_without_application_blocks(&flac).expect("should rewrite");
+        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
+            .expect("should rewrite");
 
         // Magic preserved.
         assert_eq!(&rewritten[..4], b"fLaC");
@@ -618,7 +636,8 @@ mod tests {
         // non-last block and VORBIS_COMMENT as the last.
         let vc_body = b"junk-vorbis-body";
         let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, b"APP1payload"), (4, vc_body)]);
-        let rewritten = rewrite_flac_without_application_blocks(&flac).expect("should rewrite");
+        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
+            .expect("should rewrite");
 
         // First kept block (STREAMINFO, type 0) has last-flag clear.
         assert_eq!(rewritten[4] & 0x80, 0);
@@ -645,7 +664,7 @@ mod tests {
         flac.extend_from_slice(&[0x00, 0x00, 0x64]); // 100 bytes
         flac.extend_from_slice(b"abcd");
         assert!(
-            rewrite_flac_without_application_blocks(&flac).is_none(),
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).is_none(),
             "truncated body must not corrupt the file"
         );
     }
@@ -664,8 +683,76 @@ mod tests {
         flac.extend_from_slice(b"APP1");
         flac.extend_from_slice(b"AUDIO");
         assert!(
-            rewrite_flac_without_application_blocks(&flac).is_none(),
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).is_none(),
             "rewriting must not emit a FLAC without STREAMINFO"
+        );
+    }
+
+    #[test]
+    fn rewrite_flac_drops_picture_block() {
+        // Regression for HIGH-4: a FLAC PICTURE block (type 6) lives
+        // as a standalone metadata block outside the VorbisComments
+        // block, so `TagType::VorbisComments::remove_from_path`
+        // doesn't touch it. Before the fix, a cleaned FLAC still
+        // carried its embedded cover art (which can itself ship EXIF
+        // Artist / GPS leaks). After the fix, the generalised block
+        // sweep drops PICTURE alongside APPLICATION.
+        //
+        // Layout: STREAMINFO | PICTURE("secret-cover-bytes") | audio.
+        let pic_body = b"secret-cover-bytes-with-EXIF-and-GPS";
+        let flac = synth_flac(&[(FLAC_BLOCK_PICTURE, pic_body)]);
+        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
+            .expect("picture-carrying FLAC should be rewritten");
+
+        // Magic preserved, STREAMINFO is now the last metadata block.
+        assert_eq!(&rewritten[..4], b"fLaC");
+        assert_eq!(
+            rewritten[4], 0x80,
+            "STREAMINFO must become the new last metadata block"
+        );
+        // The PICTURE body must not survive anywhere in the output.
+        assert!(
+            !rewritten.windows(pic_body.len()).any(|w| w == pic_body),
+            "PICTURE body survived the rewrite"
+        );
+        // Audio frames preserved at the tail.
+        assert!(rewritten.ends_with(b"AUDIO456"));
+    }
+
+    #[test]
+    fn rewrite_flac_drops_picture_and_application_together() {
+        // STREAMINFO | PICTURE | APPLICATION | VORBIS_COMMENT | audio.
+        // Both leaky types must be dropped in one pass, leaving only
+        // STREAMINFO + VORBIS_COMMENT, with VORBIS_COMMENT correctly
+        // marked as the last metadata block.
+        let pic = b"picture-bytes";
+        let app = b"application-bytes";
+        let vc = b"vorbis-bytes";
+        let flac = synth_flac(&[
+            (FLAC_BLOCK_PICTURE, pic),
+            (FLAC_BLOCK_APPLICATION, app),
+            (4, vc),
+        ]);
+        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
+            .expect("should rewrite");
+
+        assert!(
+            !rewritten.windows(pic.len()).any(|w| w == pic),
+            "picture body leaked"
+        );
+        assert!(
+            !rewritten.windows(app.len()).any(|w| w == app),
+            "application body leaked"
+        );
+
+        // Second kept block (VORBIS_COMMENT, type 4) must now be
+        // marked as the last metadata block.
+        let second_header_idx = 4 + 4 + 34;
+        assert_eq!(rewritten[second_header_idx] & 0x7f, 4);
+        assert_eq!(
+            rewritten[second_header_idx] & 0x80,
+            0x80,
+            "VORBIS_COMMENT must now be the last metadata block"
         );
     }
 }

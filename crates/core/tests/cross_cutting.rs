@@ -430,7 +430,14 @@ const FORMATS: &[FormatRow] = &[
         ext: "pdf",
         mime: "application/pdf",
         needs_ffmpeg: false,
-        deterministic: true,
+        // PDFs deliberately re-randomise the trailer `/ID` on every
+        // clean so every cleaned PDF carries a fresh per-document
+        // fingerprint: batch linking attacks can't group cleaned PDFs
+        // by a shared `/ID` value, matching mat2's behaviour. This
+        // means two clean runs of the same input produce different
+        // bytes on purpose. See `handlers::pdf` §2 and
+        // `pdf::tests::clean_randomizes_trailer_id`.
+        deterministic: false,
         // lopdf's `Document::save` renumbers the xref object on every
         // save, so cleaning an already-clean PDF yields different
         // bytes even though the stripped set is identical. Semantic
