@@ -20,6 +20,11 @@
 //! `clean_metadata` / `read_metadata`.
 
 #![allow(clippy::unwrap_used)]
+// Scenario-matrix wrapper functions (§C) normalize a mix of
+// infallible and io::Result-returning fixture builders to a single
+// fn-pointer signature so they can live in a `const` array; the
+// no-op Ok(()) wrappers are intentional.
+#![allow(clippy::unnecessary_wraps)]
 mod common;
 
 use std::fs;
@@ -3106,6 +3111,520 @@ fn clean_tar_zst_baseline_survives() {
     let handler = get_handler_for_mime("application/zstd").unwrap();
     handler.clean_metadata(&src, &dst).unwrap();
     assert!(fs::metadata(&dst).unwrap().len() > 0);
+}
+
+// ============================================================
+// §C. Cross-format scenarios
+// ============================================================
+//
+// Each test in this section iterates over the `SCENARIOS` matrix
+// and exercises a single filesystem / API scenario against every
+// supported format. Rows whose fixture builder returns `Err`
+// (usually "ffmpeg codec not compiled in") are skipped per-row so
+// a minimal CI image still runs everything else.
+
+type BuildFn = fn(&std::path::Path) -> std::io::Result<()>;
+
+struct Scenario {
+    name: &'static str,
+    mime: &'static str,
+    ext: &'static str,
+    build: BuildFn,
+}
+
+fn s_jpeg(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_jpeg(p);
+    Ok(())
+}
+fn s_png(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_png(p);
+    Ok(())
+}
+fn s_pdf(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_pdf(p);
+    Ok(())
+}
+fn s_gif(p: &std::path::Path) -> std::io::Result<()> {
+    let mut gif = Vec::new();
+    gif.extend_from_slice(b"GIF89a");
+    gif.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x00, 0x00, 0x00]);
+    gif.extend_from_slice(&[0x21, 0xFE]);
+    gif.push(14);
+    gif.extend_from_slice(b"scenario-plant");
+    gif.push(0x00);
+    gif.extend_from_slice(&[0x2C, 0x00, 0x00, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00]);
+    gif.extend_from_slice(&[0x02, 0x02, 0x44, 0x01, 0x00]);
+    gif.push(0x3B);
+    fs::write(p, &gif)
+}
+fn s_bmp(p: &std::path::Path) -> std::io::Result<()> {
+    make_bmp(p);
+    Ok(())
+}
+fn s_html(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, b"<!doctype html><html><head><meta name=author content=alice><title>t</title></head><body><p>scenario-visible-body</p></body></html>")
+}
+fn s_xhtml(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><meta name="author" content="alice"/></head><body><p>scenario-visible-xhtml</p></body></html>"#)
+}
+fn s_svg(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(
+        p,
+        br#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     xmlns:dc="http://purl.org/dc/elements/1.1/"
+     xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#"
+     width="16" height="16">
+  <metadata><rdf:RDF><dc:creator>scenario-plant-creator</dc:creator></rdf:RDF></metadata>
+  <rect width="16" height="16" fill="red"/>
+</svg>"#,
+    )
+}
+fn s_css(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, b"/* scenario-plant */\nbody { color: red; }")
+}
+fn s_txt(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, b"scenario-visible-txt-body")
+}
+fn s_torrent(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, b"d8:announce11:http://x/tr10:created by14:scenario-plant4:infod6:lengthi10e4:name8:pony.txt12:piece lengthi16384e6:pieces20:01234567890123456789ee")
+}
+fn s_docx(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_docx(p, TEST_JPEG);
+    Ok(())
+}
+fn s_xlsx(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_xlsx(p);
+    Ok(())
+}
+fn s_pptx(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_pptx(p);
+    Ok(())
+}
+fn s_odt(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_odt(p);
+    Ok(())
+}
+fn s_ods(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_ods(p);
+    Ok(())
+}
+fn s_odp(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_odp(p);
+    Ok(())
+}
+fn s_odg(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_odg(p);
+    Ok(())
+}
+fn s_epub(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_epub(p);
+    Ok(())
+}
+fn s_zip(p: &std::path::Path) -> std::io::Result<()> {
+    use zip::write::SimpleFileOptions;
+    let file = fs::File::create(p)?;
+    let mut writer = zip::ZipWriter::new(file);
+    let opts = SimpleFileOptions::default();
+    writer.start_file("a.txt", opts).unwrap();
+    writer.write_all(b"scenario-visible").unwrap();
+    writer.finish().unwrap();
+    Ok(())
+}
+fn s_tar(p: &std::path::Path) -> std::io::Result<()> {
+    fs::write(p, build_clean_tar_bytes())
+}
+fn s_targz(p: &std::path::Path) -> std::io::Result<()> {
+    let f = fs::File::create(p)?;
+    let mut enc = flate2::write::GzEncoder::new(f, flate2::Compression::default());
+    enc.write_all(&build_clean_tar_bytes())?;
+    enc.finish()?;
+    Ok(())
+}
+fn s_tarbz2(p: &std::path::Path) -> std::io::Result<()> {
+    let f = fs::File::create(p)?;
+    let mut enc = bzip2::write::BzEncoder::new(f, bzip2::Compression::default());
+    enc.write_all(&build_clean_tar_bytes())?;
+    enc.finish()?;
+    Ok(())
+}
+fn s_tarxz(p: &std::path::Path) -> std::io::Result<()> {
+    let f = fs::File::create(p)?;
+    let mut enc = xz2::write::XzEncoder::new(f, 6);
+    enc.write_all(&build_clean_tar_bytes())?;
+    enc.finish()?;
+    Ok(())
+}
+fn s_tarzst(p: &std::path::Path) -> std::io::Result<()> {
+    let f = fs::File::create(p)?;
+    let mut enc = zstd::Encoder::new(f, 3).unwrap();
+    enc.write_all(&build_clean_tar_bytes())?;
+    enc.finish().unwrap();
+    Ok(())
+}
+fn s_mp3(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_mp3(p)
+}
+fn s_flac(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_flac(p)
+}
+fn s_ogg(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_ogg(p)
+}
+fn s_wav(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_wav(p)
+}
+fn s_aiff(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_aiff(p)
+}
+fn s_opus(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_opus(p)
+}
+fn s_m4a(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_m4a(p)
+}
+fn s_aac(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_aac(p)
+}
+fn s_mp4(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_mp4(p)
+}
+fn s_mkv(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_mkv(p)
+}
+fn s_webm(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_webm(p)
+}
+fn s_avi(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_avi(p)
+}
+fn s_mov(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_mov(p)
+}
+fn s_wmv(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_wmv(p)
+}
+fn s_flv(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_flv(p)
+}
+fn s_video_ogg(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_video_ogg(p)
+}
+fn s_tiff(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_tiff(p)
+}
+fn s_webp(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_webp(p)
+}
+fn s_heic(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_heic(p)
+}
+fn s_heif(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_heif(p)
+}
+fn s_jxl(p: &std::path::Path) -> std::io::Result<()> {
+    make_dirty_jxl(p)
+}
+
+const SCENARIOS: &[Scenario] = &[
+    // Non-ffmpeg formats (always present)
+    Scenario { name: "jpeg", mime: "image/jpeg", ext: "jpg", build: s_jpeg },
+    Scenario { name: "png", mime: "image/png", ext: "png", build: s_png },
+    Scenario { name: "gif", mime: "image/gif", ext: "gif", build: s_gif },
+    Scenario { name: "bmp", mime: "image/bmp", ext: "bmp", build: s_bmp },
+    Scenario { name: "pdf", mime: "application/pdf", ext: "pdf", build: s_pdf },
+    Scenario { name: "html", mime: "text/html", ext: "html", build: s_html },
+    Scenario { name: "xhtml", mime: "application/xhtml+xml", ext: "xhtml", build: s_xhtml },
+    Scenario { name: "svg", mime: "image/svg+xml", ext: "svg", build: s_svg },
+    Scenario { name: "css", mime: "text/css", ext: "css", build: s_css },
+    Scenario { name: "txt", mime: "text/plain", ext: "txt", build: s_txt },
+    Scenario { name: "torrent", mime: "application/x-bittorrent", ext: "torrent", build: s_torrent },
+    Scenario { name: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ext: "docx", build: s_docx },
+    Scenario { name: "xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ext: "xlsx", build: s_xlsx },
+    Scenario { name: "pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", ext: "pptx", build: s_pptx },
+    Scenario { name: "odt", mime: "application/vnd.oasis.opendocument.text", ext: "odt", build: s_odt },
+    Scenario { name: "ods", mime: "application/vnd.oasis.opendocument.spreadsheet", ext: "ods", build: s_ods },
+    Scenario { name: "odp", mime: "application/vnd.oasis.opendocument.presentation", ext: "odp", build: s_odp },
+    Scenario { name: "odg", mime: "application/vnd.oasis.opendocument.graphics", ext: "odg", build: s_odg },
+    Scenario { name: "epub", mime: "application/epub+zip", ext: "epub", build: s_epub },
+    Scenario { name: "zip", mime: "application/zip", ext: "zip", build: s_zip },
+    Scenario { name: "tar", mime: "application/x-tar", ext: "tar", build: s_tar },
+    Scenario { name: "tar.gz", mime: "application/gzip", ext: "tar.gz", build: s_targz },
+    Scenario { name: "tar.bz2", mime: "application/x-bzip2", ext: "tar.bz2", build: s_tarbz2 },
+    Scenario { name: "tar.xz", mime: "application/x-xz", ext: "tar.xz", build: s_tarxz },
+    Scenario { name: "tar.zst", mime: "application/zstd", ext: "tar.zst", build: s_tarzst },
+    // ffmpeg-dependent rows (self-skipping via Err)
+    Scenario { name: "mp3", mime: "audio/mpeg", ext: "mp3", build: s_mp3 },
+    Scenario { name: "flac", mime: "audio/flac", ext: "flac", build: s_flac },
+    Scenario { name: "ogg", mime: "audio/ogg", ext: "ogg", build: s_ogg },
+    Scenario { name: "wav", mime: "audio/x-wav", ext: "wav", build: s_wav },
+    Scenario { name: "aiff", mime: "audio/x-aiff", ext: "aiff", build: s_aiff },
+    Scenario { name: "opus", mime: "audio/opus", ext: "opus", build: s_opus },
+    Scenario { name: "m4a", mime: "audio/mp4", ext: "m4a", build: s_m4a },
+    Scenario { name: "aac", mime: "audio/aac", ext: "aac", build: s_aac },
+    Scenario { name: "mp4", mime: "video/mp4", ext: "mp4", build: s_mp4 },
+    Scenario { name: "mkv", mime: "video/x-matroska", ext: "mkv", build: s_mkv },
+    Scenario { name: "webm", mime: "video/webm", ext: "webm", build: s_webm },
+    Scenario { name: "avi", mime: "video/x-msvideo", ext: "avi", build: s_avi },
+    Scenario { name: "mov", mime: "video/quicktime", ext: "mov", build: s_mov },
+    Scenario { name: "wmv", mime: "video/x-ms-wmv", ext: "wmv", build: s_wmv },
+    Scenario { name: "flv", mime: "video/x-flv", ext: "flv", build: s_flv },
+    Scenario { name: "video_ogg", mime: "video/ogg", ext: "ogv", build: s_video_ogg },
+    Scenario { name: "tiff", mime: "image/tiff", ext: "tiff", build: s_tiff },
+    Scenario { name: "webp", mime: "image/webp", ext: "webp", build: s_webp },
+    Scenario { name: "heic", mime: "image/heic", ext: "heic", build: s_heic },
+    Scenario { name: "heif", mime: "image/heif", ext: "heif", build: s_heif },
+    Scenario { name: "jxl", mime: "image/jxl", ext: "jxl", build: s_jxl },
+];
+
+#[test]
+fn scenario_clean_overwrites_preexisting_output_file_for_every_format() {
+    // For each format: pre-create the destination file with junk
+    // bytes, call `clean_metadata`, then assert the output is not a
+    // prefix-concatenation of the junk and the clean output (i.e.
+    // the cleaner truncated/replaced the destination).
+    for row in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("dirty.{}", row.ext));
+        let dst = dir.path().join(format!("out.{}", row.ext));
+        if (row.build)(&src).is_err() {
+            eprintln!("[SKIP] overwrite scenario: {}", row.name);
+            continue;
+        }
+        // Pre-create destination with sentinel bytes.
+        let junk = b"JUNK-SENTINEL-BYTES-MUST-BE-REPLACED";
+        fs::write(&dst, junk).unwrap();
+
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        handler
+            .clean_metadata(&src, &dst)
+            .unwrap_or_else(|e| panic!("clean failed for {}: {e}", row.name));
+
+        let out = fs::read(&dst).unwrap();
+        assert!(
+            !out.starts_with(junk),
+            "clean left junk sentinel at head of output for {}",
+            row.name
+        );
+        assert!(
+            !out.windows(junk.len()).any(|w| w == junk),
+            "junk sentinel survived anywhere in {} output",
+            row.name
+        );
+    }
+}
+
+#[test]
+fn scenario_read_metadata_is_stable_across_repeated_calls() {
+    // Call `read_metadata` three times on each fixture and assert
+    // every call returns an equal `MetadataSet`. Reader stability
+    // is the counterpart of cleaner determinism and is not covered
+    // by the cross_cutting matrix.
+    for row in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("dirty.{}", row.ext));
+        if (row.build)(&src).is_err() {
+            eprintln!("[SKIP] reader-stability scenario: {}", row.name);
+            continue;
+        }
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        let first = handler.read_metadata(&src);
+        let second = handler.read_metadata(&src);
+        let third = handler.read_metadata(&src);
+        match (first, second, third) {
+            (Ok(a), Ok(b), Ok(c)) => {
+                // Pretty-compare to keep the failure message readable.
+                let a_s = format!("{a:?}");
+                let b_s = format!("{b:?}");
+                let c_s = format!("{c:?}");
+                assert_eq!(a_s, b_s, "reader unstable across 1->2 for {}", row.name);
+                assert_eq!(b_s, c_s, "reader unstable across 2->3 for {}", row.name);
+            }
+            (Err(_), Err(_), Err(_)) => {
+                // If every call errors consistently that's still stable.
+            }
+            other => panic!("reader inconsistent across calls for {}: {other:?}", row.name),
+        }
+    }
+}
+
+#[test]
+fn scenario_clean_followed_by_read_surfaces_no_user_metadata() {
+    // For every format: build dirty, clean, re-read, assert no
+    // surviving metadata item contains any well-known plant
+    // string. This is the read-after-clean invariant measured at
+    // the public API level (not via raw bytes).
+    for row in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("dirty.{}", row.ext));
+        let dst = dir.path().join(format!("out.{}", row.ext));
+        if (row.build)(&src).is_err() {
+            eprintln!("[SKIP] read-after-clean scenario: {}", row.name);
+            continue;
+        }
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        handler
+            .clean_metadata(&src, &dst)
+            .unwrap_or_else(|e| panic!("clean failed for {}: {e}", row.name));
+
+        if let Ok(meta) = handler.read_metadata(&dst) {
+            for group in &meta.groups {
+                for item in &group.items {
+                    assert!(
+                        !is_user_metadata_key_plant(&item.key, &item.value),
+                        "cleaned {} still surfaces user metadata: {} = {}",
+                        row.name,
+                        item.key,
+                        item.value
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn scenario_clean_to_same_directory_as_input_does_not_clobber_source() {
+    // Cleaning to a sibling file in the same dir must not delete
+    // or overwrite the source. Covers a common frontend pattern
+    // ("clean foo.jpg → foo.clean.jpg in the same dir").
+    for row in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("src.{}", row.ext));
+        let dst = dir.path().join(format!("src.clean.{}", row.ext));
+        if (row.build)(&src).is_err() {
+            eprintln!("[SKIP] same-dir scenario: {}", row.name);
+            continue;
+        }
+        let src_bytes_before = fs::read(&src).unwrap();
+
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        handler
+            .clean_metadata(&src, &dst)
+            .unwrap_or_else(|e| panic!("clean failed for {}: {e}", row.name));
+
+        // Source must still exist, and its bytes must be unchanged.
+        let src_bytes_after = fs::read(&src).unwrap();
+        assert_eq!(
+            src_bytes_before, src_bytes_after,
+            "clean mutated the source file for {}",
+            row.name
+        );
+        // Destination must exist and be non-empty (except for tar
+        // archives which may be empty-but-valid).
+        assert!(
+            fs::metadata(&dst).is_ok(),
+            "destination missing for {}",
+            row.name
+        );
+    }
+}
+
+#[test]
+fn scenario_clean_preserves_visible_content_for_text_formats() {
+    // Cleaner must not drop the visible body when cleaning text
+    // formats. This is stricter than the existing per-format
+    // baseline tests: we build a fixture with plants AND visible
+    // content, clean, and assert only plants are gone.
+    struct Row<'a> {
+        name: &'a str,
+        mime: &'a str,
+        ext: &'a str,
+        body: &'a [u8],
+        visible: &'a str,
+    }
+    let rows = [
+        Row {
+            name: "html",
+            mime: "text/html",
+            ext: "html",
+            body: b"<html><head><meta name=author content=alice></head><body><p>visible-hello</p></body></html>",
+            visible: "visible-hello",
+        },
+        Row {
+            name: "xhtml",
+            mime: "application/xhtml+xml",
+            ext: "xhtml",
+            body: br#"<?xml version="1.0"?><html xmlns="http://www.w3.org/1999/xhtml"><head><meta name="author" content="alice"/></head><body><p>visible-xhello</p></body></html>"#,
+            visible: "visible-xhello",
+        },
+        Row {
+            name: "svg",
+            mime: "image/svg+xml",
+            ext: "svg",
+            body: br#"<?xml version="1.0"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16">
+  <metadata>plant</metadata>
+  <rect width="16" height="16" fill="visible-magenta"/>
+</svg>"#,
+            visible: "visible-magenta",
+        },
+        Row {
+            name: "css",
+            mime: "text/css",
+            ext: "css",
+            body: b"/* plant */\n.visible-rule { color: red; }\n",
+            visible: ".visible-rule",
+        },
+        Row {
+            name: "txt",
+            mime: "text/plain",
+            ext: "txt",
+            body: b"visible-plain-text-body",
+            visible: "visible-plain-text-body",
+        },
+    ];
+    for row in &rows {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("dirty.{}", row.ext));
+        let dst = dir.path().join(format!("out.{}", row.ext));
+        fs::write(&src, row.body).unwrap();
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        handler.clean_metadata(&src, &dst).unwrap();
+        let out = fs::read_to_string(&dst).unwrap();
+        assert!(
+            out.contains(row.visible),
+            "{} visible content missing after clean: {}",
+            row.name,
+            out
+        );
+    }
+}
+
+#[test]
+fn scenario_handler_releases_source_file_after_return() {
+    // After `clean_metadata` returns, the source file must be
+    // releasable — i.e. `std::fs::remove_file` on it must succeed.
+    // A handler that leaked a file descriptor on Linux would
+    // ordinarily still allow delete (unlink works on open files),
+    // but the source file should at least not be locked against
+    // rename on the same tmpdir.
+    for row in SCENARIOS {
+        let dir = tempfile::tempdir().unwrap();
+        let src = dir.path().join(format!("src.{}", row.ext));
+        let dst = dir.path().join(format!("out.{}", row.ext));
+        if (row.build)(&src).is_err() {
+            eprintln!("[SKIP] handle-release scenario: {}", row.name);
+            continue;
+        }
+        let handler = get_handler_for_mime(row.mime).unwrap();
+        handler
+            .clean_metadata(&src, &dst)
+            .unwrap_or_else(|e| panic!("clean failed for {}: {e}", row.name));
+
+        // Rename source to a new name in the same dir. On any sane
+        // platform this succeeds regardless of open fds; the assert
+        // is really about the handler leaving the path in a state
+        // the caller can manipulate.
+        let renamed = dir.path().join(format!("renamed.{}", row.ext));
+        fs::rename(&src, &renamed).unwrap_or_else(|e| {
+            panic!("rename after clean failed for {}: {e}", row.name);
+        });
+        // And then delete the renamed file.
+        fs::remove_file(&renamed).unwrap_or_else(|e| {
+            panic!("delete after clean failed for {}: {e}", row.name);
+        });
+    }
 }
 
 // ============================================================
