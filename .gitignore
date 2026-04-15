@@ -16,3 +16,6 @@ Cargo.lock
 # OS noise
 .DS_Store
 Thumbs.db
+
+# Local agent notes — not tracked in the repo
+CLAUDE.md
