@@ -26,4 +26,11 @@ pub enum CoreError {
 
     #[error("External tool failed: {tool}: {detail}")]
     ToolFailed { tool: String, detail: String },
+
+    #[error("File {} is {size} bytes, exceeds the {limit}-byte input cap", path.display())]
+    FileTooLarge {
+        path: PathBuf,
+        size: u64,
+        limit: u64,
+    },
 }

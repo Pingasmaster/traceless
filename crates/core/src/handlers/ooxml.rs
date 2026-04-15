@@ -25,7 +25,24 @@ use std::collections::HashSet;
 use std::hash::BuildHasher;
 use std::io::Cursor;
 
+use crate::error::CoreError;
+
 use super::xml_util::{local_name, sort_xml_attributes};
+
+fn clean_err(detail: impl Into<String>) -> CoreError {
+    CoreError::CleanError {
+        path: std::path::PathBuf::new(),
+        detail: detail.into(),
+    }
+}
+
+fn write_err(what: &'static str) -> impl Fn(std::io::Error) -> CoreError {
+    move |e| clean_err(format!("OOXML {what} write error: {e}"))
+}
+
+fn parse_err(what: &'static str) -> impl Fn(quick_xml::Error) -> CoreError {
+    move |e| clean_err(format!("OOXML {what} parse error: {e}"))
+}
 
 /// Paths that are *always* replaced with a minimal stub, regardless of
 /// what's inside. The content of docProps/core.xml and docProps/app.xml
@@ -63,38 +80,47 @@ const CUSTOM_STUB: &str = concat!(
 /// Full pipeline applied to every `.xml` / `.xml.rels` member that doesn't
 /// have a stub: remove rsid, nsid, revisions, comment ranges; randomize
 /// creationIds; sort attributes; strip `mc:Ignorable`.
-#[must_use]
-pub fn clean_xml_member(path: &str, xml: &str) -> String {
+///
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any underlying parse or write
+/// failure. Before the F2 fix this pipeline silently returned the
+/// original bytes on error, so a malformed `word/document.xml` (or any
+/// other OOXML XML member) would ship with its rsid / tracked-changes /
+/// creationId fingerprints intact.
+pub fn clean_xml_member(path: &str, xml: &str) -> Result<String, CoreError> {
     // 1. Element-level cleanups
-    let mut out = strip_fingerprints(xml);
+    let mut out = strip_fingerprints(xml)?;
 
     // 2. word/document.xml specifically: drop tracked changes + comment refs
     if path.ends_with("word/document.xml") {
-        out = strip_revisions(&out);
-        out = strip_comment_refs(&out);
+        out = strip_revisions(&out)?;
+        out = strip_comment_refs(&out)?;
     }
 
     // 3. presentation.xml specifically: randomize slide master ids
     if path.ends_with("ppt/presentation.xml") {
-        out = randomize_sld_master_ids(&out);
+        out = randomize_sld_master_ids(&out)?;
     }
 
     // 4. attribute ordering
-    out = sort_xml_attributes(&out);
+    out = sort_xml_attributes(&out)?;
 
     // 5. `mc:Ignorable` is byte-level — see mat2 office.py line 515
-    strip_mc_ignorable(&out)
+    Ok(strip_mc_ignorable(&out))
 }
 
 /// Strip:
 /// - elements whose local name matches `rsid*` or equals `nsid`
 /// - attributes on *any* element whose local name matches `rsid*`
 /// - randomize `p14:creationId` values
-fn strip_fingerprints(xml: &str) -> String {
+fn strip_fingerprints(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut rng = rand::rng();
     let mut skip_depth: usize = 0;
+    let werr = write_err("strip_fingerprints");
+    let perr = parse_err("strip_fingerprints");
 
     loop {
         match reader.read_event() {
@@ -109,18 +135,14 @@ fn strip_fingerprints(xml: &str) -> String {
                     continue;
                 }
                 let rewritten = rewrite_attributes(e, &mut rng);
-                if writer.write_event(Event::Start(rewritten)).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Start(rewritten)).map_err(&werr)?;
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
                     skip_depth -= 1;
                     continue;
                 }
-                if writer.write_event(Event::End(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::End(e.clone())).map_err(&werr)?;
             }
             Ok(Event::Empty(ref e)) => {
                 if skip_depth > 0 {
@@ -131,26 +153,25 @@ fn strip_fingerprints(xml: &str) -> String {
                     continue;
                 }
                 let rewritten = rewrite_attributes(e, &mut rng);
-                if writer.write_event(Event::Empty(rewritten)).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Empty(rewritten)).map_err(&werr)?;
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer.write_event(Event::Text(t.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if skip_depth == 0 && writer.write_event(other).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer.write_event(other).map_err(&werr)?;
                 }
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML strip_fingerprints output not UTF-8: {e}")))
 }
 
 fn is_fingerprint_element(local: &str) -> bool {
@@ -205,11 +226,13 @@ fn rewrite_attributes(start: &BytesStart<'_>, rng: &mut impl Rng) -> BytesStart<
 /// elements. We drop `w:del` entirely (including its children — the
 /// deleted text). For `w:ins` we promote its children so the *new* text is
 /// preserved but the authorship of the insertion is lost.
-fn strip_revisions(xml: &str) -> String {
+fn strip_revisions(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut del_depth: usize = 0;
     let mut ins_depth: usize = 0;
+    let werr = write_err("strip_revisions");
+    let perr = parse_err("strip_revisions");
 
     loop {
         match reader.read_event() {
@@ -227,9 +250,7 @@ fn strip_revisions(xml: &str) -> String {
                     ins_depth += 1;
                     continue; // swallow the wrapper, keep the children
                 }
-                if writer.write_event(Event::Start(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Start(e.clone())).map_err(&werr)?;
             }
             Ok(Event::End(ref e)) => {
                 let ln = String::from_utf8_lossy(e.name().as_ref()).into_owned();
@@ -242,9 +263,7 @@ fn strip_revisions(xml: &str) -> String {
                     ins_depth -= 1;
                     continue;
                 }
-                if writer.write_event(Event::End(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::End(e.clone())).map_err(&werr)?;
             }
             Ok(Event::Empty(ref e)) => {
                 let ln = local_name(e);
@@ -255,34 +274,35 @@ fn strip_revisions(xml: &str) -> String {
                     // self-closing ins has nothing to promote
                     continue;
                 }
-                if writer.write_event(Event::Empty(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Empty(e.clone())).map_err(&werr)?;
             }
             Ok(Event::Text(ref t)) => {
-                if del_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
-                    return xml.to_string();
+                if del_depth == 0 {
+                    writer.write_event(Event::Text(t.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if del_depth == 0 && writer.write_event(other).is_err() {
-                    return xml.to_string();
+                if del_depth == 0 {
+                    writer.write_event(other).map_err(&werr)?;
                 }
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML strip_revisions output not UTF-8: {e}")))
 }
 
 /// Drop `w:commentRangeStart`, `w:commentRangeEnd`, `w:commentReference`.
 /// The comment bodies themselves live in `word/comments*.xml` which is
 /// already filtered out at the archive level by `zip_util::is_office_junk_path`.
-fn strip_comment_refs(xml: &str) -> String {
+fn strip_comment_refs(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let werr = write_err("strip_comment_refs");
+    let perr = parse_err("strip_comment_refs");
 
     let drop = |name: &str| {
         matches!(
@@ -302,48 +322,44 @@ fn strip_comment_refs(xml: &str) -> String {
             Ok(Event::Empty(ref e)) if drop(&local_name(e)) => {}
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if writer.write_event(other).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(other).map_err(&werr)?;
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML strip_comment_refs output not UTF-8: {e}")))
 }
 
 /// Rewrite every `<p:sldMasterId id="N" .../>` with a fresh random u32.
-fn randomize_sld_master_ids(xml: &str) -> String {
+fn randomize_sld_master_ids(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut rng = rand::rng();
+    let werr = write_err("randomize_sld_master_ids");
+    let perr = parse_err("randomize_sld_master_ids");
 
     loop {
         match reader.read_event() {
             Ok(Event::Empty(ref e)) if local_name(e) == "sldMasterId" => {
                 let rewritten = rewrite_id_attribute(e, "id", &mut rng);
-                if writer.write_event(Event::Empty(rewritten)).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Empty(rewritten)).map_err(&werr)?;
             }
             Ok(Event::Start(ref e)) if local_name(e) == "sldMasterId" => {
                 let rewritten = rewrite_id_attribute(e, "id", &mut rng);
-                if writer.write_event(Event::Start(rewritten)).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(Event::Start(rewritten)).map_err(&werr)?;
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if writer.write_event(other).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(other).map_err(&werr)?;
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML randomize_sld_master_ids output not UTF-8: {e}")))
 }
 
 fn rewrite_id_attribute(
@@ -425,18 +441,24 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 ///
 /// `Default Extension="..."` entries are content-type wildcards and are
 /// preserved unchanged. Only explicit `Override` entries are filtered.
-#[must_use]
-pub fn rewrite_content_types<S: BuildHasher>(xml: &str, kept_parts: &HashSet<String, S>) -> String {
+///
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any XML parse/write failure.
+pub fn rewrite_content_types<S: BuildHasher>(
+    xml: &str,
+    kept_parts: &HashSet<String, S>,
+) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let werr = write_err("rewrite_content_types");
+    let perr = parse_err("rewrite_content_types");
 
     loop {
         match reader.read_event() {
             Ok(Event::Empty(ref e)) if local_name(e) == "Override" => {
-                if !override_part_name_is_dropped(e, kept_parts)
-                    && writer.write_event(Event::Empty(e.clone())).is_err()
-                {
-                    return xml.to_string();
+                if !override_part_name_is_dropped(e, kept_parts) {
+                    writer.write_event(Event::Empty(e.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Start(ref e)) if local_name(e) == "Override" => {
@@ -448,21 +470,20 @@ pub fn rewrite_content_types<S: BuildHasher>(xml: &str, kept_parts: &HashSet<Str
                 let drop = override_part_name_is_dropped(e, kept_parts);
                 if drop {
                     let _ = reader.read_to_end(end_name.name());
-                } else if writer.write_event(Event::Start(e.clone())).is_err() {
-                    return xml.to_string();
+                } else {
+                    writer.write_event(Event::Start(e.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if writer.write_event(other).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(other).map_err(&werr)?;
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML rewrite_content_types output not UTF-8: {e}")))
 }
 
 /// Return `true` if an `<Override>` element should be removed because its
@@ -491,23 +512,26 @@ fn override_part_name_is_dropped<S: BuildHasher>(
 /// of relative `Target` attributes. External relationships
 /// (`TargetMode="External"`) point at URLs, not package parts, and are
 /// preserved unconditionally.
-#[must_use]
+///
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any XML parse/write failure.
 pub fn rewrite_rels<S: BuildHasher>(
     xml: &str,
     rels_path: &str,
     kept_parts: &HashSet<String, S>,
-) -> String {
+) -> Result<String, CoreError> {
     let base = rels_base_for(rels_path);
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let werr = write_err("rewrite_rels");
+    let perr = parse_err("rewrite_rels");
 
     loop {
         match reader.read_event() {
             Ok(Event::Empty(ref e)) if local_name(e) == "Relationship" => {
-                if !relationship_target_is_dropped(e, &base, kept_parts)
-                    && writer.write_event(Event::Empty(e.clone())).is_err()
-                {
-                    return xml.to_string();
+                if !relationship_target_is_dropped(e, &base, kept_parts) {
+                    writer.write_event(Event::Empty(e.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Start(ref e)) if local_name(e) == "Relationship" => {
@@ -515,21 +539,20 @@ pub fn rewrite_rels<S: BuildHasher>(
                 let drop = relationship_target_is_dropped(e, &base, kept_parts);
                 if drop {
                     let _ = reader.read_to_end(end_name.name());
-                } else if writer.write_event(Event::Start(e.clone())).is_err() {
-                    return xml.to_string();
+                } else {
+                    writer.write_event(Event::Start(e.clone())).map_err(&werr)?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if writer.write_event(other).is_err() {
-                    return xml.to_string();
-                }
+                writer.write_event(other).map_err(&werr)?;
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => return Err(perr(err)),
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|e| clean_err(format!("OOXML rewrite_rels output not UTF-8: {e}")))
 }
 
 fn relationship_target_is_dropped<S: BuildHasher>(
@@ -619,7 +642,7 @@ mod tests {
             <w:rsids><w:rsidRoot w:val="00112233"/></w:rsids>
             <w:t>hello</w:t>
         </w:p>"#;
-        let out = strip_fingerprints(xml);
+        let out = strip_fingerprints(xml).unwrap();
         assert!(
             !out.contains("rsidR"),
             "rsid attributes must be removed: {out}"
@@ -642,7 +665,7 @@ mod tests {
                 <w:ins w:id="2" w:author="bob"><w:t>added</w:t></w:ins>
             </w:p>
         </doc>"#;
-        let out = strip_revisions(xml);
+        let out = strip_revisions(xml).unwrap();
         assert!(!out.contains("deleted"), "deleted text must be gone: {out}");
         assert!(out.contains("added"), "inserted text must survive: {out}");
         assert!(!out.contains("w:del"), "del wrapper must be gone");
@@ -689,7 +712,7 @@ mod tests {
             <w:commentRangeEnd w:id="1"/>
             <w:commentReference w:id="1"/>
         </doc>"#;
-        let out = strip_comment_refs(xml);
+        let out = strip_comment_refs(xml).unwrap();
         assert!(!out.contains("commentRange"));
         assert!(!out.contains("commentReference"));
         assert!(out.contains("body"));
@@ -725,7 +748,7 @@ mod tests {
             r#"<Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>"#,
             r#"</Types>"#,
         );
-        let out = rewrite_content_types(xml, &kept);
+        let out = rewrite_content_types(xml, &kept).unwrap();
 
         // Kept parts survive.
         assert!(out.contains(r#"PartName="/word/document.xml""#), "{out}");
@@ -770,7 +793,7 @@ mod tests {
             r#"<Relationship Id="rId5" Type=".../hyperlink" Target="http://example.com" TargetMode="External"/>"#,
             r#"</Relationships>"#,
         );
-        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept);
+        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept).unwrap();
 
         assert!(out.contains(r#"Target="styles.xml""#), "{out}");
         assert!(
@@ -802,7 +825,7 @@ mod tests {
             r#"<Relationship Id="rId2" Type="x" Target="/word/theme/theme1.xml"/>"#,
             r#"</Relationships>"#,
         );
-        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept);
+        let out = rewrite_rels(xml, "word/_rels/document.xml.rels", &kept).unwrap();
         assert!(out.contains(r#"Target="/word/document.xml""#), "{out}");
         assert!(!out.contains("theme1.xml"), "{out}");
     }

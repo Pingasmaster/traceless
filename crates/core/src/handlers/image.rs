@@ -17,6 +17,7 @@ pub struct ImageHandler;
 
 impl FormatHandler for ImageHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let filename = path
             .file_name()
             .map(|n| n.to_string_lossy().into_owned())
@@ -172,6 +173,7 @@ impl FormatHandler for ImageHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let mime = mime_guess::from_path(path).first_or_octet_stream();
 
         // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.

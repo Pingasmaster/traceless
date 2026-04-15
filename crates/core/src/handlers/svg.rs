@@ -239,6 +239,7 @@ fn is_javascript_uri(value: &str) -> bool {
 
 impl FormatHandler for SvgHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -295,6 +296,7 @@ impl FormatHandler for SvgHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,

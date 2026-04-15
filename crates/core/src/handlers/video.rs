@@ -10,6 +10,7 @@ pub struct VideoHandler;
 
 impl FormatHandler for VideoHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         sandbox::check_tool_available("ffprobe")?;
 
         let mut cmd = sandbox::sandboxed_probe_command("ffprobe", path);
@@ -51,6 +52,7 @@ impl FormatHandler for VideoHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         sandbox::clean_with_ffmpeg(path, output_path)
     }
 

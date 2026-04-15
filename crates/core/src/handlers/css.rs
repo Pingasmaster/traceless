@@ -20,6 +20,7 @@ pub struct CssHandler;
 
 impl FormatHandler for CssHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let content = fs::read_to_string(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -67,6 +68,7 @@ impl FormatHandler for CssHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let content = fs::read_to_string(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,

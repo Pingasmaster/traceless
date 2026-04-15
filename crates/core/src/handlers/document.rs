@@ -33,6 +33,7 @@ enum ArchiveKind {
 
 impl FormatHandler for DocumentHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let file = File::open(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -136,6 +137,7 @@ impl FormatHandler for DocumentHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let file = File::open(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -442,23 +444,28 @@ fn clean_entry(
             // longer exist in the zip, and strict consumers (python-docx)
             // reject it. Do NOT "simplify" this by dropping the second
             // pass; see CLAUDE.md.
-            let base = ooxml::clean_xml_member(entry_name, xml);
+            let base = ooxml::clean_xml_member(entry_name, xml)
+                .map_err(|e| CleanEntryError(e.to_string()))?;
             if entry_name == "[Content_Types].xml" {
                 ooxml::rewrite_content_types(&base, kept_parts)
+                    .map_err(|e| CleanEntryError(e.to_string()))?
             } else if entry_name.ends_with(".rels") {
                 ooxml::rewrite_rels(&base, entry_name, kept_parts)
+                    .map_err(|e| CleanEntryError(e.to_string()))?
             } else {
                 base
             }
         }
-        ArchiveKind::Odf => odf::clean_xml_member(entry_name, xml),
+        ArchiveKind::Odf => {
+            odf::clean_xml_member(entry_name, xml).map_err(|e| CleanEntryError(e.to_string()))?
+        }
         ArchiveKind::Epub => {
             if epub::is_opf_path(entry_name) {
-                epub::clean_opf(xml)
+                epub::clean_opf(xml).map_err(|e| CleanEntryError(e.to_string()))?
             } else if epub::is_ncx_path(entry_name) {
                 // NCX is an XML navigation file, not xhtml. Blank its
                 // <head> but don't run the HTML blocklist over it.
-                epub::clean_head_only(xml)
+                epub::clean_head_only(xml).map_err(|e| CleanEntryError(e.to_string()))?
             } else if epub::is_ops_xml_path(entry_name) {
                 // OPS content files are xhtml. Blank the <head> first
                 // (required by EPUB spec to keep the <head> element
@@ -468,7 +475,8 @@ fn clean_entry(
                 // Before this two-pass cleanup a `<meta name="generator"
                 // content="Calibre">` dropped into the body of an OPS
                 // file survived the clean.
-                let head_blanked = epub::clean_head_only(xml);
+                let head_blanked =
+                    epub::clean_head_only(xml).map_err(|e| CleanEntryError(e.to_string()))?;
                 crate::handlers::html::clean_html(&head_blanked)
             } else {
                 xml.to_string()

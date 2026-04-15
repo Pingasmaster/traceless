@@ -11,6 +11,8 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 use std::io::Cursor;
 
+use crate::error::CoreError;
+
 /// Rewrite a `BytesStart`/`BytesEmpty` with its attributes sorted
 /// lexicographically by raw key bytes. Invalid attributes are dropped,
 /// which matches mat2's behavior (they are already malformed).
@@ -35,9 +37,13 @@ fn sort_attributes(start: &BytesStart<'_>) -> BytesStart<'static> {
 /// Sort the attributes of every `Start` and `Empty` element in `xml`.
 /// Everything else is copied through verbatim.
 ///
-/// Returns the rewritten XML on success. On any parse error, returns the
-/// input unchanged — we never want this helper to drop content.
-pub fn sort_xml_attributes(xml: &str) -> String {
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any `quick_xml` parse/write
+/// failure. Before the F2 fix this helper used to return the original
+/// `xml` on error, which defeated attribute-order normalization on
+/// malformed input and masked structural damage from the caller.
+pub fn sort_xml_attributes(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
@@ -45,27 +51,44 @@ pub fn sort_xml_attributes(xml: &str) -> String {
         match reader.read_event() {
             Ok(Event::Start(ref e)) => {
                 let sorted = sort_attributes(e);
-                if writer.write_event(Event::Start(sorted)).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Start(sorted))
+                    .map_err(|err| CoreError::CleanError {
+                        path: std::path::PathBuf::new(),
+                        detail: format!("XML attribute-sort write error: {err}"),
+                    })?;
             }
             Ok(Event::Empty(ref e)) => {
                 let sorted = sort_attributes(e);
-                if writer.write_event(Event::Empty(sorted)).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Empty(sorted))
+                    .map_err(|err| CoreError::CleanError {
+                        path: std::path::PathBuf::new(),
+                        detail: format!("XML attribute-sort write error: {err}"),
+                    })?;
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if writer.write_event(other).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(other)
+                    .map_err(|err| CoreError::CleanError {
+                        path: std::path::PathBuf::new(),
+                        detail: format!("XML attribute-sort write error: {err}"),
+                    })?;
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => {
+                return Err(CoreError::CleanError {
+                    path: std::path::PathBuf::new(),
+                    detail: format!("XML attribute-sort parse error: {err}"),
+                });
+            }
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner()).map_err(|err| CoreError::CleanError {
+        path: std::path::PathBuf::new(),
+        detail: format!("XML attribute-sort output was not UTF-8: {err}"),
+    })
 }
 
 /// Return the local name (without namespace prefix) of an element event,
@@ -87,7 +110,7 @@ mod tests {
     #[test]
     fn sort_orders_attributes_lexicographically() {
         let xml = r#"<root z="3" a="1" m="2"/>"#;
-        let out = sort_xml_attributes(xml);
+        let out = sort_xml_attributes(xml).unwrap();
         assert!(out.contains(r#"a="1""#));
         assert!(out.contains(r#"m="2""#));
         assert!(out.contains(r#"z="3""#));
@@ -101,9 +124,19 @@ mod tests {
     #[test]
     fn sort_preserves_text_and_nesting() {
         let xml = r#"<a b="2" a="1"><inner x="y"/>hello</a>"#;
-        let out = sort_xml_attributes(xml);
+        let out = sort_xml_attributes(xml).unwrap();
         assert!(out.contains("hello"));
         assert!(out.contains("inner"));
+    }
+
+    #[test]
+    fn sort_surfaces_parse_errors_instead_of_silent_passthrough() {
+        // Unbalanced element: broken XML must return Err rather than
+        // the original bytes. Before the F2 fix this returned
+        // `xml.to_string()` and the cleaner would ship unsorted
+        // attributes through unchanged.
+        let xml = r"<a><b>c</a>";
+        assert!(sort_xml_attributes(xml).is_err());
     }
 
     #[test]

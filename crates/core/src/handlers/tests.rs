@@ -2015,3 +2015,38 @@ fn test_docx_embedded_gif_comment_is_stripped() {
         "embedded GIF comment payload survived docx clean"
     );
 }
+
+// ===== 10 GiB input cap =====
+
+#[test]
+fn handler_rejects_file_larger_than_input_cap() {
+    use crate::error::CoreError;
+    use crate::handlers::MAX_INPUT_FILE_BYTES;
+
+    // Use a sparse file via `File::set_len` so the test doesn't write
+    // 10 GiB of real bytes to disk. On Linux + ext4/xfs/tmpfs the file
+    // allocates zero blocks but reports the requested st_size, which
+    // is what `check_input_size` reads.
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("huge.png");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_INPUT_FILE_BYTES + 1).unwrap();
+    drop(file);
+
+    // Any handler with a MIME-based dispatch works; use ImageHandler
+    // since it maps to a concrete file extension that the cap check
+    // fires on before any `fs::read` attempts to pull the bytes.
+    let handler = get_handler_for_mime("image/png").unwrap();
+    let result = handler.read_metadata(&path);
+    match result {
+        Err(CoreError::FileTooLarge { size, limit, .. }) => {
+            assert_eq!(limit, MAX_INPUT_FILE_BYTES);
+            assert!(
+                size > MAX_INPUT_FILE_BYTES,
+                "FileTooLarge must carry the observed size ({size}) \
+                 which should exceed the cap ({limit})"
+            );
+        }
+        other => panic!("expected FileTooLarge, got: {other:?}"),
+    }
+}

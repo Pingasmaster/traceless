@@ -13,6 +13,7 @@ pub struct AudioHandler;
 
 impl FormatHandler for AudioHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let tagged_file = lofty::read_from_path(path).map_err(|e| CoreError::ParseError {
             path: path.to_path_buf(),
             detail: format!("Failed to read audio file: {e}"),
@@ -79,6 +80,7 @@ impl FormatHandler for AudioHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         // M4A / MP4-audio containers carry metadata in two separate
         // places: the iTunes `ilst` atom tree (which lofty handles
         // cleanly) and user-data atoms outside `ilst` like

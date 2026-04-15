@@ -28,6 +28,7 @@ const ALLOWLIST: &[&[u8]] = &[b"announce", b"announce-list", b"info"];
 
 impl FormatHandler for TorrentHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -75,6 +76,7 @@ impl FormatHandler for TorrentHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,

@@ -87,6 +87,7 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
 
 impl FormatHandler for PdfHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let doc = Document::load(path).map_err(|e| CoreError::ParseError {
             path: path.to_path_buf(),
             detail: format!("Failed to load PDF: {e}"),
@@ -235,6 +236,7 @@ impl FormatHandler for PdfHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let mut doc = Document::load(path).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to load PDF: {e}"),

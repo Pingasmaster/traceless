@@ -3,12 +3,32 @@ use std::fs;
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
 
 use async_channel::Sender;
 
+use crate::error::CoreError;
 use crate::file::{FileEntry, FileId, FileState};
 use crate::format_support::{detect_mime, get_handler_for_mime};
+use crate::handlers::FormatHandler;
+use crate::metadata::MetadataSet;
 use crate::worker_pool;
+
+/// Hard wall-clock cap on any single handler invocation.
+///
+/// The 10 GiB input cap keeps disk and memory bounded, but CPU-bound
+/// parsers (lopdf on crafted PDF object graphs, ffmpeg on pathological
+/// media streams, the FLAC walker on degenerate block layouts) can still
+/// pin a worker thread for unbounded wall-clock time. Every handler call
+/// runs inside `run_with_wall_clock_cap` which aborts the operation if
+/// it hasn't returned after this deadline. On timeout the worker's
+/// event loop reports a terminal error, and the helper thread that's
+/// still running the handler leaks until it eventually exits. At this
+/// deadline (10 min) and the worker pool cap (8) the worst case is
+/// eight stalled threads which the OS tears down when the process exits.
+const HANDLER_WALL_CLOCK_CAP: Duration = Duration::from_secs(600);
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -121,9 +141,30 @@ impl FileStore {
             .collect();
 
         for path in paths {
-            if let Ok(md) = fs::symlink_metadata(&path)
-                && md.file_type().is_symlink()
-            {
+            // Single `symlink_metadata` call feeds both the symlink
+            // rejection and the 10 GiB input-size cap. Using
+            // `symlink_metadata` (lstat) avoids following a dangling
+            // symlink and lets the symlink arm below catch it. The
+            // size check runs against `st_size` for the inode the
+            // symlink points at - but we reject the symlink before we
+            // get there, so the only path the size check actually
+            // evaluates is a regular file.
+            let md = match fs::symlink_metadata(&path) {
+                Ok(md) => md,
+                Err(e) => {
+                    let id = next_file_id();
+                    let entry = FileEntry::new(id, &path);
+                    self.files.push(entry);
+                    indices.push(self.files.len() - 1);
+                    let _ = tx.send_blocking(FileStoreEvent::FileError {
+                        id,
+                        state: FileState::ErrorWhileCheckingMetadata,
+                        message: format!("failed to stat {}: {e}", path.display()),
+                    });
+                    continue;
+                }
+            };
+            if md.file_type().is_symlink() {
                 let id = next_file_id();
                 let entry = FileEntry::new(id, &path);
                 self.files.push(entry);
@@ -134,6 +175,23 @@ impl FileStore {
                     message: format!(
                         "refusing to process symlink {}; pass the target file directly",
                         path.display()
+                    ),
+                });
+                continue;
+            }
+            if md.len() > crate::handlers::MAX_INPUT_FILE_BYTES {
+                let id = next_file_id();
+                let entry = FileEntry::new(id, &path);
+                self.files.push(entry);
+                indices.push(self.files.len() - 1);
+                let _ = tx.send_blocking(FileStoreEvent::FileError {
+                    id,
+                    state: FileState::ErrorWhileCheckingMetadata,
+                    message: format!(
+                        "{} is {} bytes, exceeds the {}-byte input cap",
+                        path.display(),
+                        md.len(),
+                        crate::handlers::MAX_INPUT_FILE_BYTES
                     ),
                 });
                 continue;
@@ -332,6 +390,95 @@ fn run_job_with_terminal_error<F>(
     }
 }
 
+/// Run `job` on a helper thread and block the caller until it completes
+/// or `HANDLER_WALL_CLOCK_CAP` elapses, whichever comes first.
+///
+/// On timeout the helper thread is **not** killed (Rust has no safe
+/// thread-kill primitive). It keeps running until the handler naturally
+/// completes, then its result is dropped when the unbuffered channel
+/// send fails. In the meantime the worker-pool slot that called us is
+/// freed for the next job and the user sees a terminal
+/// `HandlerTimeout`-class error.
+///
+/// We accept this "leak a stalled thread" compromise because:
+/// 1. `MAX_WORKERS = 8` in `worker_pool`, so the worst case is 8
+///    stalled cleaner threads - bounded in number.
+/// 2. The alternative (process kill) tears down every other in-flight
+///    clean.
+/// 3. A production API deployment is expected to run the worker under
+///    a systemd unit with `RuntimeMaxSec` that will eventually reap
+///    everything, see the plan's "API-layer recommendations" section.
+fn run_with_wall_clock_cap<R, F>(timeout: Duration, job: F) -> Result<R, String>
+where
+    F: FnOnce() -> R + Send + 'static,
+    R: Send + 'static,
+{
+    let (tx, rx) = mpsc::sync_channel::<R>(1);
+    let spawn_result = thread::Builder::new()
+        .name("traceless-timed-handler".to_string())
+        .spawn(move || {
+            // If the receiver has already timed out and dropped `rx`,
+            // `send` returns Err - we swallow it because the leaked
+            // thread has no one to report to.
+            let _ = tx.send(job());
+        });
+    if let Err(e) = spawn_result {
+        return Err(format!("failed to spawn handler thread: {e}"));
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(result) => Ok(result),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(format!(
+            "handler exceeded the {}-second wall-clock cap",
+            timeout.as_secs()
+        )),
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Err("handler thread panicked before sending a result".to_string())
+        }
+    }
+}
+
+/// Run a handler's `read_metadata` on a helper thread with a hard
+/// wall-clock cap. The handler is moved into the thread closure, so
+/// the caller gives up ownership; for `FileStore`'s use case that's
+/// fine because we always build a fresh handler per file.
+fn read_metadata_with_cap(
+    handler: Box<dyn FormatHandler>,
+    path: &Path,
+) -> Result<MetadataSet, CoreError> {
+    let path_buf = path.to_path_buf();
+    match run_with_wall_clock_cap(HANDLER_WALL_CLOCK_CAP, move || {
+        handler.read_metadata(&path_buf)
+    }) {
+        Ok(Ok(metadata)) => Ok(metadata),
+        Ok(Err(e)) => Err(e),
+        Err(timeout_msg) => Err(CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: timeout_msg,
+        }),
+    }
+}
+
+/// Run a handler's `clean_metadata` on a helper thread with a hard
+/// wall-clock cap. Same ownership contract as `read_metadata_with_cap`.
+fn clean_metadata_with_cap(
+    handler: Box<dyn FormatHandler>,
+    path: &Path,
+    output_path: &Path,
+) -> Result<(), CoreError> {
+    let path_buf = path.to_path_buf();
+    let output_buf = output_path.to_path_buf();
+    match run_with_wall_clock_cap(HANDLER_WALL_CLOCK_CAP, move || {
+        handler.clean_metadata(&path_buf, &output_buf)
+    }) {
+        Ok(Ok(())) => Ok(()),
+        Ok(Err(e)) => Err(e),
+        Err(timeout_msg) => Err(CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: timeout_msg,
+        }),
+    }
+}
+
 fn check_file_metadata(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
     let mime = detect_mime(path);
 
@@ -351,7 +498,7 @@ fn check_file_metadata(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
         mime_type: Some(mime),
     });
 
-    match handler.read_metadata(path) {
+    match read_metadata_with_cap(handler, path) {
         Ok(metadata) => {
             let _ = tx.send_blocking(FileStoreEvent::MetadataReady { id, metadata });
         }
@@ -413,7 +560,7 @@ fn clean_single_file(id: FileId, path: &Path, tx: &Sender<FileStoreEvent>) {
     let file_name = path.file_name().unwrap_or_default();
     let temp_path = tempdir.path().join(file_name);
 
-    match handler.clean_metadata(path, &temp_path) {
+    match clean_metadata_with_cap(handler, path, &temp_path) {
         Ok(()) => {
             if let Err(e) = finalize_cleaned_file(path, &temp_path) {
                 // tempdir Drop removes the temp file + directory.

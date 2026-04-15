@@ -22,7 +22,16 @@ use quick_xml::writer::Writer;
 use rand::Rng;
 use std::io::Cursor;
 
+use crate::error::CoreError;
+
 use super::xml_util::local_name;
+
+fn clean_err(detail: impl Into<String>) -> CoreError {
+    CoreError::CleanError {
+        path: std::path::PathBuf::new(),
+        detail: detail.into(),
+    }
+}
 
 /// Returns true if the archive member path is an OPF file. We treat
 /// every `*.opf` as a content.opf candidate because publishers use
@@ -50,8 +59,15 @@ pub fn is_ops_xml_path(name: &str) -> bool {
 
 /// Rewrite `content.opf` with a minimal metadata block containing only
 /// a fresh UUID identifier, an empty dc:language, and an empty dc:title.
-#[must_use]
-pub fn clean_opf(xml: &str) -> String {
+///
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any XML parse or write failure so
+/// a crafted-malformed `content.opf` cannot slip past the cleaner. The
+/// pre-F2 behaviour was to return the original bytes on parse error,
+/// which shipped unstripped `dc:creator` / `dc:publisher` metadata
+/// straight through.
+pub fn clean_opf(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
@@ -71,73 +87,85 @@ pub fn clean_opf(xml: &str) -> String {
                     // Re-emit just the outer <metadata> with the same
                     // attributes, then inject our three mandatory children,
                     // then consume up to </metadata>.
-                    if writer.write_event(Event::Start(e.clone())).is_err() {
-                        return xml.to_string();
-                    }
-                    write_minimal_metadata(&mut writer, &uuid);
-                    if writer
+                    writer
+                        .write_event(Event::Start(e.clone()))
+                        .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
+                    write_minimal_metadata(&mut writer, &uuid)?;
+                    writer
                         .write_event(Event::End(BytesEnd::new(
                             String::from_utf8_lossy(e.name().as_ref()).into_owned(),
                         )))
-                        .is_err()
-                    {
-                        return xml.to_string();
-                    }
+                        .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
                     // Skip until the corresponding </metadata>
                     skip_depth = 1;
                     replaced_metadata = true;
                     continue;
                 }
-                if writer.write_event(Event::Start(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
                     skip_depth -= 1;
                     continue;
                 }
-                if writer.write_event(Event::End(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
             }
             Ok(Event::Empty(ref e)) => {
                 if skip_depth > 0 {
                     continue;
                 }
-                if writer.write_event(Event::Empty(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer
+                        .write_event(Event::Text(t.clone()))
+                        .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if skip_depth == 0 && writer.write_event(other).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer
+                        .write_event(other)
+                        .map_err(|err| clean_err(format!("OPF write error: {err}")))?;
                 }
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => {
+                return Err(clean_err(format!("OPF parse error: {err}")));
+            }
         }
     }
 
-    // If the OPF had no <metadata> block at all, something is wrong with
-    // the source file; return the original content so we don't break the
-    // reader.
+    // If the OPF had no <metadata> block at all, the source file is
+    // structurally unusable. Refuse rather than shipping the original.
     if !replaced_metadata {
-        return xml.to_string();
+        return Err(clean_err(
+            "content.opf has no <metadata> block; refusing to emit an \
+             unstripped OPF",
+        ));
     }
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|err| clean_err(format!("OPF cleaned output was not UTF-8: {err}")))
 }
 
 /// Blank the `<head>` section of an NCX or OPS XML file. We preserve
 /// the rest of the document (which contains the actual text / navigation
 /// structure).
-#[must_use]
-pub fn clean_head_only(xml: &str) -> String {
+///
+/// # Errors
+///
+/// Returns `CoreError::CleanError` on any XML parse or write failure.
+/// A pre-F2 silent fallback to `xml.to_string()` let a malformed NCX
+/// ship with its `<head>` metadata (dtb:uid, Calibre generator string)
+/// intact.
+pub fn clean_head_only(xml: &str) -> Result<String, CoreError> {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
     let mut skip_depth: usize = 0;
@@ -153,74 +181,95 @@ pub fn clean_head_only(xml: &str) -> String {
                 if ln == "head" {
                     // Re-emit the head with no children so the document
                     // structure stays intact.
-                    if writer.write_event(Event::Start(e.clone())).is_err() {
-                        return xml.to_string();
-                    }
-                    if writer
+                    writer
+                        .write_event(Event::Start(e.clone()))
+                        .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
+                    writer
                         .write_event(Event::End(BytesEnd::new(
                             String::from_utf8_lossy(e.name().as_ref()).into_owned(),
                         )))
-                        .is_err()
-                    {
-                        return xml.to_string();
-                    }
+                        .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
                     skip_depth = 1;
                     continue;
                 }
-                if writer.write_event(Event::Start(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Start(e.clone()))
+                    .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
                     skip_depth -= 1;
                     continue;
                 }
-                if writer.write_event(Event::End(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
             }
             Ok(Event::Empty(ref e)) => {
                 if skip_depth > 0 {
                     continue;
                 }
-                if writer.write_event(Event::Empty(e.clone())).is_err() {
-                    return xml.to_string();
-                }
+                writer
+                    .write_event(Event::Empty(e.clone()))
+                    .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
             }
             Ok(Event::Text(ref t)) => {
-                if skip_depth == 0 && writer.write_event(Event::Text(t.clone())).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer
+                        .write_event(Event::Text(t.clone()))
+                        .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
                 }
             }
             Ok(Event::Eof) => break,
             Ok(other) => {
-                if skip_depth == 0 && writer.write_event(other).is_err() {
-                    return xml.to_string();
+                if skip_depth == 0 {
+                    writer
+                        .write_event(other)
+                        .map_err(|err| clean_err(format!("NCX/OPS write error: {err}")))?;
                 }
             }
-            Err(_) => return xml.to_string(),
+            Err(err) => {
+                return Err(clean_err(format!("NCX/OPS parse error: {err}")));
+            }
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
+    String::from_utf8(writer.into_inner().into_inner())
+        .map_err(|err| clean_err(format!("NCX/OPS cleaned output was not UTF-8: {err}")))
 }
 
-fn write_minimal_metadata(writer: &mut Writer<Cursor<Vec<u8>>>, urn: &str) {
+fn write_minimal_metadata(
+    writer: &mut Writer<Cursor<Vec<u8>>>,
+    urn: &str,
+) -> Result<(), CoreError> {
+    let err = |e: std::io::Error| clean_err(format!("OPF metadata-stub write error: {e}"));
     // <dc:identifier id="id">urn:uuid:…</dc:identifier>
     let mut ident = BytesStart::new("dc:identifier");
     ident.push_attribute(("id", "id"));
-    let _ = writer.write_event(Event::Start(ident.clone()));
-    let _ = writer.write_event(Event::Text(BytesText::new(urn)));
-    let _ = writer.write_event(Event::End(BytesEnd::new("dc:identifier")));
+    writer.write_event(Event::Start(ident.clone())).map_err(err)?;
+    writer
+        .write_event(Event::Text(BytesText::new(urn)))
+        .map_err(err)?;
+    writer
+        .write_event(Event::End(BytesEnd::new("dc:identifier")))
+        .map_err(err)?;
 
     // Empty dc:language
-    let _ = writer.write_event(Event::Start(BytesStart::new("dc:language")));
-    let _ = writer.write_event(Event::End(BytesEnd::new("dc:language")));
+    writer
+        .write_event(Event::Start(BytesStart::new("dc:language")))
+        .map_err(err)?;
+    writer
+        .write_event(Event::End(BytesEnd::new("dc:language")))
+        .map_err(err)?;
 
     // Empty dc:title
-    let _ = writer.write_event(Event::Start(BytesStart::new("dc:title")));
-    let _ = writer.write_event(Event::End(BytesEnd::new("dc:title")));
+    writer
+        .write_event(Event::Start(BytesStart::new("dc:title")))
+        .map_err(err)?;
+    writer
+        .write_event(Event::End(BytesEnd::new("dc:title")))
+        .map_err(err)?;
+    Ok(())
 }
 
 /// Generate a `urn:uuid:xxxxxxxx-…` string with 128 random bits shaped
@@ -270,7 +319,7 @@ mod tests {
   </metadata>
   <manifest/>
 </package>"#;
-        let out = clean_opf(xml);
+        let out = clean_opf(xml).unwrap();
         assert!(!out.contains("Jane Doe"), "author must be removed: {out}");
         assert!(
             !out.contains("Secret Press"),
@@ -297,7 +346,7 @@ mod tests {
   </head>
   <docTitle><text>Title</text></docTitle>
 </ncx>"#;
-        let out = clean_head_only(xml);
+        let out = clean_head_only(xml).unwrap();
         assert!(
             !out.contains("secret-identifier"),
             "uid must be blanked: {out}"

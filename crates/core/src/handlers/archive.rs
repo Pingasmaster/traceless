@@ -121,6 +121,7 @@ impl ArchiveFormat {
 
 impl FormatHandler for ArchiveHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let fmt = ArchiveFormat::resolve(path)?;
 
         let filename = path
@@ -180,6 +181,7 @@ impl FormatHandler for ArchiveHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let fmt = ArchiveFormat::resolve(path)?;
         match fmt {
             ArchiveFormat::Zip => clean_zip(path, output_path),
@@ -244,6 +246,7 @@ fn recurse_read_zip(
         detail: format!("tempdir: {e}"),
     })?;
 
+    let mut total_decompressed: u64 = 0;
     for i in 0..archive.len() {
         let mut entry = archive.by_index(i).map_err(|e| CoreError::ParseError {
             path: PathBuf::new(),
@@ -282,6 +285,18 @@ fn recurse_read_zip(
                     "zip member '{name}' exceeds the \
                      {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
                      cap; refusing to probe (likely a zip bomb)"
+                ),
+            });
+        }
+        total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
+        if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+            return Err(CoreError::ParseError {
+                path: PathBuf::new(),
+                detail: format!(
+                    "zip archive exceeds the \
+                     {MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES}-byte cumulative \
+                     decompression cap; refusing to probe (likely a multi-\
+                     member zip bomb)"
                 ),
             });
         }
@@ -356,6 +371,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         detail: format!("tempdir: {e}"),
     })?;
 
+    let mut total_decompressed: u64 = 0;
     for name in &names {
         if is_path_traversal(name) {
             return Err(CoreError::CleanError {
@@ -396,6 +412,19 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
             }
             (buf, compression)
         };
+
+        total_decompressed = total_decompressed.saturating_add(bytes.len() as u64);
+        if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+            return Err(CoreError::CleanError {
+                path: path.to_path_buf(),
+                detail: format!(
+                    "zip archive exceeds the \
+                     {MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES}-byte cumulative \
+                     decompression cap; refusing to clean (likely a multi-\
+                     member zip bomb)"
+                ),
+            });
+        }
 
         // Try to clean the member via format dispatch; honor the
         // process-wide UnknownMemberPolicy when no handler applies.
@@ -457,11 +486,17 @@ fn open_tar(path: &Path, fmt: ArchiveFormat) -> Result<Box<dyn Read>, CoreError>
 
 /// Open the archive once, enforce safety invariants, return each
 /// header for the reader summary.
+///
+/// The decompressor is wrapped in `.take(MAX_TAR_DECOMPRESSED_BYTES + 1)`
+/// so a crafted `.tar.gz` / `.tar.xz` / `.tar.zst` bomb can't pin a
+/// reader worker by decompressing forever. `clean_tar` already applies
+/// the same cap on its side; the reader path was missing it, which
+/// turned `ArchiveHandler::read_metadata` into an unbounded CPU DoS.
 fn read_tar_entries(
     path: &Path,
     fmt: ArchiveFormat,
 ) -> Result<Vec<(String, TarHeader)>, CoreError> {
-    let reader = open_tar(path, fmt)?;
+    let reader = open_tar(path, fmt)?.take(MAX_TAR_DECOMPRESSED_BYTES + 1);
     let mut archive = TarArchive::new(reader);
     let mut out = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -616,6 +651,20 @@ pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(test)]
 pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
 
+/// Upper bound on the *cumulative* decompressed size of all members in a
+/// single archive. `MAX_ENTRY_DECOMPRESSED_BYTES` already defuses the
+/// single-member bomb, but a zip with 10,000 near-maximum members still
+/// amplifies a 10 GiB input into 10 TiB of cleaner output. For a public
+/// API this is a disk-exhaustion DoS; cap the running total so the
+/// aggregate amplification is bounded.
+///
+/// Tests override this to 16 MiB so the aggregate cap can be exercised
+/// without generating gigabyte fixtures.
+#[cfg(not(test))]
+pub(super) const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+#[cfg(test)]
+pub(super) const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
+
 // F1 preserves symlinks as their own enum variant; the writer loop has to
 // branch on regular-vs-symlink to emit the correct `EntryType`, which pushes
 // the top-level body past clippy's 100-line ceiling. Splitting it further
@@ -650,6 +699,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     })?;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cleaned_members: Vec<CleanedTarEntry> = Vec::new();
+    let mut total_decompressed: u64 = 0;
 
     {
         let mut archive = TarArchive::new(&decompressed[..]);
@@ -710,6 +760,18 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                         "tar member '{name}' exceeds the \
                          {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
                          cap; refusing to clean (likely a zip bomb)"
+                    ),
+                });
+            }
+            total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
+            if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+                return Err(CoreError::CleanError {
+                    path: path.to_path_buf(),
+                    detail: format!(
+                        "tar archive exceeds the \
+                         {MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES}-byte cumulative \
+                         decompression cap; refusing to clean (likely a \
+                         multi-member zip bomb)"
                     ),
                 });
             }
@@ -1246,6 +1308,39 @@ mod tests {
         assert!(
             result.is_err(),
             "per-entry cap should reject a 5 MiB tar member when the test cap is 4 MiB"
+        );
+    }
+
+    #[test]
+    fn zip_aggregate_cap_rejects_multi_member_bomb() {
+        // Per-member cap is 4 MiB under #[cfg(test)], aggregate cap is
+        // 16 MiB. Eight 3 MiB members individually pass the per-entry
+        // cap but their cumulative decompressed size (24 MiB) exceeds
+        // the aggregate cap. Without the cap the cleaner would happily
+        // write them all into the output zip; with it, the 6th member
+        // trips the aggregate guard and surfaces a specific `CleanError`.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("aggregate-bomb.zip");
+        let dst = dir.path().join("out.zip");
+        {
+            let file = File::create(&src).unwrap();
+            let mut w = zip::ZipWriter::new(file);
+            for i in 0..8 {
+                w.start_file(format!("part{i}.bin"), SimpleFileOptions::default())
+                    .unwrap();
+                let payload = vec![0u8; 3 * 1024 * 1024];
+                w.write_all(&payload).unwrap();
+            }
+            w.finish().unwrap();
+        }
+        let h = ArchiveHandler;
+        let result = h.clean_metadata(&src, &dst);
+        let Err(CoreError::CleanError { detail, .. }) = result else {
+            panic!("expected aggregate-cap CleanError, got {result:?}");
+        };
+        assert!(
+            detail.contains("cumulative decompression cap"),
+            "aggregate cap error not surfaced: {detail}"
         );
     }
 

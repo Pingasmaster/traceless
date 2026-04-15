@@ -25,6 +25,7 @@ pub struct GifHandler;
 
 impl FormatHandler for GifHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -76,6 +77,7 @@ impl FormatHandler for GifHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
@@ -251,6 +253,13 @@ fn skip_past_sub_blocks(bytes: &[u8], mut i: usize) -> Option<usize> {
 
 /// Return the size of the GIF logical screen descriptor + global color
 /// table (if present), i.e. the first byte offset after the GIF header.
+///
+/// The header claims a GCT size of `3 * 2^(n+1)` bytes where `n` is the
+/// low 3 bits of the packed byte, which tops out at 768 bytes on top of
+/// the 13-byte screen descriptor. A truncated input whose declared GCT
+/// runs off the end of the buffer must be rejected here, otherwise the
+/// `&bytes[..header_end]` slice in `strip_gif_metadata` panics out of
+/// range.
 fn gif_header_size(bytes: &[u8]) -> Option<usize> {
     if bytes.len() < 13 {
         return None;
@@ -266,7 +275,11 @@ fn gif_header_size(bytes: &[u8]) -> Option<usize> {
     } else {
         0
     };
-    Some(13 + gct_size)
+    let end = 13 + gct_size;
+    if end > bytes.len() {
+        return None;
+    }
+    Some(end)
 }
 
 /// Produce a cleaned GIF: same as input minus Comment extensions and
@@ -506,6 +519,30 @@ mod tests {
         g.push(0x05);
         g.extend_from_slice(&[0xAA, 0xBB, 0xCC]);
         g
+    }
+
+    #[test]
+    fn gif_header_size_rejects_truncated_global_color_table() {
+        // 13-byte GIF claiming a 256-entry GCT (3 * 2^(7+1) = 768 bytes
+        // of color table) that isn't actually present. Before the fix,
+        // `gif_header_size` would return `Some(13 + 768) = Some(781)`
+        // and the `&bytes[..header_end]` slice in `strip_gif_metadata`
+        // would panic out-of-range on a 13-byte buffer. The header
+        // helper now checks that the declared GCT fits inside `bytes`
+        // and returns `None` when it doesn't.
+        let mut bytes = Vec::from(&b"GIF89a"[..]);
+        // LSD: width=1, height=1, packed=0x87 (has_gct=1, gct_size=7),
+        // bg color=0, aspect=0
+        bytes.extend_from_slice(&[0x01, 0x00, 0x01, 0x00, 0x87, 0x00, 0x00]);
+        assert_eq!(bytes.len(), 13);
+        assert!(
+            super::gif_header_size(&bytes).is_none(),
+            "gif_header_size must reject a GIF whose declared GCT runs past EOF"
+        );
+        assert!(
+            super::strip_gif_metadata(&bytes).is_none(),
+            "strip_gif_metadata must not panic on a truncated GCT header"
+        );
     }
 
     #[test]

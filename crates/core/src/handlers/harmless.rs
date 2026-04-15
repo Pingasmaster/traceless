@@ -22,6 +22,7 @@ impl FormatHandler for HarmlessHandler {
                 path: path.to_path_buf(),
             });
         }
+        super::check_input_size(path)?;
 
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         let mime_str = mime.as_ref();
@@ -36,6 +37,7 @@ impl FormatHandler for HarmlessHandler {
     }
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
+        super::check_input_size(path)?;
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         let mime_str = mime.as_ref();
 
