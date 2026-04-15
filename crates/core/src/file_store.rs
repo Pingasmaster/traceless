@@ -28,7 +28,10 @@ use crate::worker_pool;
 /// still running the handler leaks until it eventually exits. At this
 /// deadline (10 min) and the worker pool cap (8) the worst case is
 /// eight stalled threads which the OS tears down when the process exits.
-const HANDLER_WALL_CLOCK_CAP: Duration = Duration::from_secs(600);
+///
+/// The user can disable this (together with every other resource cap)
+/// at run time via `set_limits_disabled(true)`.
+pub const HANDLER_WALL_CLOCK_CAP: Duration = Duration::from_secs(600);
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);
 
@@ -179,7 +182,9 @@ impl FileStore {
                 });
                 continue;
             }
-            if md.len() > crate::handlers::MAX_INPUT_FILE_BYTES {
+            if !crate::config::limits_disabled()
+                && md.len() > crate::handlers::MAX_INPUT_FILE_BYTES
+            {
                 let id = next_file_id();
                 let entry = FileEntry::new(id, &path);
                 self.files.push(entry);
@@ -441,10 +446,18 @@ where
 /// wall-clock cap. The handler is moved into the thread closure, so
 /// the caller gives up ownership; for `FileStore`'s use case that's
 /// fine because we always build a fresh handler per file.
+///
+/// When the process-wide `limits_disabled` flag is on the cap is
+/// skipped entirely: the handler runs on the calling thread, there is
+/// no helper thread to leak, and a legitimately long parse can take
+/// as long as it needs.
 fn read_metadata_with_cap(
     handler: Box<dyn FormatHandler>,
     path: &Path,
 ) -> Result<MetadataSet, CoreError> {
+    if crate::config::limits_disabled() {
+        return handler.read_metadata(path);
+    }
     let path_buf = path.to_path_buf();
     match run_with_wall_clock_cap(HANDLER_WALL_CLOCK_CAP, move || {
         handler.read_metadata(&path_buf)
@@ -459,12 +472,16 @@ fn read_metadata_with_cap(
 }
 
 /// Run a handler's `clean_metadata` on a helper thread with a hard
-/// wall-clock cap. Same ownership contract as `read_metadata_with_cap`.
+/// wall-clock cap. Same ownership contract as `read_metadata_with_cap`,
+/// and the same `limits_disabled` short-circuit.
 fn clean_metadata_with_cap(
     handler: Box<dyn FormatHandler>,
     path: &Path,
     output_path: &Path,
 ) -> Result<(), CoreError> {
+    if crate::config::limits_disabled() {
+        return handler.clean_metadata(path, output_path);
+    }
     let path_buf = path.to_path_buf();
     let output_buf = output_path.to_path_buf();
     match run_with_wall_clock_cap(HANDLER_WALL_CLOCK_CAP, move || {

@@ -1848,6 +1848,12 @@ fn test_document_handler_rejects_oversized_zip_member() {
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
 
+    // Pin the limits flag off for the duration so a parallel test
+    // can't race the global atomic and let the cap silently become
+    // a no-op.
+    let _lock = crate::config::limits_test_lock();
+    let _guard = crate::config::LimitsGuard::new(false);
+
     let dir = TempDir::new().unwrap();
     let src = dir.path().join("bomb.docx");
     let dst = dir.path().join("out.docx");
@@ -2023,6 +2029,9 @@ fn handler_rejects_file_larger_than_input_cap() {
     use crate::error::CoreError;
     use crate::handlers::MAX_INPUT_FILE_BYTES;
 
+    let _lock = crate::config::limits_test_lock();
+    let _guard = crate::config::LimitsGuard::new(false);
+
     // Use a sparse file via `File::set_len` so the test doesn't write
     // 10 GiB of real bytes to disk. On Linux + ext4/xfs/tmpfs the file
     // allocates zero blocks but reports the requested st_size, which
@@ -2048,5 +2057,38 @@ fn handler_rejects_file_larger_than_input_cap() {
             );
         }
         other => panic!("expected FileTooLarge, got: {other:?}"),
+    }
+}
+
+#[test]
+fn handler_accepts_oversized_file_when_limits_disabled() {
+    use crate::error::CoreError;
+    use crate::handlers::MAX_INPUT_FILE_BYTES;
+
+    // Same sparse-file trick as above, but with `limits_disabled`
+    // flipped via a RAII guard that restores the previous flag on
+    // drop. `check_input_size` must short-circuit to `Ok(())` and let
+    // the handler move on to its own parser. The PNG we handed in is
+    // a zero-padded sparse file, so the parser itself will error - the
+    // important part is that the error is *not* `FileTooLarge`, which
+    // proves the cap was bypassed.
+    let _lock = crate::config::limits_test_lock();
+    let _guard = crate::config::LimitsGuard::new(true);
+
+    let dir = TempDir::new().unwrap();
+    let path = dir.path().join("huge.png");
+    let file = fs::File::create(&path).unwrap();
+    file.set_len(MAX_INPUT_FILE_BYTES + 1).unwrap();
+    drop(file);
+
+    let handler = get_handler_for_mime("image/png").unwrap();
+    let result = handler.read_metadata(&path);
+    // Anything other than `FileTooLarge` is acceptable here: the cap
+    // was skipped, the real parser took over, and since the fixture
+    // is zeros the parser will either fail with a different error or
+    // (for some handlers) succeed with an empty metadata set. Both
+    // outcomes mean the cap is off.
+    if let Err(CoreError::FileTooLarge { .. }) = result {
+        panic!("FileTooLarge must not fire while limits_disabled is true");
     }
 }

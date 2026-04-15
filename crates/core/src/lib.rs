@@ -14,10 +14,14 @@ pub mod metadata;
 mod worker_pool;
 
 pub use config::{
-    PolicyGuard, UnknownMemberPolicy, archive_unknown_policy, set_archive_unknown_policy,
+    LimitsGuard, PolicyGuard, UnknownMemberPolicy, archive_unknown_policy, limits_disabled,
+    set_archive_unknown_policy, set_limits_disabled,
 };
 pub use error::CoreError;
 pub use file::{FileEntry, FileId, FileState};
-pub use file_store::{FileStore, FileStoreEvent, collect_paths};
+pub use file_store::{FileStore, FileStoreEvent, HANDLER_WALL_CLOCK_CAP, collect_paths};
 pub use handlers::MAX_INPUT_FILE_BYTES;
+pub use handlers::archive::{
+    MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES, MAX_ENTRY_DECOMPRESSED_BYTES, MAX_TAR_DECOMPRESSED_BYTES,
+};
 pub use metadata::{MetadataGroup, MetadataItem, MetadataSet};

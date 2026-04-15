@@ -155,6 +155,11 @@ ApplicationWindow {
                         }
                         MenuSeparator {}
                         MenuItem {
+                            text: "Preferences"
+                            onTriggered: preferencesDialog.open()
+                        }
+                        MenuSeparator {}
+                        MenuItem {
                             text: "About Traceless"
                             onTriggered: aboutDialog.open()
                         }
@@ -185,6 +190,121 @@ ApplicationWindow {
             }
         }
     }
+    }
+
+    Dialog {
+        id: preferencesDialog
+        title: "Preferences"
+        standardButtons: Dialog.Close
+        anchors.centerIn: parent
+        modal: true
+        width: Math.min(480, root.width * 0.9)
+
+        ColumnLayout {
+            spacing: 14
+            width: parent.width
+
+            Label {
+                text: "Resource limits"
+                font.bold: true
+                font.pixelSize: 16
+            }
+            Label {
+                // Matches the GTK preferences dialog body. Explains the
+                // threat model the defaults guard against so a user
+                // knows when it's safe to turn them off.
+                text: "Traceless enforces per-file caps so a single huge or adversarial input can't hang the cleaner or exhaust the host. Disable them only if you understand what your inputs look like and accept the consequences."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                opacity: 0.8
+            }
+
+            RowLayout {
+                Layout.fillWidth: true
+                Switch {
+                    id: limitsSwitch
+                    checked: appController.limits_disabled
+                    onToggled: appController.set_limits_disabled_flag(checked)
+                }
+                ColumnLayout {
+                    Label {
+                        text: "Disable all limits"
+                        font.bold: true
+                    }
+                    Label {
+                        text: "Removes every cap listed below. Takes effect immediately."
+                        opacity: 0.7
+                        font.pixelSize: 11
+                    }
+                }
+                Item { Layout.fillWidth: true }
+            }
+
+            Rectangle {
+                Layout.fillWidth: true
+                height: 1
+                color: palette.mid
+                opacity: 0.3
+            }
+
+            Label {
+                text: "What gets disabled"
+                font.bold: true
+                font.pixelSize: 13
+            }
+            Label {
+                text: "Each row shows the cap as it ships in release builds. Flipping the switch above makes every one of them a no-op for the rest of this session."
+                wrapMode: Text.WordWrap
+                Layout.fillWidth: true
+                opacity: 0.7
+                font.pixelSize: 11
+            }
+
+            // One row per cap. The subtitles come from AppController
+            // invokables that read traceless-core's constants at call
+            // time, so bumping any cap in the Rust source flows through
+            // to this dialog automatically.
+            Repeater {
+                model: [
+                    {
+                        "title": "Per-file input size",
+                        "body": "Rejects any single file larger than " + appController.limit_input_size()
+                    },
+                    {
+                        "title": "Handler wall-clock cap",
+                        "body": "Aborts a handler that has been running longer than " + appController.limit_handler_timeout()
+                    },
+                    {
+                        "title": "Per-archive-member decompression",
+                        "body": "Rejects any single ZIP/TAR/DOCX/ODT/EPUB member that decompresses to more than " + appController.limit_entry_decompressed()
+                    },
+                    {
+                        "title": "Tar outer-stream decompression",
+                        "body": "Rejects any .tar / .tar.gz / .tar.xz / .tar.zst whose decompressed body exceeds " + appController.limit_tar_decompressed()
+                    },
+                    {
+                        "title": "Cumulative archive decompression",
+                        "body": "Rejects an archive whose members sum to more than " + appController.limit_archive_total_decompressed() + " decompressed"
+                    }
+                ]
+                delegate: ColumnLayout {
+                    Layout.fillWidth: true
+                    spacing: 2
+                    Label {
+                        text: modelData.title
+                        font.bold: true
+                        font.pixelSize: 12
+                    }
+                    Label {
+                        text: modelData.body
+                        wrapMode: Text.WordWrap
+                        Layout.fillWidth: true
+                        opacity: 0.75
+                        font.pixelSize: 11
+                    }
+                }
+            }
+        }
     }
 
     Dialog {

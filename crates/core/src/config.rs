@@ -12,7 +12,7 @@
 //! policy, invoke `clean_metadata`, and reset it — or simply interleave
 //! calls with the policy changes between them.
 
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 
 /// How a recursive archive cleaner treats a member whose format is not
 /// recognized by any registered handler.
@@ -90,6 +90,78 @@ impl Drop for PolicyGuard {
     }
 }
 
+// ============================================================
+// Resource-limits master switch
+// ============================================================
+
+/// Backing store for the process-wide "limits disabled" flag. When
+/// `true`, every resource cap the library enforces becomes a no-op:
+/// the 10 GiB per-file input ceiling, the 10-minute wall-clock cap
+/// around each handler call, the 1 GiB per-archive-member decompression
+/// cap, the 1 GiB tar outer-stream cap, and the 10 GiB cumulative
+/// archive decompression cap.
+///
+/// This is the knob the UI "Disable all limits" toggle flips. It is
+/// off by default because the defaults are what keeps the cleaner
+/// well-behaved on adversarial input (public API, mass-upload form,
+/// batch job). A user who *knows* their inputs - a forensic analyst
+/// handling a 40 GiB VM image, a publisher cleaning a multi-hour
+/// video master - can flip it to remove the safety net.
+static LIMITS_DISABLED: AtomicBool = AtomicBool::new(false);
+
+/// Install a new process-wide "limits disabled" flag. Takes effect
+/// immediately for any handler call issued after this returns.
+pub fn set_limits_disabled(disabled: bool) {
+    LIMITS_DISABLED.store(disabled, Ordering::Relaxed);
+}
+
+/// Current value of the process-wide "limits disabled" flag.
+#[must_use]
+pub fn limits_disabled() -> bool {
+    LIMITS_DISABLED.load(Ordering::Relaxed)
+}
+
+/// RAII guard for tests that temporarily flip the flag. Restores the
+/// previous value on drop so adjacent tests see a clean slate.
+pub struct LimitsGuard(bool);
+
+impl LimitsGuard {
+    /// Save the current flag, install `new`, and return a guard.
+    #[must_use]
+    pub fn new(new: bool) -> Self {
+        let prev = limits_disabled();
+        set_limits_disabled(new);
+        Self(prev)
+    }
+}
+
+impl Drop for LimitsGuard {
+    fn drop(&mut self) {
+        set_limits_disabled(self.0);
+    }
+}
+
+/// Shared test-only mutex that every unit test touching the
+/// `LIMITS_DISABLED` atomic must hold for the duration of its run.
+///
+/// The `lib` test binary runs unit tests in parallel by default, and
+/// the limits flag is process-wide: one thread flipping it mid-run
+/// makes every other thread observe the flipped value. The archive
+/// cap tests, the `check_input_size` tests, and the direct
+/// `config::LimitsGuard` tests all share this lock so they serialize
+/// against each other cleanly. Integration tests in separate binaries
+/// have to instantiate their own copy for the same reason - the
+/// standard library's `OnceLock` only shares within one binary.
+#[cfg(test)]
+pub(crate) fn limits_test_lock()
+-> std::sync::MutexGuard<'static, ()> {
+    use std::sync::{Mutex, OnceLock, PoisonError};
+    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| Mutex::new(()))
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 mod tests {
@@ -140,5 +212,36 @@ mod tests {
             assert_eq!(archive_unknown_policy(), UnknownMemberPolicy::Abort);
         }
         assert_eq!(archive_unknown_policy(), UnknownMemberPolicy::Keep);
+    }
+
+    #[test]
+    fn limits_default_is_enabled() {
+        let _lock = super::limits_test_lock();
+        let _g = LimitsGuard::new(false);
+        assert!(
+            !limits_disabled(),
+            "limits must be enabled by default after the guard installs false"
+        );
+    }
+
+    #[test]
+    fn limits_guard_round_trips() {
+        let _lock = super::limits_test_lock();
+        let _g = LimitsGuard::new(false);
+        {
+            let _inner = LimitsGuard::new(true);
+            assert!(limits_disabled());
+        }
+        assert!(!limits_disabled(), "guard must restore previous flag");
+    }
+
+    #[test]
+    fn limits_set_and_get() {
+        let _lock = super::limits_test_lock();
+        let _g = LimitsGuard::new(false);
+        set_limits_disabled(true);
+        assert!(limits_disabled());
+        set_limits_disabled(false);
+        assert!(!limits_disabled());
     }
 }

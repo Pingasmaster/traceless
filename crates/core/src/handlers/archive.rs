@@ -272,13 +272,13 @@ fn recurse_read_zip(
         // so we can tell "exactly at the cap" from "would have
         // exceeded it".
         (&mut entry)
-            .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+            .take(effective_take(MAX_ENTRY_DECOMPRESSED_BYTES))
             .read_to_end(&mut buf)
             .map_err(|e| CoreError::ParseError {
                 path: PathBuf::new(),
                 detail: format!("read zip entry {name}: {e}"),
             })?;
-        if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+        if over_cap(buf.len() as u64, MAX_ENTRY_DECOMPRESSED_BYTES) {
             return Err(CoreError::ParseError {
                 path: PathBuf::new(),
                 detail: format!(
@@ -289,7 +289,7 @@ fn recurse_read_zip(
             });
         }
         total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
-        if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+        if over_cap(total_decompressed, MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES) {
             return Err(CoreError::ParseError {
                 path: PathBuf::new(),
                 detail: format!(
@@ -394,13 +394,13 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
             // bomb can't OOM the cleaner. See
             // `MAX_ENTRY_DECOMPRESSED_BYTES` at the top of this file.
             (&mut entry)
-                .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+                .take(effective_take(MAX_ENTRY_DECOMPRESSED_BYTES))
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("read entry body {name}: {e}"),
                 })?;
-            if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+            if over_cap(buf.len() as u64, MAX_ENTRY_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!(
@@ -414,7 +414,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         };
 
         total_decompressed = total_decompressed.saturating_add(bytes.len() as u64);
-        if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+        if over_cap(total_decompressed, MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES) {
             return Err(CoreError::CleanError {
                 path: path.to_path_buf(),
                 detail: format!(
@@ -496,7 +496,7 @@ fn read_tar_entries(
     path: &Path,
     fmt: ArchiveFormat,
 ) -> Result<Vec<(String, TarHeader)>, CoreError> {
-    let reader = open_tar(path, fmt)?.take(MAX_TAR_DECOMPRESSED_BYTES + 1);
+    let reader = open_tar(path, fmt)?.take(effective_take(MAX_TAR_DECOMPRESSED_BYTES));
     let mut archive = TarArchive::new(reader);
     let mut out = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -634,7 +634,7 @@ impl CleanedTarEntry {
 /// for legitimate archives (CI artefacts, source tarballs) but refuses
 /// gibibyte-scale payloads. If a real use case needs larger, the
 /// streaming TAR pipeline noted in `CLAUDE.md` is the real fix.
-const MAX_TAR_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_TAR_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 
 /// Upper bound on the decompressed size of a single archive entry
 /// (ZIP or TAR) the reader and cleaner will accept. Unlike the outer
@@ -647,9 +647,9 @@ const MAX_TAR_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 /// Tests override this to a much smaller value (4 MiB) so they can
 /// exercise the cap-hit error path with a manageable fixture.
 #[cfg(not(test))]
-pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
+pub const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 1024 * 1024 * 1024;
 #[cfg(test)]
-pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
+pub const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
 
 /// Upper bound on the *cumulative* decompressed size of all members in a
 /// single archive. `MAX_ENTRY_DECOMPRESSED_BYTES` already defuses the
@@ -661,9 +661,28 @@ pub(super) const MAX_ENTRY_DECOMPRESSED_BYTES: u64 = 4 * 1024 * 1024;
 /// Tests override this to 16 MiB so the aggregate cap can be exercised
 /// without generating gigabyte fixtures.
 #[cfg(not(test))]
-pub(super) const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
+pub const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 #[cfg(test)]
-pub(super) const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
+pub const MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES: u64 = 16 * 1024 * 1024;
+
+/// Effective `take` length for a bounded-read wrapper. Returns
+/// `u64::MAX` (effectively no cap) when the process-wide
+/// `limits_disabled` flag is on, otherwise `max + 1` so the caller can
+/// still distinguish "at the cap" from "over the cap" in the legal
+/// path.
+fn effective_take(max: u64) -> u64 {
+    if crate::config::limits_disabled() {
+        u64::MAX
+    } else {
+        max.saturating_add(1)
+    }
+}
+
+/// Returns `true` if the caller should reject because `len` exceeds
+/// `max`. Always `false` while the "limits disabled" knob is on.
+fn over_cap(len: u64, max: u64) -> bool {
+    !crate::config::limits_disabled() && len > max
+}
 
 // F1 preserves symlinks as their own enum variant; the writer loop has to
 // branch on regular-vs-symlink to emit the correct `EntryType`, which pushes
@@ -676,13 +695,13 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     //    tell "exactly at the cap" from "would have exceeded it".
     let mut decompressed = Vec::new();
     open_tar(path, fmt)?
-        .take(MAX_TAR_DECOMPRESSED_BYTES + 1)
+        .take(effective_take(MAX_TAR_DECOMPRESSED_BYTES))
         .read_to_end(&mut decompressed)
         .map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
-    if decompressed.len() as u64 > MAX_TAR_DECOMPRESSED_BYTES {
+    if over_cap(decompressed.len() as u64, MAX_TAR_DECOMPRESSED_BYTES) {
         return Err(CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!(
@@ -747,13 +766,13 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
             // the per-entry zip-bomb hole.
             let mut buf = Vec::new();
             (&mut entry)
-                .take(MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+                .take(effective_take(MAX_ENTRY_DECOMPRESSED_BYTES))
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!("read entry {name}: {e}"),
                 })?;
-            if buf.len() as u64 > MAX_ENTRY_DECOMPRESSED_BYTES {
+            if over_cap(buf.len() as u64, MAX_ENTRY_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!(
@@ -764,7 +783,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 });
             }
             total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
-            if total_decompressed > MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES {
+            if over_cap(total_decompressed, MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
                     path: path.to_path_buf(),
                     detail: format!(
@@ -1263,8 +1282,14 @@ mod tests {
     #[test]
     fn zip_per_entry_cap_rejects_oversized_member() {
         // The `#[cfg(test)]` override lowers MAX_ENTRY_DECOMPRESSED_BYTES
-        // to 4 MiB; a 5 MiB member therefore lands over the cap.
+        // to 4 MiB; a 5 MiB member therefore lands over the cap. Every
+        // test in this suite that depends on the caps firing takes the
+        // shared `limits_test_lock` and pins the flag off through a
+        // `LimitsGuard`, so a parallel test that toggled the global
+        // flag can't race this one.
         use zip::write::SimpleFileOptions;
+        let _lock = crate::config::limits_test_lock();
+        let _guard = crate::config::LimitsGuard::new(false);
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("bomb.zip");
         let dst = dir.path().join("out.zip");
@@ -1287,6 +1312,8 @@ mod tests {
 
     #[test]
     fn tar_per_entry_cap_rejects_oversized_member() {
+        let _lock = crate::config::limits_test_lock();
+        let _guard = crate::config::LimitsGuard::new(false);
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("bomb.tar");
         let dst = dir.path().join("out.tar");
@@ -1319,6 +1346,8 @@ mod tests {
         // the aggregate cap. Without the cap the cleaner would happily
         // write them all into the output zip; with it, the 6th member
         // trips the aggregate guard and surfaces a specific `CleanError`.
+        let _lock = crate::config::limits_test_lock();
+        let _guard = crate::config::LimitsGuard::new(false);
         let dir = TempDir::new().unwrap();
         let src = dir.path().join("aggregate-bomb.zip");
         let dst = dir.path().join("out.zip");

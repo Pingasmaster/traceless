@@ -34,6 +34,9 @@ use crate::metadata::MetadataSet;
 /// typical user cleans (a full photo library's worth of RAW files, a
 /// complete VM image, a blu-ray rip) and well below the point where
 /// any of the libraries we bind to remain sane.
+///
+/// The user can opt out of this (and every other resource cap) at run
+/// time via [`crate::set_limits_disabled`].
 pub const MAX_INPUT_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 
 /// Stat `path` and reject anything larger than [`MAX_INPUT_FILE_BYTES`].
@@ -45,11 +48,16 @@ pub const MAX_INPUT_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 /// expected to pass regular files), but defending at this layer is
 /// cheaper than auditing every `std::fs::read(path)` call.
 ///
+/// Becomes a no-op while [`crate::limits_disabled`] is `true`.
+///
 /// # Errors
 ///
 /// Returns [`CoreError::ReadError`] if the file cannot be stat'd,
 /// or [`CoreError::FileTooLarge`] if it exceeds the cap.
 pub(crate) fn check_input_size(path: &Path) -> Result<(), CoreError> {
+    if crate::config::limits_disabled() {
+        return Ok(());
+    }
     let md = std::fs::symlink_metadata(path).map_err(|e| CoreError::ReadError {
         path: path.to_path_buf(),
         source: e,

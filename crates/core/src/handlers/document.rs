@@ -234,15 +234,28 @@ impl FormatHandler for DocumentHandler {
                 // Cap the decompressed member body so a DOCX / ODT /
                 // EPUB with an embedded zip bomb can't OOM the cleaner.
                 // See `archive::MAX_ENTRY_DECOMPRESSED_BYTES` for the
-                // cap value and rationale.
+                // cap value and rationale. Both the `.take` wrapper and
+                // the post-read check become no-ops while the
+                // process-wide `limits_disabled` flag is on; that is
+                // deliberately the same behavior the outer archive
+                // handler shows, so the UI "Disable all limits" toggle
+                // relaxes every decompression cap the cleaner owns in
+                // one shot.
+                let take_limit = if crate::config::limits_disabled() {
+                    u64::MAX
+                } else {
+                    super::archive::MAX_ENTRY_DECOMPRESSED_BYTES.saturating_add(1)
+                };
                 (&mut e)
-                    .take(super::archive::MAX_ENTRY_DECOMPRESSED_BYTES + 1)
+                    .take(take_limit)
                     .read_to_end(&mut buf)
                     .map_err(|e| CoreError::CleanError {
                         path: path.to_path_buf(),
                         detail: format!("Failed to read entry {entry_name}: {e}"),
                     })?;
-                if buf.len() as u64 > super::archive::MAX_ENTRY_DECOMPRESSED_BYTES {
+                if !crate::config::limits_disabled()
+                    && buf.len() as u64 > super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
+                {
                     return Err(CoreError::CleanError {
                         path: path.to_path_buf(),
                         detail: format!(

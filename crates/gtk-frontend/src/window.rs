@@ -78,6 +78,9 @@ impl Window {
         // Menu button
         let menu = gtk::gio::Menu::new();
         menu.append(Some("Clear Window"), Some("win.clear-files"));
+        let section_settings = gtk::gio::Menu::new();
+        section_settings.append(Some("Preferences"), Some("win.preferences"));
+        menu.append_section(None, &section_settings);
         let section2 = gtk::gio::Menu::new();
         section2.append(Some("About Traceless"), Some("win.about"));
         menu.append_section(None, &section2);
@@ -388,6 +391,15 @@ impl Window {
             });
         }
         window.add_action(&clear_action);
+
+        let prefs_action = gtk::gio::SimpleAction::new("preferences", None);
+        {
+            let window_clone = window.clone();
+            prefs_action.connect_activate(move |_, _| {
+                dialogs::show_preferences_dialog(&window_clone);
+            });
+        }
+        window.add_action(&prefs_action);
 
         let about_action = gtk::gio::SimpleAction::new("about", None);
         {
