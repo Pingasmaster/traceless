@@ -3312,3 +3312,494 @@ fn policy_abort_tarxz() {
         false,
     );
 }
+
+// ================================================================
+// §N. Format-coverage extension — MIMEs not previously round-tripped
+// ================================================================
+//
+// Every test below creates a minimally valid file for a MIME that
+// `format_support::get_handler_for_mime` claims to support but that
+// had no dedicated round-trip metadata test before. Each test:
+//  1. Builds a dirty fixture with a known-plant string.
+//  2. Confirms the plant is visible through the handler's reader.
+//  3. Cleans via the public `FormatHandler::clean_metadata`.
+//  4. Confirms the plant is gone from the cleaned reader output.
+//
+// Tests for formats that rely on ffmpeg self-skip when the encoder
+// (or ffmpeg itself) is missing — the matching `make_dirty_*` helper
+// returns Err and we print a specific `[SKIP]` line instead of
+// failing. This matches the existing pattern at
+// `m4a_audio_round_trip_ffprobe_reports_no_user_tags` (line 1160).
+
+#[test]
+fn webp_round_trip_strips_exif_and_xmp() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available for webp synth");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.webp");
+    let cleaned = dir.path().join("cleaned.webp");
+    if make_dirty_webp(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libwebp encoder");
+        return;
+    }
+
+    let handler = get_handler_for_mime("image/webp").unwrap();
+    let before = handler.read_metadata(&dirty).unwrap();
+    let dump = format!("{before:?}");
+    assert!(
+        dump.contains("webp-secret-artist") || dump.contains("EXIF"),
+        "dirty WebP should surface injected EXIF: {dump}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(
+        !dump.contains("webp-secret-artist"),
+        "webp-secret-artist survived clean: {dump}"
+    );
+    assert!(
+        !dump.contains("webp-secret-description"),
+        "webp-secret-description survived clean: {dump}"
+    );
+}
+
+#[test]
+fn heic_round_trip_strips_exif() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available for heic synth");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.heic");
+    let cleaned = dir.path().join("cleaned.heic");
+    if make_dirty_heic(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libx265 or heif muxer");
+        return;
+    }
+
+    let handler = get_handler_for_mime("image/heic").unwrap();
+    let before = handler.read_metadata(&dirty).unwrap();
+    let dump = format!("{before:?}");
+    assert!(
+        dump.contains("heic-secret-artist") || dump.contains("EXIF"),
+        "dirty HEIC should surface injected EXIF: {dump}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(
+        !dump.contains("heic-secret-artist"),
+        "heic-secret-artist survived clean: {dump}"
+    );
+}
+
+#[test]
+fn heif_round_trip_strips_exif() {
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg not available for heif synth");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.heif");
+    let cleaned = dir.path().join("cleaned.heif");
+    if make_dirty_heif(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libx265 or heif muxer");
+        return;
+    }
+
+    let handler = get_handler_for_mime("image/heif").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(
+        !dump.contains("heic-secret-artist"),
+        "secret survived HEIF clean: {dump}"
+    );
+}
+
+#[test]
+fn aac_round_trip_strips_id3_via_ffprobe() {
+    // AAC (ADTS) is routed through AudioHandler's ffmpeg path per
+    // CLAUDE.md. lofty's AAC reader cannot see the ID3v2 header ffmpeg
+    // writes (it would need a specific feature), so we use ffprobe as
+    // the ground-truth reader: same pattern as the M4A test above.
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.aac");
+    let cleaned = dir.path().join("cleaned.aac");
+    if make_dirty_aac(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg cannot encode AAC/ADTS with id3v2");
+        return;
+    }
+
+    // Precondition: at least one injected tag must be visible. The
+    // ADTS demuxer surfaces ID3v2 frames to ffprobe as format.tags.*.
+    let pre_tags = ffprobe_user_tags(&dirty);
+    let saw_plant = pre_tags
+        .iter()
+        .any(|(_, v)| v.contains("secret-aac-title") || v.contains("secret-aac-artist"));
+    if !saw_plant {
+        eprintln!("[SKIP] ffmpeg ADTS build did not surface ID3v2 to ffprobe: {pre_tags:?}");
+        return;
+    }
+
+    let handler = get_handler_for_mime("audio/aac").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+
+    let post_tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        post_tags.is_empty(),
+        "AAC post-clean still reports user tags via ffprobe: {post_tags:?}"
+    );
+}
+
+#[test]
+fn webm_round_trip_strips_metadata() {
+    // Mirrors `mkv_round_trip_strips_metadata` (line ~1286) in shape:
+    // we assert the injected user-plant strings are gone, not that
+    // every ffprobe tag is empty. ffmpeg's Matroska/WebM muxer writes
+    // a couple of structural tags (`encoder=Lavf`, per-track DURATION)
+    // that are derived from stream content, not user metadata, and
+    // `-map_metadata -1 +bitexact` does not always strip them on every
+    // ffmpeg build. Whether that's a real fingerprint worth closing
+    // is a handler-level discussion, not a test-coverage one.
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.webm");
+    let cleaned = dir.path().join("cleaned.webm");
+    if make_dirty_webm(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libvpx");
+        return;
+    }
+
+    let handler = get_handler_for_mime("video/webm").unwrap();
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(_, v)| v.contains("secret-webm-title") || v.contains("secret-webm-comment")),
+        "dirty WebM should surface injected tags: {pre_tags:?}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let post_tags = ffprobe_user_tags(&cleaned);
+    let leaked_plant = post_tags
+        .iter()
+        .any(|(_, v)| v.contains("secret-webm-title") || v.contains("secret-webm-comment"));
+    assert!(
+        !leaked_plant,
+        "WebM post-clean still reports injected user tags: {post_tags:?}"
+    );
+}
+
+#[test]
+fn mov_round_trip_strips_metadata() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.mov");
+    let cleaned = dir.path().join("cleaned.mov");
+    if make_dirty_mov(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg mov encoder unavailable");
+        return;
+    }
+
+    let handler = get_handler_for_mime("video/quicktime").unwrap();
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(_, v)| v.contains("secret-mov-title") || v.contains("secret-mov-comment")),
+        "dirty MOV should surface injected tags: {pre_tags:?}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let post_tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        post_tags.is_empty(),
+        "MOV post-clean still reports user tags: {post_tags:?}"
+    );
+}
+
+#[test]
+fn wmv_round_trip_strips_metadata() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.wmv");
+    let cleaned = dir.path().join("cleaned.wmv");
+    if make_dirty_wmv(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks wmv2/asf encoder");
+        return;
+    }
+
+    let handler = get_handler_for_mime("video/x-ms-wmv").unwrap();
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(_, v)| v.contains("secret-wmv-title") || v.contains("secret-wmv-author")),
+        "dirty WMV should surface injected tags: {pre_tags:?}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let post_tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        post_tags.is_empty(),
+        "WMV post-clean still reports user tags: {post_tags:?}"
+    );
+}
+
+#[test]
+fn flv_round_trip_strips_metadata() {
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.flv");
+    let cleaned = dir.path().join("cleaned.flv");
+    if make_dirty_flv(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks flv1 encoder");
+        return;
+    }
+
+    let handler = get_handler_for_mime("video/x-flv").unwrap();
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(_, v)| v.contains("secret-flv-title") || v.contains("secret-flv-comment")),
+        "dirty FLV should surface injected tags: {pre_tags:?}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let post_tags = ffprobe_user_tags(&cleaned);
+    assert!(
+        post_tags.is_empty(),
+        "FLV post-clean still reports user tags: {post_tags:?}"
+    );
+}
+
+#[test]
+fn video_ogg_round_trip_strips_metadata() {
+    // Same shape as the WebM test: check that the injected secret
+    // plants are gone, not that every ffprobe tag is empty. Libtheora
+    // and libvorbis both write an `encoder=Lavc…` tag onto each
+    // stream's comment header, and `-map_metadata -1` does not
+    // reliably remove these codec-level tags on every ffmpeg build.
+    if !have_ffmpeg() || !have_ffprobe() {
+        eprintln!("[SKIP] ffmpeg/ffprobe not available");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ogv");
+    let cleaned = dir.path().join("cleaned.ogv");
+    if make_dirty_video_ogg(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libtheora");
+        return;
+    }
+
+    let handler = get_handler_for_mime("video/ogg").unwrap();
+    let pre_tags = ffprobe_user_tags(&dirty);
+    assert!(
+        pre_tags
+            .iter()
+            .any(|(_, v)| v.contains("secret-theora-title") || v.contains("secret-theora-comment")),
+        "dirty video/ogg should surface injected tags: {pre_tags:?}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let post_tags = ffprobe_user_tags(&cleaned);
+    let leaked_plant = post_tags
+        .iter()
+        .any(|(_, v)| v.contains("secret-theora-title") || v.contains("secret-theora-comment"));
+    assert!(
+        !leaked_plant,
+        "video/ogg post-clean still reports injected user tags: {post_tags:?}"
+    );
+}
+
+#[test]
+fn vorbis_mime_routes_through_audio_handler() {
+    // `audio/vorbis` and `audio/ogg` must both route to AudioHandler.
+    // mat2 covers ogg-as-audio; vorbis-as-audio is the same handler
+    // but a separate MIME entry in the dispatch table and deserves a
+    // routing guard so the entry can't silently disappear.
+    if !have_ffmpeg() {
+        eprintln!("[SKIP] ffmpeg required for ogg fixture");
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ogg");
+    let cleaned = dir.path().join("cleaned.ogg");
+    if make_dirty_ogg(&dirty).is_err() {
+        eprintln!("[SKIP] ffmpeg lacks libvorbis");
+        return;
+    }
+    let handler = get_handler_for_mime("audio/vorbis").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    // Reader goes through lofty which knows nothing about the MIME;
+    // just assert the file survives and is still valid OGG.
+    let bytes = fs::read(&cleaned).unwrap();
+    assert!(
+        bytes.starts_with(b"OggS"),
+        "cleaned file must still begin with OggS magic"
+    );
+}
+
+#[test]
+fn ods_round_trip_drops_meta_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.ods");
+    let cleaned = dir.path().join("cleaned.ods");
+    make_dirty_ods(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.spreadsheet").unwrap();
+    let before = handler.read_metadata(&dirty).unwrap();
+    let dump = format!("{before:?}");
+    assert!(
+        dump.contains("Secret ODF Author"),
+        "dirty ODS should surface dc:creator: {dump}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(
+        !dump.contains("Secret ODF Author"),
+        "Secret ODF Author survived ODS clean: {dump}"
+    );
+    assert!(
+        !dump.contains("leak-me"),
+        "user-defined field survived ODS clean: {dump}"
+    );
+    // Inner members must also come back clean via deep-meta inspection.
+    assert_deep_meta_empty(&cleaned);
+}
+
+#[test]
+fn odp_round_trip_drops_meta_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.odp");
+    let cleaned = dir.path().join("cleaned.odp");
+    make_dirty_odp(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.presentation").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(!dump.contains("Secret ODF Author"));
+    assert!(!dump.contains("leak-me"));
+    assert_deep_meta_empty(&cleaned);
+}
+
+#[test]
+fn odg_round_trip_drops_meta_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.odg");
+    let cleaned = dir.path().join("cleaned.odg");
+    make_dirty_odg(&dirty);
+
+    let handler = get_handler_for_mime("application/vnd.oasis.opendocument.graphics").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(!dump.contains("Secret ODF Author"));
+    assert!(!dump.contains("leak-me"));
+    assert_deep_meta_empty(&cleaned);
+}
+
+#[test]
+fn xlsx_round_trip_strips_core_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.xlsx");
+    let cleaned = dir.path().join("cleaned.xlsx");
+    make_dirty_xlsx(&dirty);
+
+    let handler =
+        get_handler_for_mime("application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+            .unwrap();
+    let before = handler.read_metadata(&dirty).unwrap();
+    let dump = format!("{before:?}");
+    assert!(
+        dump.contains("Secret OOXML Author"),
+        "dirty XLSX should surface dc:creator: {dump}"
+    );
+
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(!dump.contains("Secret OOXML Author"));
+    assert!(!dump.contains("Evil Corp"));
+    assert!(!dump.contains("leak-me"));
+    assert_deep_meta_empty(&cleaned);
+}
+
+#[test]
+fn pptx_round_trip_strips_core_xml() {
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.pptx");
+    let cleaned = dir.path().join("cleaned.pptx");
+    make_dirty_pptx(&dirty);
+
+    let handler = get_handler_for_mime(
+        "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+    )
+    .unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let after = handler.read_metadata(&cleaned).unwrap();
+    let dump = format!("{after:?}");
+    assert!(!dump.contains("Secret OOXML Author"));
+    assert!(!dump.contains("Evil Corp"));
+    assert!(!dump.contains("leak-me"));
+    assert_deep_meta_empty(&cleaned);
+}
+
+#[test]
+fn xhtml_round_trip_drops_meta_and_blanks_title() {
+    // Complements `html_xhtml_self_closing_meta_is_dropped` (which
+    // only tests one line of xhtml) with a full round-trip of a
+    // realistic `application/xhtml+xml` document.
+    let dir = tempfile::tempdir().unwrap();
+    let dirty = dir.path().join("dirty.xhtml");
+    let cleaned = dir.path().join("cleaned.xhtml");
+    let xhtml = br#"<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Strict//EN" "http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd">
+<html xmlns="http://www.w3.org/1999/xhtml">
+<head>
+<title>xhtml-secret-title</title>
+<meta name="author" content="xhtml-secret-author"/>
+<meta name="generator" content="xhtml-secret-generator"/>
+<link rel="author" href="mailto:secret@example.com"/>
+</head>
+<body><p>visible-body</p></body>
+</html>"#;
+    fs::write(&dirty, xhtml).unwrap();
+
+    let handler = get_handler_for_mime("application/xhtml+xml").unwrap();
+    handler.clean_metadata(&dirty, &cleaned).unwrap();
+    let out = fs::read_to_string(&cleaned).unwrap();
+    assert!(!out.contains("xhtml-secret-author"));
+    assert!(!out.contains("xhtml-secret-generator"));
+    assert!(!out.contains("xhtml-secret-title"));
+    assert!(!out.contains("mailto:secret@example.com"));
+    assert!(
+        out.contains("visible-body"),
+        "body content must survive clean: {out}"
+    );
+}

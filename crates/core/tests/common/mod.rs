@@ -482,6 +482,120 @@ pub fn make_dirty_docx(path: &Path, embedded_jpeg: &[u8]) {
     writer.finish().unwrap();
 }
 
+/// Generic OOXML builder used by XLSX and PPTX, which share the same
+/// package layout as DOCX but with different payload parts. Writes the
+/// common `[Content_Types].xml`, `_rels/.rels`, and
+/// `docProps/{core,app,custom}.xml` manifests with dirty metadata,
+/// plus a single payload part at `part_path` containing `part_body`.
+fn make_dirty_ooxml(
+    path: &Path,
+    content_types: &str,
+    main_rel_type: &str,
+    main_rel_target: &str,
+    part_path: &str,
+    part_body: &[u8],
+) {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+
+    writer.start_file("[Content_Types].xml", options).unwrap();
+    writer.write_all(content_types.as_bytes()).unwrap();
+
+    writer.start_file("_rels/.rels", options).unwrap();
+    let rels = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="{main_rel_type}" Target="{main_rel_target}"/>
+  <Relationship Id="rId2" Type="http://schemas.openxmlformats.org/package/2006/relationships/metadata/core-properties" Target="docProps/core.xml"/>
+  <Relationship Id="rId3" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/extended-properties" Target="docProps/app.xml"/>
+</Relationships>"#,
+    );
+    writer.write_all(rels.as_bytes()).unwrap();
+
+    writer.start_file("docProps/core.xml", options).unwrap();
+    writer.write_all(br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<cp:coreProperties xmlns:cp="http://schemas.openxmlformats.org/package/2006/metadata/core-properties"
+                   xmlns:dc="http://purl.org/dc/elements/1.1/"
+                   xmlns:dcterms="http://purl.org/dc/terms/">
+  <dc:creator>Secret OOXML Author</dc:creator>
+  <cp:lastModifiedBy>Alice Smith</cp:lastModifiedBy>
+  <dc:title>Secret OOXML Title</dc:title>
+  <dcterms:created xsi:type="dcterms:W3CDTF" xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance">2024-03-14T00:00:00Z</dcterms:created>
+</cp:coreProperties>"#).unwrap();
+
+    writer.start_file("docProps/app.xml", options).unwrap();
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/extended-properties">
+  <Application>Microsoft Office</Application>
+  <Company>Evil Corp</Company>
+  <Manager>Bob Evil</Manager>
+</Properties>"#,
+        )
+        .unwrap();
+
+    writer.start_file("docProps/custom.xml", options).unwrap();
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Properties xmlns="http://schemas.openxmlformats.org/officeDocument/2006/custom-properties">
+  <property name="SecretCustomOoxmlField">leak-me</property>
+</Properties>"#,
+        )
+        .unwrap();
+
+    writer.start_file(part_path, options).unwrap();
+    writer.write_all(part_body).unwrap();
+
+    writer.finish().unwrap();
+}
+
+pub fn make_dirty_xlsx(path: &Path) {
+    make_dirty_ooxml(
+        path,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>"#,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "xl/workbook.xml",
+        "xl/workbook.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheets><sheet name="Sheet1" sheetId="1"/></sheets>
+</workbook>"#,
+    );
+}
+
+pub fn make_dirty_pptx(path: &Path) {
+    make_dirty_ooxml(
+        path,
+        r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Override PartName="/ppt/presentation.xml" ContentType="application/vnd.openxmlformats-officedocument.presentationml.presentation.main+xml"/>
+  <Override PartName="/docProps/core.xml" ContentType="application/vnd.openxmlformats-package.core-properties+xml"/>
+  <Override PartName="/docProps/app.xml" ContentType="application/vnd.openxmlformats-officedocument.extended-properties+xml"/>
+</Types>"#,
+        "http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument",
+        "ppt/presentation.xml",
+        "ppt/presentation.xml",
+        br#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<p:presentation xmlns:p="http://schemas.openxmlformats.org/presentationml/2006/main"/>
+"#,
+    );
+}
+
 pub fn make_dirty_odt(path: &Path) {
     use zip::ZipWriter;
     use zip::write::SimpleFileOptions;
@@ -572,6 +686,128 @@ pub fn make_dirty_odt(path: &Path) {
     writer.write_all(b"layout-junk").unwrap();
 
     writer.finish().unwrap();
+}
+
+/// Generic ODF builder — writes a minimal zip with the supplied
+/// mimetype and a dirty `meta.xml` carrying the usual creator/date
+/// fields plus an `office:meta` generator. Used by ODS/ODP/ODG which
+/// share the same ODF family as ODT but with a different mimetype and
+/// a trivial `content.xml` skeleton tailored to each document type.
+fn make_dirty_odf(path: &Path, mimetype: &str, content_xml: &[u8]) {
+    use zip::ZipWriter;
+    use zip::write::SimpleFileOptions;
+
+    let file = std::fs::File::create(path).unwrap();
+    let mut writer = ZipWriter::new(file);
+    let options = SimpleFileOptions::default();
+
+    writer
+        .start_file(
+            "mimetype",
+            SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored),
+        )
+        .unwrap();
+    writer.write_all(mimetype.as_bytes()).unwrap();
+
+    writer.start_file("META-INF/manifest.xml", options).unwrap();
+    let manifest = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<manifest:manifest xmlns:manifest="urn:oasis:names:tc:opendocument:xmlns:manifest:1.0">
+  <manifest:file-entry manifest:full-path="/" manifest:media-type="{mimetype}"/>
+  <manifest:file-entry manifest:full-path="content.xml" manifest:media-type="text/xml"/>
+  <manifest:file-entry manifest:full-path="meta.xml" manifest:media-type="text/xml"/>
+</manifest:manifest>"#,
+    );
+    writer.write_all(manifest.as_bytes()).unwrap();
+
+    writer.start_file("meta.xml", options).unwrap();
+    writer
+        .write_all(
+            br#"<?xml version="1.0" encoding="UTF-8"?>
+<office:document-meta xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                      xmlns:dc="http://purl.org/dc/elements/1.1/"
+                      xmlns:meta="urn:oasis:names:tc:opendocument:xmlns:meta:1.0">
+  <office:meta>
+    <dc:creator>Secret ODF Author</dc:creator>
+    <meta:initial-creator>Initial Secret</meta:initial-creator>
+    <meta:creation-date>2024-03-14T00:00:00</meta:creation-date>
+    <meta:generator>LibreOffice/7.6</meta:generator>
+    <meta:user-defined meta:name="SecretField">leak-me</meta:user-defined>
+  </office:meta>
+</office:document-meta>"#,
+        )
+        .unwrap();
+
+    writer.start_file("content.xml", options).unwrap();
+    writer.write_all(content_xml).unwrap();
+
+    writer.start_file("styles.xml", options).unwrap();
+    writer
+        .write_all(
+            br#"<?xml version="1.0"?><office:document-styles xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"/>"#,
+        )
+        .unwrap();
+
+    writer
+        .start_file("Thumbnails/thumbnail.png", options)
+        .unwrap();
+    writer.write_all(b"fake-thumbnail-data").unwrap();
+
+    writer.finish().unwrap();
+}
+
+pub fn make_dirty_ods(path: &Path) {
+    make_dirty_odf(
+        path,
+        "application/vnd.oasis.opendocument.spreadsheet",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                         xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0"
+                         xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body>
+    <office:spreadsheet>
+      <table:table table:name="Sheet1">
+        <table:table-row>
+          <table:table-cell office:value-type="string"><text:p>visible-cell</text:p></table:table-cell>
+        </table:table-row>
+      </table:table>
+    </office:spreadsheet>
+  </office:body>
+</office:document-content>"#,
+    );
+}
+
+pub fn make_dirty_odp(path: &Path) {
+    make_dirty_odf(
+        path,
+        "application/vnd.oasis.opendocument.presentation",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                         xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"
+                         xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0">
+  <office:body>
+    <office:presentation>
+      <draw:page draw:name="Slide1"><text:p>visible-slide</text:p></draw:page>
+    </office:presentation>
+  </office:body>
+</office:document-content>"#,
+    );
+}
+
+pub fn make_dirty_odg(path: &Path) {
+    make_dirty_odf(
+        path,
+        "application/vnd.oasis.opendocument.graphics",
+        br#"<?xml version="1.0"?>
+<office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0"
+                         xmlns:draw="urn:oasis:names:tc:opendocument:xmlns:drawing:1.0">
+  <office:body>
+    <office:drawing>
+      <draw:page draw:name="page1"/>
+    </office:drawing>
+  </office:body>
+</office:document-content>"#,
+    );
 }
 
 pub fn make_dirty_epub(path: &Path) {
@@ -868,6 +1104,10 @@ pub fn ffprobe_user_tags(path: &Path) -> Vec<(String, String)> {
                 | "major_brand"
                 | "minor_version"
                 | "compatible_brands"
+                // DURATION is written by ffmpeg's Matroska/WebM muxer as a
+                // per-track structural tag computed from stream content, not
+                // user metadata — `-map_metadata -1` does not remove it.
+                | "DURATION"
         ) {
             continue;
         }
@@ -994,6 +1234,75 @@ pub fn make_dirty_tiff(path: &Path) -> std::io::Result<()> {
     Ok(())
 }
 
+/// Build a dirty WebP via ffmpeg's libwebp encoder, then inject EXIF
+/// using `little_exif`'s WebP writer. Returns Err if the installed
+/// ffmpeg lacks libwebp support or if EXIF injection fails — the
+/// round-trip test self-skips on either.
+pub fn make_dirty_webp(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=orange:s=8x8:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libwebp",
+        ],
+    )?;
+    use little_exif::exif_tag::ExifTag;
+    use little_exif::metadata::Metadata as ExifMetadata;
+    let mut exif = ExifMetadata::new();
+    exif.set_tag(ExifTag::Artist("webp-secret-artist".to_string()));
+    exif.set_tag(ExifTag::ImageDescription(
+        "webp-secret-description".to_string(),
+    ));
+    exif.write_to_file(path)
+        .map_err(|e| std::io::Error::other(format!("little_exif webp write: {e}")))?;
+    Ok(())
+}
+
+/// Build a dirty HEIC via ffmpeg's libx265 encoder wrapped in the HEIF
+/// muxer. Most ffmpeg builds on minimal CI images do NOT include libx265
+/// and will return Err; callers must self-skip. On success we inject
+/// EXIF with `little_exif` which supports HEIC/HEIF.
+pub fn make_dirty_heic(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=cyan:s=16x16:d=0.04:r=25",
+            "-vframes",
+            "1",
+            "-c:v",
+            "libx265",
+            "-x265-params",
+            "log-level=none",
+            "-f",
+            "heif",
+        ],
+    )?;
+    use little_exif::exif_tag::ExifTag;
+    use little_exif::metadata::Metadata as ExifMetadata;
+    let mut exif = ExifMetadata::new();
+    exif.set_tag(ExifTag::Artist("heic-secret-artist".to_string()));
+    exif.write_to_file(path)
+        .map_err(|e| std::io::Error::other(format!("little_exif heic write: {e}")))?;
+    Ok(())
+}
+
+/// Thin alias for HEIF; same ffmpeg incantation under a `.heif`
+/// extension so the MIME detector routes via `image/heif` instead of
+/// `image/heic`. The dispatcher uses the same `ImageHandler` in both
+/// cases, but having a separate fixture keeps the matrix row honest.
+pub fn make_dirty_heif(path: &Path) -> std::io::Result<()> {
+    make_dirty_heic(path)
+}
+
 /// Build a minimum-viable BMP header. BMP has very little metadata
 /// (and what exists is in the optional ICC profile V5 header), so we
 /// just exercise the dispatch path.
@@ -1062,6 +1371,159 @@ pub fn make_dirty_mkv(path: &Path) -> std::io::Result<()> {
             "yuv420p",
             "-metadata",
             "title=secret-title",
+        ],
+    )
+}
+
+pub fn make_dirty_webm(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libvpx",
+            "-pix_fmt",
+            "yuv420p",
+            "-b:v",
+            "50k",
+            "-metadata",
+            "title=secret-webm-title",
+            "-metadata",
+            "comment=secret-webm-comment",
+        ],
+    )
+}
+
+pub fn make_dirty_mov(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-f",
+            "mov",
+            "-metadata",
+            "title=secret-mov-title",
+            "-metadata",
+            "comment=secret-mov-comment",
+        ],
+    )
+}
+
+pub fn make_dirty_wmv(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "wmv2",
+            "-f",
+            "asf",
+            "-metadata",
+            "title=secret-wmv-title",
+            "-metadata",
+            "author=secret-wmv-author",
+        ],
+    )
+}
+
+pub fn make_dirty_flv(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=16x16:d=0.1:r=1",
+            "-c:v",
+            "flv1",
+            "-f",
+            "flv",
+            "-metadata",
+            "title=secret-flv-title",
+            "-metadata",
+            "comment=secret-flv-comment",
+        ],
+    )
+}
+
+pub fn make_dirty_video_ogg(path: &Path) -> std::io::Result<()> {
+    // Theora requires the picture dimensions to be divisible by 16 AND
+    // to meet a minimum that libtheora itself rejects below 32×32.
+    // 64×64 is the smallest well-tested size. We also add a silent
+    // vorbis audio track alongside the theora video so ffmpeg has a
+    // comment-carrier to serialize the user tags into.
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "color=c=black:s=64x64:d=0.1:r=25",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:v",
+            "libtheora",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "libvorbis",
+            "-f",
+            "ogg",
+            "-metadata",
+            "title=secret-theora-title",
+            "-metadata",
+            "comment=secret-theora-comment",
+        ],
+    )
+}
+
+/// Build a dirty AAC (ADTS stream) via ffmpeg. ADTS is a raw codec
+/// bitstream with no native tagging, but ffmpeg can prepend an ID3v2
+/// header when the `id3v2_version` option is set. That's the exact
+/// input shape that AudioHandler's ffmpeg-routed AAC path has to
+/// scrub: per CLAUDE.md, `audio/aac` routes through the shared
+/// `ffmpeg -map_metadata -1` invocation, not lofty.
+pub fn make_dirty_aac(path: &Path) -> std::io::Result<()> {
+    ffmpeg_synthesize(
+        path,
+        &[
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=44100",
+            "-t",
+            "0.1",
+            "-c:a",
+            "aac",
+            "-f",
+            "adts",
+            "-id3v2_version",
+            "3",
+            "-write_id3v1",
+            "1",
+            "-metadata",
+            "title=secret-aac-title",
+            "-metadata",
+            "artist=secret-aac-artist",
+            "-metadata",
+            "comment=secret-aac-comment",
         ],
     )
 }
