@@ -701,7 +701,9 @@ fn build_docx_with_realistic_manifest(path: &std::path::Path) {
         r#"</Relationships>"#,
     ).as_bytes()).unwrap();
 
-    writer.start_file("word/_rels/document.xml.rels", options).unwrap();
+    writer
+        .start_file("word/_rels/document.xml.rels", options)
+        .unwrap();
     writer.write_all(concat!(
         r#"<?xml version="1.0" encoding="UTF-8" standalone="yes"?>"#,
         r#"<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">"#,
@@ -727,9 +729,7 @@ fn build_docx_with_realistic_manifest(path: &std::path::Path) {
 
     // The parts the cleaner drops. Contents are irrelevant; only their
     // presence in the zip matters for the pre-clean manifest shape.
-    writer
-        .start_file("word/theme/theme1.xml", options)
-        .unwrap();
+    writer.start_file("word/theme/theme1.xml", options).unwrap();
     writer.write_all(b"<theme/>").unwrap();
 
     writer.start_file("word/numbering.xml", options).unwrap();

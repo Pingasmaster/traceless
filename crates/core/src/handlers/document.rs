@@ -254,12 +254,13 @@ impl FormatHandler for DocumentHandler {
                 (buf, compression)
             };
 
-            let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(
-                |e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to clean entry {entry_name}: {e}"),
-                },
-            )?;
+            let cleaned_bytes =
+                clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(|e| {
+                    CoreError::CleanError {
+                        path: path.to_path_buf(),
+                        detail: format!("Failed to clean entry {entry_name}: {e}"),
+                    }
+                })?;
 
             let options = zip_util::normalized_options(compression);
             writer

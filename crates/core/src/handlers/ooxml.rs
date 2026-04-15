@@ -426,10 +426,7 @@ fn find_bytes(haystack: &[u8], needle: &[u8]) -> Option<usize> {
 /// `Default Extension="..."` entries are content-type wildcards and are
 /// preserved unchanged. Only explicit `Override` entries are filtered.
 #[must_use]
-pub fn rewrite_content_types<S: BuildHasher>(
-    xml: &str,
-    kept_parts: &HashSet<String, S>,
-) -> String {
+pub fn rewrite_content_types<S: BuildHasher>(xml: &str, kept_parts: &HashSet<String, S>) -> String {
     let mut reader = Reader::from_str(xml);
     let mut writer = Writer::new(Cursor::new(Vec::new()));
 
