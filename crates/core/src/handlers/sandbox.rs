@@ -2,12 +2,16 @@
 //!
 //! mat2 runs ffmpeg / exiftool inside bubblewrap to contain maliciously
 //! crafted inputs from escaping to the host. We do the same for
-//! `ffmpeg` and `ffprobe`. The wrapper is best-effort:
+//! `ffmpeg` and `ffprobe`. This wrapper is **fail-closed**:
 //!
-//! 1. If `bwrap` isn't on the user's `PATH`, we log once and fall
-//!    through to a normal `Command::new` invocation. Users on distros
-//!    without bubblewrap (e.g., some minimal containers) shouldn't
-//!    lose functionality.
+//! 1. If `bwrap` isn't available (missing binary, or present but unable
+//!    to create a user namespace), we log loudly at ERROR and **refuse
+//!    to run the tool**. This path decodes untrusted, internet-facing
+//!    media; silently spawning ffmpeg/ffprobe *unsandboxed* would expose
+//!    the host to any decoder RCE in the attacker-controlled input, so
+//!    we return [`CoreError::ToolFailed`] instead of degrading. Callers
+//!    that want a non-fatal capability probe should use
+//!    [`sandbox_available`].
 //! 2. The sandbox is scoped to what ffmpeg actually needs: a read-only
 //!    bind of `/usr` (for libs + the binary), a writable temp dir, a
 //!    read-only bind of the input path, and a writable bind of the
@@ -62,8 +66,81 @@ fn which(cmd: &str) -> Option<String> {
     None
 }
 
-/// Build a `Command` that runs `program` under bubblewrap if available,
-/// falling back to a direct `Command::new(program)`.
+/// The bubblewrap flags shared by every sandboxed invocation: drop all
+/// namespaces, clear the environment, expose a minimal read-only root
+/// (libs + binaries) plus a private `/proc`, `/dev`, and `/tmp`. Path
+/// binds specific to each call site (input/output) are appended by the
+/// caller after these.
+const BWRAP_BASE_ARGS: &[&str] = &[
+    "--unshare-all",
+    "--die-with-parent",
+    "--new-session",
+    "--clearenv",
+    "--setenv",
+    "PATH",
+    "/usr/bin:/bin",
+    "--ro-bind",
+    "/usr",
+    "/usr",
+    // /bin, /lib, /lib64 on systems where they are real dirs (non-usrmerge)
+    "--ro-bind-try",
+    "/bin",
+    "/bin",
+    "--ro-bind-try",
+    "/lib",
+    "/lib",
+    "--ro-bind-try",
+    "/lib64",
+    "/lib64",
+    "--ro-bind-try",
+    "/etc/alternatives",
+    "/etc/alternatives",
+    "--ro-bind-try",
+    "/etc/ld.so.cache",
+    "/etc/ld.so.cache",
+    "--ro-bind-try",
+    "/etc/ld.so.conf",
+    "/etc/ld.so.conf",
+    "--ro-bind-try",
+    "/etc/ld.so.conf.d",
+    "/etc/ld.so.conf.d",
+    "--proc",
+    "/proc",
+    "--dev",
+    "/dev",
+    "--tmpfs",
+    "/tmp",
+];
+
+/// Resolve the `bwrap` binary or fail closed.
+///
+/// Returns [`CoreError::ToolFailed`] (keyed on the wrapped `program`)
+/// when bubblewrap is missing. The log is emitted at ERROR — on this
+/// untrusted-media path a missing sandbox is a security-relevant outage,
+/// not a benign degradation.
+fn require_bwrap(program: &str) -> Result<&'static str, CoreError> {
+    bwrap_path().ok_or_else(|| {
+        log::error!(
+            "bwrap (bubblewrap) not found; REFUSING to run {program} unsandboxed on \
+             untrusted media. Install bubblewrap (and ensure user namespaces are \
+             permitted) to restore this handler."
+        );
+        CoreError::ToolFailed {
+            tool: program.to_string(),
+            detail: format!(
+                "sandbox unavailable: bubblewrap (bwrap) is not installed, \
+                 so {program} cannot be run safely on untrusted input"
+            ),
+        }
+    })
+}
+
+/// Build a `Command` that runs `program` under bubblewrap.
+///
+/// **Fail-closed:** if `bwrap` is unavailable this returns
+/// [`CoreError::ToolFailed`] rather than spawning `program` directly —
+/// the input is untrusted media and an unsandboxed decoder would expose
+/// the host.
 ///
 /// `input_path` is bound read-only inside the sandbox; its *parent*
 /// remains inaccessible. `output_path`'s parent directory is bound
@@ -73,120 +150,98 @@ fn which(cmd: &str) -> Option<String> {
 /// Both paths should be absolute. The caller MUST use these same paths
 /// verbatim in the argv of the wrapped tool so the bind destinations
 /// match what the tool opens inside the sandbox.
-pub fn sandboxed_command(program: &str, input_path: &Path, output_path: &Path) -> Command {
-    let Some(bwrap) = bwrap_path() else {
-        log::debug!(
-            "bwrap not found; running {program} without sandbox. \
-             Install bubblewrap for defense-in-depth."
-        );
-        return Command::new(program);
-    };
+pub fn sandboxed_command(
+    program: &str,
+    input_path: &Path,
+    output_path: &Path,
+) -> Result<Command, CoreError> {
+    let bwrap = require_bwrap(program)?;
 
     let output_parent: PathBuf = output_path
         .parent()
         .map_or_else(|| PathBuf::from("/tmp"), Path::to_path_buf);
 
     let mut cmd = Command::new(bwrap);
-    cmd.args([
-        "--unshare-all",
-        "--die-with-parent",
-        "--new-session",
-        "--clearenv",
-        "--setenv",
-        "PATH",
-        "/usr/bin:/bin",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        // /bin, /lib, /lib64 on systems where they are real dirs (non-usrmerge)
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/etc/alternatives",
-        "/etc/alternatives",
-        "--ro-bind-try",
-        "/etc/ld.so.cache",
-        "/etc/ld.so.cache",
-        "--ro-bind-try",
-        "/etc/ld.so.conf",
-        "/etc/ld.so.conf",
-        "--ro-bind-try",
-        "/etc/ld.so.conf.d",
-        "/etc/ld.so.conf.d",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-    ]);
+    cmd.args(BWRAP_BASE_ARGS);
     cmd.arg("--ro-bind").arg(input_path).arg(input_path);
     cmd.arg("--bind").arg(&output_parent).arg(&output_parent);
     // The actual program
     cmd.arg("--");
     cmd.arg(program);
-    cmd
+    Ok(cmd)
 }
 
-/// Run `program` under a bubblewrap sandbox *without* any bind mounts
-/// for specific paths. Used by probe-only tools (e.g. `ffprobe -show_format`)
-/// that only need read access. The input path is bound read-only. As
-/// with `sandboxed_command`, the caller must use `input_path` verbatim
-/// in the tool's argv so the bind destination matches.
-pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Command {
-    let Some(bwrap) = bwrap_path() else {
-        log::debug!("bwrap not found; running {program} without sandbox.");
-        return Command::new(program);
-    };
+/// Run `program` under a bubblewrap sandbox with only the input path
+/// bound read-only. Used by probe-only tools (e.g. `ffprobe -show_format`)
+/// that only need read access. As with [`sandboxed_command`], the caller
+/// must use `input_path` verbatim in the tool's argv so the bind
+/// destination matches.
+///
+/// **Fail-closed:** if `bwrap` is unavailable this returns
+/// [`CoreError::ToolFailed`] rather than spawning `program` directly. A
+/// probe still parses attacker-controlled container headers with the
+/// same decoders, so it must not run unsandboxed either.
+pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Result<Command, CoreError> {
+    let bwrap = require_bwrap(program)?;
 
     let mut cmd = Command::new(bwrap);
-    cmd.args([
-        "--unshare-all",
-        "--die-with-parent",
-        "--new-session",
-        "--clearenv",
-        "--setenv",
-        "PATH",
-        "/usr/bin:/bin",
-        "--ro-bind",
-        "/usr",
-        "/usr",
-        "--ro-bind-try",
-        "/bin",
-        "/bin",
-        "--ro-bind-try",
-        "/lib",
-        "/lib",
-        "--ro-bind-try",
-        "/lib64",
-        "/lib64",
-        "--ro-bind-try",
-        "/etc/ld.so.cache",
-        "/etc/ld.so.cache",
-        "--ro-bind-try",
-        "/etc/ld.so.conf",
-        "/etc/ld.so.conf",
-        "--ro-bind-try",
-        "/etc/ld.so.conf.d",
-        "/etc/ld.so.conf.d",
-        "--proc",
-        "/proc",
-        "--dev",
-        "/dev",
-        "--tmpfs",
-        "/tmp",
-    ]);
+    cmd.args(BWRAP_BASE_ARGS);
     cmd.arg("--ro-bind").arg(input_path).arg(input_path);
     cmd.arg("--");
     cmd.arg(program);
-    cmd
+    Ok(cmd)
+}
+
+/// Probe whether the bubblewrap sandbox can actually be entered on this
+/// host. Unlike a mere `bwrap` binary check, this spawns the *real*
+/// sandbox argv (the shared [`BWRAP_BASE_ARGS`]) around `/bin/true`, so
+/// it also catches the common production failure where `bwrap` exists
+/// but the kernel forbids creating an unprivileged user namespace
+/// (`clone(CLONE_NEWUSER)` denied) — exactly the condition that makes
+/// the media handlers fail closed.
+///
+/// Intended for health checks / readiness probes so an operator learns
+/// the sandbox is down *before* a user upload is refused.
+///
+/// # Errors
+///
+/// Returns [`CoreError::ToolFailed`] when `bwrap` is missing, cannot be
+/// spawned, or the test container exits non-zero (namespace creation
+/// denied, etc.).
+pub fn sandbox_available() -> Result<(), CoreError> {
+    let bwrap = require_bwrap("bwrap")?;
+
+    let mut cmd = Command::new(bwrap);
+    cmd.args(BWRAP_BASE_ARGS);
+    cmd.arg("--").arg("/bin/true");
+
+    let output = cmd.output().map_err(|e| {
+        log::error!("bwrap sandbox self-test failed to spawn: {e}");
+        CoreError::ToolFailed {
+            tool: "bwrap".to_string(),
+            detail: format!("sandbox self-test could not spawn bwrap: {e}"),
+        }
+    })?;
+
+    if output.status.success() {
+        return Ok(());
+    }
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    log::error!(
+        "bwrap sandbox self-test exited non-zero (status {}): {}. \
+         Unprivileged user namespaces are likely disabled.",
+        output.status,
+        stderr.trim()
+    );
+    Err(CoreError::ToolFailed {
+        tool: "bwrap".to_string(),
+        detail: format!(
+            "sandbox self-test failed (status {}): {}",
+            output.status,
+            stderr.trim()
+        ),
+    })
 }
 
 /// Verify that `tool -version` runs and succeeds. Returns
@@ -228,14 +283,16 @@ pub fn check_tool_available(tool: &str) -> Result<(), CoreError> {
 /// - `-loglevel error -hide_banner` suppresses the version banner that
 ///   would otherwise leak into captured stderr.
 ///
-/// When `bwrap` is present the spawn is wrapped by
-/// [`sandboxed_command`], so the external ffmpeg process runs in a
-/// namespace that can only see the single input path (ro) and the
-/// output path's parent (rw).
+/// The spawn is always wrapped by [`sandboxed_command`], so the external
+/// ffmpeg process runs in a namespace that can only see the single input
+/// path (ro) and the output path's parent (rw). If the sandbox is
+/// unavailable this **fails closed** (see [`sandboxed_command`]) instead
+/// of running ffmpeg directly on untrusted media.
 ///
 /// # Errors
 ///
-/// Returns `CoreError::ToolNotFound` if ffmpeg is not installed, or
+/// Returns `CoreError::ToolNotFound` if ffmpeg is not installed,
+/// `CoreError::ToolFailed` if the bubblewrap sandbox is unavailable, or
 /// `CoreError::ToolFailed` if the spawn fails or ffmpeg exits non-zero.
 pub fn clean_with_ffmpeg(input: &Path, output: &Path) -> Result<(), CoreError> {
     check_tool_available("ffmpeg")?;
@@ -243,7 +300,7 @@ pub fn clean_with_ffmpeg(input: &Path, output: &Path) -> Result<(), CoreError> {
     // Pass `input` and `output` as `&OsStr` rather than going through
     // `to_string_lossy`: Linux filenames are byte sequences, not required
     // to be UTF-8, and lossy conversion silently corrupts non-UTF-8 names.
-    let mut cmd = sandboxed_command("ffmpeg", input, output);
+    let mut cmd = sandboxed_command("ffmpeg", input, output)?;
     cmd.arg("-y")
         .arg("-i")
         .arg(input)
@@ -296,16 +353,70 @@ mod tests {
     }
 
     #[test]
-    fn sandboxed_command_is_constructable_even_without_bwrap() {
+    fn sandboxed_command_fails_closed_or_wraps_bwrap() {
         let dir = tempfile::tempdir().unwrap();
         let input = dir.path().join("in.mp4");
         let output = dir.path().join("out.mp4");
         std::fs::write(&input, b"dummy").unwrap();
-        let cmd = sandboxed_command("ffmpeg", &input, &output);
-        // Program name matches the binary we called (bwrap if present,
-        // otherwise ffmpeg directly).
-        let prog = cmd.get_program().to_string_lossy().into_owned();
-        assert!(prog == "ffmpeg" || prog.ends_with("bwrap"));
+
+        match sandboxed_command("ffmpeg", &input, &output) {
+            Ok(cmd) => {
+                // When bwrap is present the wrapper must spawn bwrap, never
+                // ffmpeg directly (that would be the unsandboxed path).
+                let prog = cmd.get_program().to_string_lossy().into_owned();
+                assert!(
+                    prog.ends_with("bwrap"),
+                    "sandboxed command must invoke bwrap, got {prog}"
+                );
+                assert!(
+                    bwrap_path().is_some(),
+                    "got Ok without bwrap available — fail-closed contract violated"
+                );
+            }
+            Err(CoreError::ToolFailed { tool, .. }) => {
+                // No bwrap on this host: fail closed, never spawn ffmpeg.
+                assert_eq!(tool, "ffmpeg");
+                assert!(
+                    bwrap_path().is_none(),
+                    "fail-closed must only happen when bwrap is missing"
+                );
+            }
+            Err(other) => panic!("expected ToolFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandboxed_probe_command_fails_closed_or_wraps_bwrap() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("in.mp4");
+        std::fs::write(&input, b"dummy").unwrap();
+
+        match sandboxed_probe_command("ffprobe", &input) {
+            Ok(cmd) => {
+                let prog = cmd.get_program().to_string_lossy().into_owned();
+                assert!(prog.ends_with("bwrap"), "probe must invoke bwrap, got {prog}");
+            }
+            Err(CoreError::ToolFailed { tool, .. }) => {
+                assert_eq!(tool, "ffprobe");
+                assert!(bwrap_path().is_none());
+            }
+            Err(other) => panic!("expected ToolFailed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn sandbox_available_is_consistent_with_bwrap_presence() {
+        // The result depends on the host (bwrap installed? user namespaces
+        // permitted?). Both outcomes are valid; we only assert the error
+        // shape and that success never happens without a bwrap binary.
+        match sandbox_available() {
+            Ok(()) => assert!(
+                bwrap_path().is_some(),
+                "sandbox_available returned Ok without a bwrap binary"
+            ),
+            Err(CoreError::ToolFailed { tool, .. }) => assert_eq!(tool, "bwrap"),
+            Err(other) => panic!("expected ToolFailed, got {other:?}"),
+        }
     }
 
     #[test]

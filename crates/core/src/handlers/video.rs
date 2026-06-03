@@ -13,7 +13,7 @@ impl FormatHandler for VideoHandler {
         super::check_input_size(path)?;
         sandbox::check_tool_available("ffprobe")?;
 
-        let mut cmd = sandbox::sandboxed_probe_command("ffprobe", path);
+        let mut cmd = sandbox::sandboxed_probe_command("ffprobe", path)?;
         cmd.args([
             "-v",
             "quiet",
