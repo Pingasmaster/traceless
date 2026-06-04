@@ -369,10 +369,15 @@ fn should_omit(kind: ArchiveKind, name: &str) -> bool {
     if zip_util::is_office_junk_path(name) {
         return true;
     }
-    // ODF specifically: meta.xml is already in the shared junk list but
-    // keep `mimetype` regardless of junk rules.
+    // Keep `mimetype` regardless of junk rules (ODF stores it first, uncompressed).
     if name == "mimetype" {
         return false;
+    }
+    // ODF-only junk (thumbnails / view config / layout-cache / meta.xml) is
+    // dropped ONLY for actual ODF documents · a GENERIC zip that happens to
+    // contain a same-named member keeps it (previously such a member was lost).
+    if kind == ArchiveKind::Odf && zip_util::is_odf_only_junk_path(name) {
+        return true;
     }
     match kind {
         ArchiveKind::Ooxml | ArchiveKind::Odf | ArchiveKind::Epub | ArchiveKind::Generic => false,

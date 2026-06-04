@@ -112,21 +112,26 @@ pub fn is_office_junk_path(name: &str) -> bool {
         return true;
     }
 
-    // ODF junk (mat2 office.py LibreOfficeParser lines 573-578)
-    if name.starts_with("Thumbnails/")
-        || name.starts_with("Configurations2/")
-        || name == "layout-cache"
-        || name == "meta.xml"
-    {
-        return true;
-    }
-
     // EPUB junk (mat2 epub.py lines 25-29)
     if name == "iTunesMetadata.plist" || name == "META-INF/calibre_bookmarks.txt" {
         return true;
     }
 
     false
+}
+
+/// ODF-only junk (mat2 office.py LibreOfficeParser lines 573-578): thumbnails,
+/// view configuration, the layout cache, and the metadata part. These are
+/// dropped ONLY for actual ODF documents · a GENERIC zip that happens to contain
+/// a file by one of these names (e.g. its own `meta.xml`) must keep it. So this
+/// is kept OUT of the shared `is_office_junk_path` and gated on `ArchiveKind::Odf`
+/// in `document::should_omit`.
+#[must_use]
+pub fn is_odf_only_junk_path(name: &str) -> bool {
+    name.starts_with("Thumbnails/")
+        || name.starts_with("Configurations2/")
+        || name == "layout-cache"
+        || name == "meta.xml"
 }
 
 /// Common image extensions embedded inside office archives. Members
@@ -194,7 +199,9 @@ mod tests {
 
     #[test]
     fn office_junk_identifies_thumbnails_and_custom_xml() {
-        assert!(is_office_junk_path("Thumbnails/thumbnail.png"));
+        // ODF-only now: junk for ODF, but NOT for a generic zip.
+        assert!(is_odf_only_junk_path("Thumbnails/thumbnail.png"));
+        assert!(!is_office_junk_path("Thumbnails/thumbnail.png"));
         assert!(is_office_junk_path("docProps/custom.xml"));
         assert!(is_office_junk_path("customXml/item1.xml"));
         assert!(is_office_junk_path(
@@ -207,7 +214,9 @@ mod tests {
         ));
         assert!(is_office_junk_path("iTunesMetadata.plist"));
         assert!(is_office_junk_path("META-INF/calibre_bookmarks.txt"));
-        assert!(is_office_junk_path("meta.xml"));
+        // meta.xml is ODF-only junk now: dropped for ODF, KEPT for a generic zip.
+        assert!(is_odf_only_junk_path("meta.xml"));
+        assert!(!is_office_junk_path("meta.xml"));
     }
 
     #[test]
