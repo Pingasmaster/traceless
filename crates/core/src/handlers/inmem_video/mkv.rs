@@ -83,12 +83,19 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         }
         let header = match Header::read_from(&mut cursor) {
             Ok(h) => h,
-            // A clean EOF between elements is the normal loop terminator;
-            // any other read error means the framing is malformed.
-            Err(mkv_element::Error::Io(e)) if e.kind() == std::io::ErrorKind::UnexpectedEof => {
-                break;
+            // The `pos >= total` check above is the only clean terminator:
+            // it fires exactly when the previous element ended on the input
+            // boundary. So once we are here there ARE bytes left, and any
+            // failure (incl. an EOF part-way through the element ID or its
+            // size vint, e.g. a file truncated to just the 4-byte EBML ID)
+            // means the trailing element is truncated. Reject it (-> 422)
+            // rather than silently dropping the tail and shipping a
+            // half-file as if it were clean.
+            Err(e) => {
+                return Err(parse_err(format!(
+                    "truncated or malformed EBML element header: {e}"
+                )));
             }
-            Err(e) => return Err(parse_err(format!("malformed EBML element header: {e}"))),
         };
         let body_start = cursor.position();
 
@@ -496,6 +503,26 @@ mod tests {
         assert!(
             matches!(err, CoreError::ParseError { .. }),
             "truncated input must yield ParseError, got {err:?}"
+        );
+    }
+
+    #[test]
+    fn rejects_input_truncated_to_just_the_ebml_id() {
+        // Regression: a file truncated to exactly the 4-byte EBML element ID
+        // (0x1A45DFA3) used to read the ID, hit EOF on the size vint, treat
+        // that as a clean loop terminator, and return an empty 200 body.
+        // Truncated input must be a ParseError (HTTP 422), not a silent
+        // pass-through.
+        let err = strip(&[0x1A, 0x45, 0xDF, 0xA3]).unwrap_err();
+        assert!(
+            matches!(err, CoreError::ParseError { .. }),
+            "magic-only input must yield ParseError, got {err:?}"
+        );
+        // A few more bytes (ID + a partial size vint) is still truncated.
+        let err = strip(&[0x1A, 0x45, 0xDF, 0xA3, 0x01]).unwrap_err();
+        assert!(
+            matches!(err, CoreError::ParseError { .. }),
+            "ID + partial size must yield ParseError, got {err:?}"
         );
     }
 
