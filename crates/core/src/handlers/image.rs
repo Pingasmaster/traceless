@@ -1,20 +1,136 @@
+#[cfg(feature = "native")]
 use std::fs;
 use std::io::{BufWriter, Cursor};
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
 use img_parts::webp::WebP;
-use img_parts::{Bytes, DynImage, ImageEXIF, ImageICC};
+#[cfg(feature = "native")]
+use img_parts::Bytes;
+use img_parts::{DynImage, ImageEXIF, ImageICC};
+use little_exif::filetype::FileExtension;
 use little_exif::metadata::Metadata as ExifMetadata;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct ImageHandler;
 
+/// In-memory MIME dispatch shared by the native `clean_metadata` wrapper
+/// and the wasm `inmem` path: map a lowercase extension to the MIME the
+/// img-parts / little_exif logic branches on. Returns `None` for an
+/// extension this handler does not own.
+fn ext_to_mime(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        "jxl" => "image/jxl",
+        _ => return None,
+    })
+}
+
+/// Strip every metadata segment from an image, in memory. This is the
+/// single source of truth for the image cleaner: the native
+/// `clean_metadata` reads the file, calls this, and writes the result;
+/// the wasm `inmem` dispatch calls it directly. `ext` is the lowercase
+/// filename extension (no dot); it drives MIME selection.
+///
+/// # Errors
+///
+/// Returns [`CoreError::CleanError`] if the input cannot be parsed as a
+/// supported image or a post-strip pass fails, or
+/// [`CoreError::UnsupportedFormat`] for an extension this handler does
+/// not own.
+pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let Some(mime) = ext_to_mime(ext) else {
+        return Err(CoreError::UnsupportedFormat {
+            mime_type: format!("image handler: unknown extension '{ext}'"),
+        });
+    };
+
+    // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.
+    // little_exif clears the EXIF IFD (TIFF/HEIF) or the exif box (JXL)
+    // in place over a byte buffer without re-encoding the pixel data.
+    if matches!(mime, "image/tiff" | "image/heic" | "image/heif" | "image/jxl") {
+        let file_type = match mime {
+            "image/tiff" => FileExtension::TIFF,
+            "image/jxl" => FileExtension::JXL,
+            // both heic and heif route through HEIF
+            _ => FileExtension::HEIF,
+        };
+        let mut buf = input.to_vec();
+        ExifMetadata::clear_metadata(&mut buf, file_type).map_err(|e| CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: format!("Failed to clear metadata: {e}"),
+        })?;
+        return Ok(buf);
+    }
+
+    match DynImage::from_bytes(input.to_vec().into()) {
+        Ok(Some(mut img)) => {
+            img.set_exif(None);
+            img.set_icc_profile(None);
+
+            // For JPEG, also strip APP13 (IPTC), XMP, COM segments.
+            let mut buf = Vec::new();
+            img.encoder()
+                .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
+                .map_err(|e| CoreError::CleanError {
+                    path: std::path::PathBuf::new(),
+                    detail: format!("Failed to encode cleaned image: {e}"),
+                })?;
+
+            // Format-specific post-pass: strip leftover metadata chunks
+            // img-parts doesn't expose a setter for. If the post-pass
+            // fails (our own img-parts output did not re-parse cleanly),
+            // fail rather than ship bytes that may still carry XMP / IPTC
+            // / COM / text chunks.
+            let final_data = if mime == "image/jpeg" {
+                strip_jpeg_extra_segments(&buf).ok_or_else(|| CoreError::CleanError {
+                    path: std::path::PathBuf::new(),
+                    detail: "JPEG post-strip failed; refusing to ship partially-stripped image"
+                        .to_string(),
+                })?
+            } else if mime == "image/png" {
+                strip_png_text_chunks(&buf).ok_or_else(|| CoreError::CleanError {
+                    path: std::path::PathBuf::new(),
+                    detail: "PNG post-strip failed; refusing to ship partially-stripped image"
+                        .to_string(),
+                })?
+            } else if mime == "image/webp" {
+                strip_webp_extra_chunks(&buf).ok_or_else(|| CoreError::CleanError {
+                    path: std::path::PathBuf::new(),
+                    detail: "WebP post-strip failed; refusing to ship partially-stripped image"
+                        .to_string(),
+                })?
+            } else {
+                buf
+            };
+            Ok(final_data)
+        }
+        Ok(None) => Err(CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: "Could not parse image".to_string(),
+        }),
+        Err(e) => Err(CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: format!("Image parse error: {e}"),
+        }),
+    }
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for ImageHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -174,94 +290,23 @@ impl FormatHandler for ImageHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let mime = mime_guess::from_path(path).first_or_octet_stream();
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
 
-        // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.
-        // little_exif has a dedicated code path for each format that
-        // clears the EXIF IFD (TIFF/HEIF) or the exif box (JXL) in
-        // place without re-encoding the pixel data.
-        if matches!(
-            mime.as_ref(),
-            "image/tiff" | "image/heic" | "image/heif" | "image/jxl"
-        ) {
-            fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to copy file: {e}"),
-            })?;
-            ExifMetadata::file_clear_metadata(output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to clear metadata: {e}"),
-            })?;
-            return Ok(());
-        }
-
-        // Strip all metadata segments via img-parts, then run format-
-        // specific post-passes for the bits img-parts doesn't expose.
+        // Single logic path: read the bytes, clean in memory, write the
+        // result. `clean_bytes` is shared verbatim with the wasm build.
         let data = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        match DynImage::from_bytes(data.into()) {
-            Ok(Some(mut img)) => {
-                img.set_exif(None);
-                img.set_icc_profile(None);
-
-                // For JPEG, also strip APP13 (IPTC), XMP, COM segments
-                let mut buf = Vec::new();
-                img.encoder()
-                    .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
-                    .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to encode cleaned image: {e}"),
-                    })?;
-
-                // Format-specific post-pass: strip leftover metadata
-                // chunks that img-parts doesn't expose a setter for. If
-                // the post-pass fails (our own img-parts output did not
-                // re-parse cleanly), fail rather than ship bytes that
-                // may still carry XMP / IPTC / COM / text chunks.
-                let final_data = if mime == "image/jpeg" {
-                    strip_jpeg_extra_segments(&buf).ok_or_else(|| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: "JPEG post-strip failed; refusing to ship partially-stripped image"
-                            .to_string(),
-                    })?
-                } else if mime == "image/png" {
-                    strip_png_text_chunks(&buf).ok_or_else(|| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: "PNG post-strip failed; refusing to ship partially-stripped image"
-                            .to_string(),
-                    })?
-                } else if mime == "image/webp" {
-                    strip_webp_extra_chunks(&buf).ok_or_else(|| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: "WebP post-strip failed; refusing to ship partially-stripped image"
-                            .to_string(),
-                    })?
-                } else {
-                    buf
-                };
-
-                fs::write(output_path, final_data).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to write output: {e}"),
-                })?;
-            }
-            Ok(None) => {
-                return Err(CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: "Could not parse image".to_string(),
-                });
-            }
-            Err(e) => {
-                return Err(CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Image parse error: {e}"),
-                });
-            }
-        }
-
+        let cleaned = clean_bytes(&data, &ext).map_err(|e| super::repath(e, path))?;
+        fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("Failed to write output: {e}"),
+        })?;
         Ok(())
     }
 
@@ -341,6 +386,7 @@ fn strip_webp_extra_chunks(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Split a Debug-formatted `ExifTag` string like `ImageDescription("Hello")`
 /// into (name, value).
+#[cfg(feature = "native")]
 fn split_debug_tag(debug: &str) -> Option<(String, String)> {
     let paren = debug.find('(')?;
     let name = debug[..paren].to_string();
@@ -360,6 +406,7 @@ fn split_debug_tag(debug: &str) -> Option<(String, String)> {
 /// `little_exif` already contributed *concrete* tags for the same
 /// file. It must NOT be suppressed merely because the ICC line has
 /// just been pushed: that was the round-6 Bug 14 regression.
+#[cfg(feature = "native")]
 pub(super) fn generic_dynimage_lines(
     has_icc: bool,
     has_exif: bool,
@@ -376,7 +423,7 @@ pub(super) fn generic_dynimage_lines(
     (icc, exif)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

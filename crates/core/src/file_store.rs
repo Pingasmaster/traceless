@@ -31,6 +31,11 @@ use crate::worker_pool;
 ///
 /// The user can disable this (together with every other resource cap)
 /// at run time via `set_limits_disabled(true)`.
+//
+// `duration_suboptimal_units` (new in clippy 1.96) wants a larger unit,
+// but std has no stable `Duration::from_mins`; 600 seconds is the clear
+// intent (a 10-minute wall-clock cap), so the seconds form stays.
+#[allow(clippy::duration_suboptimal_units)]
 pub const HANDLER_WALL_CLOCK_CAP: Duration = Duration::from_secs(600);
 
 static NEXT_FILE_ID: AtomicU64 = AtomicU64::new(1);

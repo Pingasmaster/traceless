@@ -29,6 +29,16 @@ log = "= 0.4.29"
 env_logger = "= 0.11.10"
 async-channel = "= 2.5.0"
 
+# Vendored patch of `typed-path` 0.12.3 (pulled transitively by `zip` on
+# non-unix/non-windows targets, i.e. wasm32-wasip2). Upstream gates its
+# crate root on the nightly `feature(wasip2)` lang feature, which current
+# stable rustc rejects as an unknown feature, breaking the wasip2 build.
+# The vendored copy drops that single obsolete attribute; everything else
+# is byte-identical. Native builds never reach this dependency (zip uses
+# the std path types there), so this is a no-op off-wasm.
+[patch.crates-io]
+typed-path = { path = "vendor/typed-path" }
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

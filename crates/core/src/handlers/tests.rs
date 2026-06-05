@@ -918,7 +918,7 @@ fn docx_clean_rels_handles_absolute_targets() {
 #[test]
 fn test_docx_embedded_jpeg_exif_is_stripped() {
     // Create a dirty JPEG on disk, embed it, clean the DOCX, verify the
-    // EXIF is gone from the inner copy. This is the P0 §1.1 fix — the
+    // EXIF is gone from the inner copy. This is the P0 §1.1 fix - the
     // previous implementation copied embedded images verbatim.
     let dir = TempDir::new().unwrap();
     let jpeg_path = dir.path().join("dirty.jpg");
@@ -1138,7 +1138,7 @@ fn test_epub_regenerates_uuid_and_rejects_encryption() {
         "fresh UUID must be present: {opf}"
     );
 
-    // Second EPUB: encrypted — must fail
+    // Second EPUB: encrypted - must fail
     let enc_path = dir.path().join("enc.epub");
     let enc_output = dir.path().join("enc-cleaned.epub");
     let file = fs::File::create(&enc_path).unwrap();
@@ -1355,7 +1355,7 @@ fn test_file_store_add_directory() {
 // → rename path; they do not call the handler directly.
 
 /// 4×4 red JPEG produced by `convert -size 4x4 xc:red`. Small, valid,
-/// containing only a JFIF APP0 marker — any EXIF we add is stripable.
+/// containing only a JFIF APP0 marker - any EXIF we add is stripable.
 const TEST_JPEG: &[u8] = &[
     0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01, 0x01, 0x00, 0x00, 0x01,
     0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43, 0x00, 0x03, 0x02, 0x02, 0x02, 0x02, 0x02, 0x03,

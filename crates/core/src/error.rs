@@ -33,4 +33,13 @@ pub enum CoreError {
         size: u64,
         limit: u64,
     },
+
+    /// A format whose cleaner is deliberately unavailable in the
+    /// in-memory wasm build (video and the ffmpeg-routed MP4/M4A/AAC
+    /// audio containers). The native build handles these via ffmpeg
+    /// inside bubblewrap; the wasm build returns this so callers get a
+    /// real, matchable error instead of a panic. A later workflow fills
+    /// in the bodies behind the same dispatch.
+    #[error("Cleaning {format} is not yet implemented in the in-memory (wasm) build")]
+    NotImplementedInWasm { format: String },
 }

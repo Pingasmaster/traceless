@@ -1,16 +1,20 @@
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use lopdf::{Document, Object, ObjectId};
 use rand::Rng;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct PdfHandler;
 
 /// Keys commonly found in the PDF /Info dictionary.
+#[cfg(feature = "native")]
 const INFO_KEYS: &[&str] = &[
     "Author",
     "Title",
@@ -35,11 +39,11 @@ const CATALOG_KEYS_TO_STRIP: &[&[u8]] = &[
     b"OpenAction",     // Can contain JavaScript
     b"AA",             // Additional-actions (trigger-based JS/events)
     b"AcroForm",       // Form fields, signature fields, XFA
-    b"StructTreeRoot", // Accessibility tree — leaks author-assigned alt text
+    b"StructTreeRoot", // Accessibility tree - leaks author-assigned alt text
     b"MarkInfo",       // Marked-content properties (producer fingerprint)
     b"PieceInfo",      // Producer-specific caches (Word, Acrobat, LO)
     b"PageLabels",     // Author-chosen page labeling
-    b"Outlines",       // Bookmarks — author navigation intent
+    b"Outlines",       // Bookmarks - author navigation intent
     b"Threads",        // Article threads
     b"SpiderInfo",     // Web-capture metadata
     b"Perms",          // Permissions/usage rights
@@ -85,6 +89,35 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
     b"B", // Beads (article threads)
 ];
 
+/// Strip every metadata-bearing key from a PDF, in memory: drops the
+/// `/Info` dict, randomises trailer `/ID`, prunes catalog / `/Names` /
+/// per-page / XObject metadata, then re-saves. Shared by the native
+/// `clean_metadata` wrapper and the wasm `inmem` path. `_ext` is accepted
+/// for dispatch-signature uniformity.
+///
+/// # Errors
+///
+/// Returns [`CoreError::CleanError`] if the input cannot be parsed as a
+/// PDF or the rewritten document cannot be serialised.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let empty = std::path::PathBuf::new;
+    let mut doc = Document::load_mem(input).map_err(|e| CoreError::CleanError {
+        path: empty(),
+        detail: format!("Failed to load PDF: {e}"),
+    })?;
+
+    clean_document(&mut doc);
+
+    let mut out = Vec::new();
+    doc.save_to(&mut out).map_err(|e| CoreError::CleanError {
+        path: empty(),
+        detail: format!("Failed to save PDF: {e}"),
+    })?;
+    Ok(out)
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for PdfHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -237,21 +270,37 @@ impl FormatHandler for PdfHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let mut doc = Document::load(path).map_err(|e| CoreError::CleanError {
+        let data = std::fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
-            detail: format!("Failed to load PDF: {e}"),
+            source: e,
         })?;
+        let cleaned = clean_bytes(&data, "pdf").map_err(|e| super::repath(e, path))?;
+        std::fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("Failed to save PDF: {e}"),
+        })?;
+        Ok(())
+    }
 
-        // --- 1. Drop the entire /Info dict from the trailer. ---------------
-        let info_obj_ref = doc
-            .trailer
-            .get(b"Info")
-            .ok()
-            .and_then(|o| o.as_reference().ok());
-        if let Some(id) = info_obj_ref {
-            doc.delete_object(id);
-        }
-        doc.trailer.remove(b"Info");
+    fn supported_mime_types(&self) -> &[&str] {
+        &["application/pdf"]
+    }
+}
+
+/// Apply every metadata-stripping pass to an already-parsed PDF. Factored
+/// out of `clean_bytes` so the mutation logic is the single source of
+/// truth for both the native and wasm builds.
+fn clean_document(doc: &mut Document) {
+    // --- 1. Drop the entire /Info dict from the trailer. ---------------
+    let info_obj_ref = doc
+        .trailer
+        .get(b"Info")
+        .ok()
+        .and_then(|o| o.as_reference().ok());
+    if let Some(id) = info_obj_ref {
+        doc.delete_object(id);
+    }
+    doc.trailer.remove(b"Info");
 
         // --- 2. Trailer /ID is a per-document fingerprint. Replace it. -----
         // ISO 32000-1 §14.4 defines /ID as a two-element array of byte
@@ -420,23 +469,11 @@ impl FormatHandler for PdfHandler {
             }
         }
 
-        // --- 7. Prune orphaned objects after all the deletions -------------
-        doc.prune_objects();
-
-        // --- 8. Save -------------------------------------------------------
-        doc.save(output_path).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: format!("Failed to save PDF: {e}"),
-        })?;
-
-        Ok(())
-    }
-
-    fn supported_mime_types(&self) -> &[&str] {
-        &["application/pdf"]
-    }
+    // --- 7. Prune orphaned objects after all the deletions -------------
+    doc.prune_objects();
 }
 
+#[cfg(feature = "native")]
 fn pdf_object_to_string(obj: &lopdf::Object) -> String {
     match obj {
         lopdf::Object::String(bytes, _) => String::from_utf8_lossy(bytes).to_string(),
@@ -448,7 +485,7 @@ fn pdf_object_to_string(obj: &lopdf::Object) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::too_many_lines, clippy::unwrap_used)]
 mod tests {
     use super::*;

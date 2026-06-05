@@ -8,24 +8,65 @@
 //!
 //! We port mat2's allowlist approach: keep `announce` / `announce-list`
 //! / `info`, discard everything else. The bencode parser is a direct
-//! Rust port of `libmat2/torrent.py::_BencodeHandler` — self-contained,
+//! Rust port of `libmat2/torrent.py::_BencodeHandler` - self-contained,
 //! no external crates.
 //!
 //! Reference spec: <https://wiki.theory.org/BitTorrentSpecification#Bencoding>
 
 use std::collections::BTreeMap;
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct TorrentHandler;
 
 const ALLOWLIST: &[&[u8]] = &[b"announce", b"announce-list", b"info"];
 
+/// Bencode-decode a `.torrent`, drop every top-level key outside the
+/// allow-list (announce / announce-list / info), and re-encode. Shared by
+/// the native `clean_metadata` wrapper and the wasm `inmem` path.
+///
+/// # Errors
+///
+/// Returns [`CoreError::CleanError`] if the input is not a single
+/// well-formed bencoded dictionary.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let (value, rest) = decode(input).map_err(|e| CoreError::CleanError {
+        path: std::path::PathBuf::new(),
+        detail: format!("bencode: {e}"),
+    })?;
+    if !rest.is_empty() {
+        return Err(CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: "trailing data after bencoded dictionary".to_string(),
+        });
+    }
+    let BencodeValue::Dict(dict) = value else {
+        return Err(CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: "torrent file must decode to a dictionary".to_string(),
+        });
+    };
+
+    let mut cleaned: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
+    for (k, v) in dict {
+        if ALLOWLIST.contains(&k.as_slice()) {
+            cleaned.insert(k, v);
+        }
+    }
+    Ok(encode(&BencodeValue::Dict(cleaned)))
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for TorrentHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -81,32 +122,7 @@ impl FormatHandler for TorrentHandler {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        let (value, rest) = decode(&bytes).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: format!("bencode: {e}"),
-        })?;
-        if !rest.is_empty() {
-            return Err(CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: "trailing data after bencoded dictionary".to_string(),
-            });
-        }
-        let BencodeValue::Dict(dict) = value else {
-            return Err(CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: "torrent file must decode to a dictionary".to_string(),
-            });
-        };
-
-        let mut cleaned: BTreeMap<Vec<u8>, BencodeValue> = BTreeMap::new();
-        for (k, v) in dict {
-            if ALLOWLIST.contains(&k.as_slice()) {
-                cleaned.insert(k, v);
-            }
-        }
-
-        let encoded = encode(&BencodeValue::Dict(cleaned));
+        let encoded = clean_bytes(&bytes, "torrent").map_err(|e| super::repath(e, path))?;
         fs::write(output_path, encoded).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to write cleaned torrent: {e}"),
@@ -131,6 +147,7 @@ pub enum BencodeValue {
     Dict(BTreeMap<Vec<u8>, Self>),
 }
 
+#[cfg(feature = "native")]
 impl BencodeValue {
     fn display(&self) -> String {
         match self {
@@ -178,7 +195,7 @@ impl std::fmt::Display for BencodeError {
 const MAX_DEPTH: usize = 256;
 
 /// Decode a single bencode value from the start of `input`. Returns
-/// `(value, remainder)` — if `remainder` isn't empty the caller can
+/// `(value, remainder)` - if `remainder` isn't empty the caller can
 /// decide whether to reject.
 pub fn decode(input: &[u8]) -> Result<(BencodeValue, &[u8]), BencodeError> {
     decode_at(input, 0)
@@ -326,7 +343,7 @@ fn encode_into(value: &BencodeValue, out: &mut Vec<u8>) {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

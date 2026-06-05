@@ -3,24 +3,26 @@
 //! SVG is XML. Metadata hides in a handful of well-known vectors:
 //! - `<metadata>` elements (RDF-style Dublin Core blocks, typically
 //!   carrying creator, title, licence, Inkscape version, …).
-//! - `<title>` and `<desc>` elements — accessibility metadata but
+//! - `<title>` and `<desc>` elements - accessibility metadata but
 //!   often misused for author names.
-//! - `<sodipodi:namedview>` / `<inkscape:*>` nested elements — GUI
+//! - `<sodipodi:namedview>` / `<inkscape:*>` nested elements - GUI
 //!   editor state and author identifiers.
 //! - Attributes in the `inkscape:`, `sodipodi:`, `rdf:` and `dc:`
-//!   namespaces on any element — very commonly leaked.
+//!   namespaces on any element - very commonly leaked.
 //!
 //! mat2 handles this by rasterizing the SVG through rsvg/cairo, which
 //! nukes every non-pixel thing. We instead keep the vector structure
 //! intact and filter at the XML event level, because:
-//! 1. Re-rendering is lossy — animations, interactivity, and
+//! 1. Re-rendering is lossy - animations, interactivity, and
 //!    high-fidelity text all get baked into a pixmap.
 //! 2. rsvg is a large C dep we're trying to avoid.
 //! 3. SVG's metadata vectors are a fixed, well-documented set.
 
 use std::borrow::Cow;
+#[cfg(feature = "native")]
 use std::fs;
 use std::io::Cursor;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use quick_xml::events::attributes::Attribute;
@@ -29,11 +31,116 @@ use quick_xml::reader::Reader;
 use quick_xml::writer::Writer;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct SvgHandler;
+
+/// Strip metadata + unsafe markup from an SVG document, in memory. Drops
+/// `metadata` / `desc` / `title` / RDF / editor-namespace elements and
+/// attributes, plus comments and event-handler attributes. Shared by the
+/// native `clean_metadata` wrapper and the wasm `inmem` path.
+///
+/// # Errors
+///
+/// Returns [`CoreError::ParseError`] on malformed XML, or
+/// [`CoreError::CleanError`] if the rewritten stream cannot be emitted.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let empty = std::path::PathBuf::new;
+
+    let mut reader = Reader::from_reader(input);
+    reader.config_mut().expand_empty_elements = false;
+
+    let mut writer = Writer::new(Cursor::new(Vec::new()));
+    let mut skip_depth: usize = 0;
+
+    loop {
+        match reader.read_event() {
+            Ok(Event::Start(ref e)) => {
+                if skip_depth > 0 {
+                    skip_depth += 1;
+                    continue;
+                }
+                let name = local_name_of(e);
+                if DROP_ELEMENTS.contains(&name.as_str()) {
+                    skip_depth = 1;
+                    continue;
+                }
+                let sanitized = sanitize_attributes(e);
+                writer
+                    .write_event(Event::Start(sanitized))
+                    .map_err(|err| CoreError::CleanError {
+                        path: empty(),
+                        detail: format!("SVG write error: {err}"),
+                    })?;
+            }
+            Ok(Event::End(ref e)) => {
+                if skip_depth > 0 {
+                    skip_depth -= 1;
+                    continue;
+                }
+                writer
+                    .write_event(Event::End(e.clone()))
+                    .map_err(|err| CoreError::CleanError {
+                        path: empty(),
+                        detail: format!("SVG write error: {err}"),
+                    })?;
+            }
+            Ok(Event::Empty(ref e)) => {
+                if skip_depth > 0 {
+                    continue;
+                }
+                let name = local_name_of(e);
+                if DROP_ELEMENTS.contains(&name.as_str()) {
+                    continue;
+                }
+                let sanitized = sanitize_attributes(e);
+                writer
+                    .write_event(Event::Empty(sanitized))
+                    .map_err(|err| CoreError::CleanError {
+                        path: empty(),
+                        detail: format!("SVG write error: {err}"),
+                    })?;
+            }
+            Ok(Event::Text(ref t)) => {
+                if skip_depth == 0 {
+                    writer
+                        .write_event(Event::Text(t.clone()))
+                        .map_err(|err| CoreError::CleanError {
+                            path: empty(),
+                            detail: format!("SVG write error: {err}"),
+                        })?;
+                }
+            }
+            Ok(Event::Comment(_)) => {
+                // SVG comments are a metadata vector - drop them.
+            }
+            Ok(Event::Eof) => break,
+            Ok(other) => {
+                if skip_depth == 0 {
+                    writer
+                        .write_event(other)
+                        .map_err(|err| CoreError::CleanError {
+                            path: empty(),
+                            detail: format!("SVG write error: {err}"),
+                        })?;
+                }
+            }
+            Err(e) => {
+                return Err(CoreError::ParseError {
+                    path: empty(),
+                    detail: format!("SVG parse error: {e}"),
+                });
+            }
+        }
+    }
+
+    Ok(writer.into_inner().into_inner())
+}
 
 /// Element local-names that we drop entirely (along with every child).
 ///
@@ -237,6 +344,7 @@ fn is_javascript_uri(value: &str) -> bool {
         .is_some_and(|p| p.eq_ignore_ascii_case(PREFIX))
 }
 
+#[cfg(feature = "native")]
 impl FormatHandler for SvgHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -301,95 +409,7 @@ impl FormatHandler for SvgHandler {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        let mut reader = Reader::from_reader(bytes.as_slice());
-        reader.config_mut().expand_empty_elements = false;
-
-        let mut writer = Writer::new(Cursor::new(Vec::new()));
-        let mut skip_depth: usize = 0;
-
-        loop {
-            match reader.read_event() {
-                Ok(Event::Start(ref e)) => {
-                    if skip_depth > 0 {
-                        skip_depth += 1;
-                        continue;
-                    }
-                    let name = local_name_of(e);
-                    if DROP_ELEMENTS.contains(&name.as_str()) {
-                        skip_depth = 1;
-                        continue;
-                    }
-                    let sanitized = sanitize_attributes(e);
-                    writer.write_event(Event::Start(sanitized)).map_err(|err| {
-                        CoreError::CleanError {
-                            path: path.to_path_buf(),
-                            detail: format!("SVG write error: {err}"),
-                        }
-                    })?;
-                }
-                Ok(Event::End(ref e)) => {
-                    if skip_depth > 0 {
-                        skip_depth -= 1;
-                        continue;
-                    }
-                    writer.write_event(Event::End(e.clone())).map_err(|err| {
-                        CoreError::CleanError {
-                            path: path.to_path_buf(),
-                            detail: format!("SVG write error: {err}"),
-                        }
-                    })?;
-                }
-                Ok(Event::Empty(ref e)) => {
-                    if skip_depth > 0 {
-                        continue;
-                    }
-                    let name = local_name_of(e);
-                    if DROP_ELEMENTS.contains(&name.as_str()) {
-                        continue;
-                    }
-                    let sanitized = sanitize_attributes(e);
-                    writer.write_event(Event::Empty(sanitized)).map_err(|err| {
-                        CoreError::CleanError {
-                            path: path.to_path_buf(),
-                            detail: format!("SVG write error: {err}"),
-                        }
-                    })?;
-                }
-                Ok(Event::Text(ref t)) => {
-                    if skip_depth == 0 {
-                        writer.write_event(Event::Text(t.clone())).map_err(|err| {
-                            CoreError::CleanError {
-                                path: path.to_path_buf(),
-                                detail: format!("SVG write error: {err}"),
-                            }
-                        })?;
-                    }
-                }
-                Ok(Event::Comment(_)) => {
-                    // SVG comments are a metadata vector — drop them.
-                }
-                Ok(Event::Eof) => break,
-                Ok(other) => {
-                    if skip_depth == 0 {
-                        writer
-                            .write_event(other)
-                            .map_err(|err| CoreError::CleanError {
-                                path: path.to_path_buf(),
-                                detail: format!("SVG write error: {err}"),
-                            })?;
-                    }
-                }
-                Err(e) => {
-                    return Err(CoreError::ParseError {
-                        path: path.to_path_buf(),
-                        detail: format!("SVG parse error: {e}"),
-                    });
-                }
-            }
-        }
-
-        let cleaned = writer.into_inner().into_inner();
+        let cleaned = clean_bytes(&bytes, "svg").map_err(|e| super::repath(e, path))?;
         fs::write(output_path, &cleaned).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to write cleaned SVG: {e}"),
@@ -461,6 +481,7 @@ fn local_name_of(start: &BytesStart<'_>) -> String {
     }
 }
 
+#[cfg(feature = "native")]
 fn full_name_of(start: &BytesStart<'_>) -> String {
     String::from_utf8_lossy(start.name().as_ref()).into_owned()
 }
@@ -470,6 +491,7 @@ fn full_name_of(start: &BytesStart<'_>) -> String {
 /// before they click Clean. Covers the five leaky namespace prefixes
 /// plus `on*` event handlers plus `href`/`xlink:href` values that
 /// point at `javascript:` URIs.
+#[cfg(feature = "native")]
 fn collect_leaky_attrs(start: &BytesStart<'_>, qname: &str, items: &mut Vec<MetadataItem>) {
     for attr in start.attributes().filter_map(Result::ok) {
         let key_str = String::from_utf8_lossy(attr.key.as_ref()).into_owned();
@@ -501,7 +523,7 @@ fn collect_leaky_attrs(start: &BytesStart<'_>, qname: &str, items: &mut Vec<Meta
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

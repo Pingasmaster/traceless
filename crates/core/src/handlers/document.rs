@@ -1,20 +1,32 @@
 use std::collections::HashSet;
+#[cfg(feature = "native")]
 use std::fs::File;
-use std::io::{BufReader, Cursor, Read, Write};
+use std::io::{Cursor, Read, Write};
+#[cfg(feature = "native")]
+use std::io::BufReader;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
 use img_parts::webp::WebP;
 use img_parts::{DynImage, ImageEXIF, ImageICC};
+// quick-xml's reader is only used by the metadata-reading path (native);
+// the in-memory cleaner delegates XML rewriting to the ooxml/odf/epub
+// submodules.
+#[cfg(feature = "native")]
 use quick_xml::events::Event;
+#[cfg(feature = "native")]
 use quick_xml::reader::Reader;
 use zip::ZipArchive;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::{FormatHandler, epub, odf, ooxml, zip_util};
+#[cfg(feature = "native")]
+use super::FormatHandler;
+use super::{epub, odf, ooxml, zip_util};
 
 pub struct DocumentHandler;
 
@@ -26,11 +38,146 @@ enum ArchiveKind {
     Ooxml, // DOCX, XLSX, PPTX
     Odf,   // ODT, ODS, ODP, ODG, ODF
     Epub,
-    /// Unknown zip-based document — clean conservatively (normalize zip
+    /// Unknown zip-based document - clean conservatively (normalize zip
     /// metadata, strip embedded media EXIF) but don't touch XML contents.
     Generic,
 }
 
+/// Strip metadata from a ZIP-based office document (OOXML / ODF / EPUB /
+/// generic zip) entirely in memory: sort + dedup members, drop junk
+/// parts, stub OOXML docProps, deep-clean every XML part, strip embedded
+/// media, and rebuild the package. Shared by the native `clean_metadata`
+/// wrapper and the wasm `inmem` path. `_ext` is accepted for
+/// dispatch-signature uniformity.
+///
+/// # Errors
+///
+/// Returns [`CoreError::CleanError`] if the input is not a valid ZIP, a
+/// member exceeds the decompression cap, or a part cannot be cleaned /
+/// re-packed.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let empty = std::path::PathBuf::new;
+
+    let mut archive =
+        ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::CleanError {
+            path: empty(),
+            detail: format!("Not a valid ZIP archive: {e}"),
+        })?;
+
+    // --- Detect archive family -----------------------------------------
+    let kind = detect_kind(&mut archive);
+
+    // --- EPUB safety check: refuse encrypted archives ------------------
+    if kind == ArchiveKind::Epub && archive.by_name("META-INF/encryption.xml").is_ok() {
+        return Err(CoreError::CleanError {
+            path: empty(),
+            detail: "EPUB contains encryption.xml (DRM or encrypted fonts); \
+                     refusing to clean, the output would be unreadable"
+                .to_string(),
+        });
+    }
+
+    // --- Collect members, sorted, mimetype first (ODF/EPUB) ------------
+    let mut names: Vec<String> = Vec::with_capacity(archive.len());
+    for i in 0..archive.len() {
+        let entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
+            path: empty(),
+            detail: format!("bad zip entry at index {i}: {e}"),
+        })?;
+        names.push(entry.name().to_string());
+    }
+    names.sort();
+    names.dedup();
+    if let Some(pos) = names.iter().position(|n| n == "mimetype") {
+        let m = names.remove(pos);
+        names.insert(0, m);
+    }
+
+    let kept_parts: HashSet<String> = names
+        .iter()
+        .filter(|n| !should_omit(kind, n))
+        .cloned()
+        .collect();
+
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+
+    for entry_name in &names {
+        if should_omit(kind, entry_name) {
+            continue;
+        }
+
+        let (raw_bytes, compression) = {
+            let mut e = archive
+                .by_name(entry_name)
+                .map_err(|e| CoreError::CleanError {
+                    path: empty(),
+                    detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
+                })?;
+            if e.is_dir() {
+                continue;
+            }
+            let compression = e.compression();
+            let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(e.size()));
+            let take_limit = if crate::config::limits_disabled() {
+                u64::MAX
+            } else {
+                super::archive::MAX_ENTRY_DECOMPRESSED_BYTES.saturating_add(1)
+            };
+            (&mut e)
+                .take(take_limit)
+                .read_to_end(&mut buf)
+                .map_err(|e| CoreError::CleanError {
+                    path: empty(),
+                    detail: format!("Failed to read entry {entry_name}: {e}"),
+                })?;
+            if !crate::config::limits_disabled()
+                && buf.len() as u64 > super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
+            {
+                return Err(CoreError::CleanError {
+                    path: empty(),
+                    detail: format!(
+                        "document member '{entry_name}' exceeds the \
+                         {}-byte decompression cap; refusing to clean \
+                         (likely a zip bomb)",
+                        super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
+                    ),
+                });
+            }
+            (buf, compression)
+        };
+
+        let cleaned_bytes =
+            clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(|e| {
+                CoreError::CleanError {
+                    path: empty(),
+                    detail: format!("Failed to clean entry {entry_name}: {e}"),
+                }
+            })?;
+
+        let options = zip_util::normalized_options(compression);
+        writer
+            .start_file(entry_name, options)
+            .map_err(|e| CoreError::CleanError {
+                path: empty(),
+                detail: format!("Failed to start ZIP entry {entry_name}: {e}"),
+            })?;
+        writer
+            .write_all(&cleaned_bytes)
+            .map_err(|e| CoreError::CleanError {
+                path: empty(),
+                detail: format!("Failed to write ZIP entry {entry_name}: {e}"),
+            })?;
+    }
+
+    let out = writer.finish().map_err(|e| CoreError::CleanError {
+        path: empty(),
+        detail: format!("Failed to finalize ZIP: {e}"),
+    })?;
+    Ok(out.into_inner())
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for DocumentHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -138,165 +285,15 @@ impl FormatHandler for DocumentHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let file = File::open(path).map_err(|e| CoreError::ReadError {
+        let data = std::fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        let mut archive =
-            ZipArchive::new(BufReader::new(file)).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Not a valid ZIP archive: {e}"),
-            })?;
-
-        // --- Detect archive family -----------------------------------------
-        let kind = detect_kind(&mut archive);
-
-        // --- EPUB safety check: refuse encrypted archives ------------------
-        if kind == ArchiveKind::Epub && archive.by_name("META-INF/encryption.xml").is_ok() {
-            return Err(CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: "EPUB contains encryption.xml (DRM or encrypted fonts); \
-                         refusing to clean, the output would be unreadable"
-                    .to_string(),
-            });
-        }
-
-        // --- Collect members, sorted, mimetype first (ODF/EPUB) ------------
-        // Error out on any header-parse failure instead of quietly dropping
-        // the entry via `filter_map`; a half-cleaned DOCX / ODT / EPUB that
-        // loses a member without telling the user would ship a structurally
-        // incomplete document.
-        let mut names: Vec<String> = Vec::with_capacity(archive.len());
-        for i in 0..archive.len() {
-            let entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("bad zip entry at index {i}: {e}"),
-            })?;
-            names.push(entry.name().to_string());
-        }
-        // First sort lexicographically to kill any producer-order fingerprint.
-        names.sort();
-        // Drop duplicate names. A malformed DOCX / ODT / EPUB whose
-        // central directory carries two entries sharing a name would
-        // otherwise be read twice via `by_name` (which always
-        // resolves to the first occurrence) and fail the second
-        // `ZipWriter::start_file` call with a confusing
-        // `invalid Archive` error. Mirrors the dedup that
-        // `archive::clean_zip` already performs for the same reason.
-        names.dedup();
-        // Then move the special `mimetype` entry to the front - it must
-        // be first in ODF and EPUB archives per their respective specs.
-        if let Some(pos) = names.iter().position(|n| n == "mimetype") {
-            let m = names.remove(pos);
-            names.insert(0, m);
-        }
-
-        // Pre-compute the set of parts that survive `should_omit`. OOXML's
-        // `[Content_Types].xml` and every `.rels` file reference these by
-        // name, so we need the kept-set up-front to rewrite those
-        // manifests and drop dangling references to parts we deleted.
-        // Without this pass, a cleaned DOCX carries an `<Override>` for
-        // (say) `word/theme/theme1.xml` even though the part is gone,
-        // which strict consumers like python-docx reject as malformed.
-        let kept_parts: HashSet<String> = names
-            .iter()
-            .filter(|n| !should_omit(kind, n))
-            .cloned()
-            .collect();
-
-        let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
+        let cleaned = clean_bytes(&data, "").map_err(|e| super::repath(e, path))?;
+        std::fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to create output: {e}"),
         })?;
-        let mut writer = zip::ZipWriter::new(out_file);
-
-        for entry_name in &names {
-            // Drop junk members up-front. For OOXML we also call into
-            // `is_ooxml_junk` which is path-pattern-based.
-            if should_omit(kind, entry_name) {
-                continue;
-            }
-
-            let (raw_bytes, compression) = {
-                let mut e = archive
-                    .by_name(entry_name)
-                    .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to read ZIP entry {entry_name}: {e}"),
-                    })?;
-                // Don't re-pack directory entries - they confuse ODF readers.
-                if e.is_dir() {
-                    continue;
-                }
-                let compression = e.compression();
-                let mut buf = Vec::with_capacity(zip_util::safe_capacity_hint(e.size()));
-                // Cap the decompressed member body so a DOCX / ODT /
-                // EPUB with an embedded zip bomb can't OOM the cleaner.
-                // See `archive::MAX_ENTRY_DECOMPRESSED_BYTES` for the
-                // cap value and rationale. Both the `.take` wrapper and
-                // the post-read check become no-ops while the
-                // process-wide `limits_disabled` flag is on; that is
-                // deliberately the same behavior the outer archive
-                // handler shows, so the UI "Disable all limits" toggle
-                // relaxes every decompression cap the cleaner owns in
-                // one shot.
-                let take_limit = if crate::config::limits_disabled() {
-                    u64::MAX
-                } else {
-                    super::archive::MAX_ENTRY_DECOMPRESSED_BYTES.saturating_add(1)
-                };
-                (&mut e)
-                    .take(take_limit)
-                    .read_to_end(&mut buf)
-                    .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to read entry {entry_name}: {e}"),
-                    })?;
-                if !crate::config::limits_disabled()
-                    && buf.len() as u64 > super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
-                {
-                    return Err(CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!(
-                            "document member '{entry_name}' exceeds the \
-                             {}-byte decompression cap; refusing to clean \
-                             (likely a zip bomb)",
-                            super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
-                        ),
-                    });
-                }
-                (buf, compression)
-            };
-
-            let cleaned_bytes =
-                clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(|e| {
-                    CoreError::CleanError {
-                        path: path.to_path_buf(),
-                        detail: format!("Failed to clean entry {entry_name}: {e}"),
-                    }
-                })?;
-
-            let options = zip_util::normalized_options(compression);
-            writer
-                .start_file(entry_name, options)
-                .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to start ZIP entry {entry_name}: {e}"),
-                })?;
-            writer
-                .write_all(&cleaned_bytes)
-                .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to write ZIP entry {entry_name}: {e}"),
-                })?;
-        }
-
-        writer.finish().map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: format!("Failed to finalize ZIP: {e}"),
-        })?;
-
         Ok(())
     }
 
@@ -556,29 +553,25 @@ fn strip_embedded_image(data: &[u8], mime: &str) -> Option<Vec<u8>> {
     strip_embedded_via_handler(data, mime)
 }
 
-/// Round-trip an embedded image through its registered handler via
-/// two private tempfiles. Returns `None` on any I/O or parse failure
-/// so the caller surfaces a terminal `CleanEntryError` instead of
-/// shipping dirty bytes.
+/// Round-trip an embedded image through its handler's in-memory
+/// `clean_bytes`. Returns `None` on any parse failure so the caller
+/// surfaces a terminal `CleanEntryError` instead of shipping dirty
+/// bytes. Fully in-memory so it is shared by the native and wasm builds.
 fn strip_embedded_via_handler(data: &[u8], mime: &str) -> Option<Vec<u8>> {
     let ext = zip_util::embedded_media_extension(mime)?;
-    let handler = crate::format_support::get_handler_for_mime(mime)?;
-
-    let tmp_in = tempfile::Builder::new()
-        .prefix("traceless-embed-in-")
-        .suffix(&format!(".{ext}"))
-        .tempfile()
-        .ok()?;
-    std::fs::write(tmp_in.path(), data).ok()?;
-
-    let tmp_out = tempfile::Builder::new()
-        .prefix("traceless-embed-out-")
-        .suffix(&format!(".{ext}"))
-        .tempfile()
-        .ok()?;
-
-    handler.clean_metadata(tmp_in.path(), tmp_out.path()).ok()?;
-    std::fs::read(tmp_out.path()).ok()
+    // Dispatch by MIME to the owning handler's in-memory cleaner. The
+    // JPEG/PNG/WebP fast path is handled by the caller; everything that
+    // reaches here is GIF / TIFF / BMP / SVG / HEIC / HEIF / JXL.
+    let cleaned = match mime {
+        "image/gif" => super::gif::clean_bytes(data, ext),
+        "image/svg+xml" => super::svg::clean_bytes(data, ext),
+        "image/bmp" => super::harmless::clean_bytes(data, ext),
+        "image/tiff" | "image/heic" | "image/heif" | "image/jxl" => {
+            super::image::clean_bytes(data, ext)
+        }
+        _ => return None,
+    };
+    cleaned.ok()
 }
 
 fn strip_jpeg_extra_segments(data: &[u8]) -> Option<Vec<u8>> {
@@ -629,6 +622,7 @@ fn strip_webp_extra_chunks(data: &[u8]) -> Option<Vec<u8>> {
 
 /// Parse XML content and extract metadata key-value pairs for the
 /// read_metadata display path.
+#[cfg(feature = "native")]
 fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
     let mut items = Vec::new();
     let mut reader = Reader::from_str(xml);
@@ -662,6 +656,7 @@ fn parse_xml_metadata(xml: &str) -> Vec<MetadataItem> {
     items
 }
 
+#[cfg(feature = "native")]
 fn is_metadata_tag(tag: &str) -> bool {
     matches!(
         tag,
@@ -704,7 +699,7 @@ fn is_metadata_tag(tag: &str) -> bool {
 // The old test helper was the lightweight-cleanup function; it no
 // longer exists because the trait dropped the lightweight mode. The
 // ooxml / odf / epub submodules each carry their own unit tests.
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
     // Kept for backwards compatibility with existing tests in tests.rs;
     // thin wrapper around the OOXML cleaner which applies the same set
@@ -768,7 +763,7 @@ pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
     String::from_utf8(writer.into_inner().into_inner()).unwrap_or_else(|_| xml.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

@@ -45,16 +45,14 @@ pub fn have_ffmpeg() -> bool {
     Command::new("ffmpeg")
         .arg("-version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 pub fn have_ffprobe() -> bool {
     Command::new("ffprobe")
         .arg("-version")
         .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
+        .is_ok_and(|o| o.status.success())
 }
 
 /// Skip the current test if the given tool isn't available. Prints a

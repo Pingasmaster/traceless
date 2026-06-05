@@ -1,16 +1,143 @@
+use std::io::Cursor;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use lofty::file::TaggedFileExt;
-use lofty::tag::{ItemKey, TagType};
+#[cfg(feature = "native")]
+use lofty::tag::ItemKey;
+use lofty::tag::TagType;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
+#[cfg(feature = "native")]
 use super::sandbox;
 
 pub struct AudioHandler;
 
+/// Map a lowercase audio extension to the MIME the cleaner branches on.
+/// Returns `None` for an extension this handler does not own.
+fn ext_to_mime(ext: &str) -> Option<&'static str> {
+    Some(match ext {
+        "mp3" => "audio/mpeg",
+        "flac" => "audio/flac",
+        "ogg" => "audio/ogg",
+        "opus" => "audio/opus",
+        "wav" => "audio/wav",
+        "aiff" => "audio/aiff",
+        "m4a" => "audio/m4a",
+        "mp4" => "audio/mp4",
+        "aac" => "audio/aac",
+        _ => return None,
+    })
+}
+
+/// True for the MP4-family containers (MP4 / M4A / AAC) whose full
+/// metadata strip requires ffmpeg (non-ilst atoms, freeform GPS, chapter
+/// tracks). The native build routes these through bubblewrap+ffmpeg; the
+/// wasm build returns [`CoreError::NotImplementedInWasm`] from
+/// `clean_bytes` because there is no in-memory MP4 atom rewriter yet.
+fn is_ffmpeg_routed(mime: &str) -> bool {
+    matches!(mime, "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac")
+}
+
+/// Strip every tag from a lofty-supported audio file, in memory. Handles
+/// MP3 / FLAC / OGG / Opus / WAV / AIFF (the formats lofty can rewrite
+/// without a subprocess); for FLAC it also blanks the VorbisComments
+/// vendor string and drops APPLICATION / PICTURE metadata blocks. The
+/// MP4-family containers return [`CoreError::NotImplementedInWasm`]
+/// because they need ffmpeg (the native build handles them in
+/// `clean_metadata` before reaching here). Shared by the native wrapper
+/// and the wasm `inmem` path. `ext` is the lowercase extension (no dot).
+///
+/// # Errors
+///
+/// Returns [`CoreError::CleanError`] if the audio file cannot be parsed
+/// or a tag cannot be removed, [`CoreError::UnsupportedFormat`] for an
+/// unknown extension, or [`CoreError::NotImplementedInWasm`] for the
+/// MP4-family containers.
+pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let empty = std::path::PathBuf::new;
+    let Some(mime) = ext_to_mime(ext) else {
+        return Err(CoreError::UnsupportedFormat {
+            mime_type: format!("audio handler: unknown extension '{ext}'"),
+        });
+    };
+
+    if is_ffmpeg_routed(mime) {
+        return Err(CoreError::NotImplementedInWasm {
+            format: format!("audio container '{mime}'"),
+        });
+    }
+
+    // Enumerate every tag type present, then strip each from the buffer.
+    // `TaggedFile::clear()` + save does NOT work (lofty's `save_to`
+    // returns early on an empty tag vec, leaving the on-disk tags intact),
+    // so we mirror the native per-tag `remove_from` approach over a
+    // `Cursor` instead of a `File`.
+    let tag_types: Vec<TagType> = {
+        let probe = lofty::probe::Probe::new(Cursor::new(input))
+            .guess_file_type()
+            .map_err(|e| CoreError::CleanError {
+                path: empty(),
+                detail: format!("Failed to probe audio file: {e}"),
+            })?;
+        let tagged = probe.read().map_err(|e| CoreError::CleanError {
+            path: empty(),
+            detail: format!("Failed to read audio file: {e}"),
+        })?;
+        tagged
+            .tags()
+            .iter()
+            .map(lofty::tag::Tag::tag_type)
+            .collect()
+    };
+
+    let mut cursor = Cursor::new(input.to_vec());
+    for tag_type in tag_types {
+        tag_type
+            .remove_from(&mut cursor)
+            .map_err(|e| CoreError::CleanError {
+                path: empty(),
+                detail: format!("Failed to remove {tag_type:?} tag: {e}"),
+            })?;
+    }
+    let mut data = cursor.into_inner();
+
+    // FLAC extras: blank the VorbisComments vendor and drop leaky
+    // APPLICATION / PICTURE blocks. See the native helpers' rationale.
+    if matches!(mime, "audio/flac" | "audio/x-flac") {
+        data = blank_flac_vendor_inmem(data)?;
+        if let Some(rewritten) = rewrite_flac_without_blocks(&data, FLAC_LEAKY_BLOCK_TYPES) {
+            data = rewritten;
+        }
+    }
+
+    Ok(data)
+}
+
+/// In-memory equivalent of `blank_flac_vendor`: rewrite the FLAC
+/// VorbisComments block with an empty vendor string over a `Cursor`.
+fn blank_flac_vendor_inmem(data: Vec<u8>) -> Result<Vec<u8>, CoreError> {
+    use lofty::ogg::VorbisComments;
+    use lofty::tag::TagExt;
+
+    let mut cursor = Cursor::new(data);
+    let mut vc = VorbisComments::default();
+    vc.set_vendor(String::new());
+    vc.save_to(&mut cursor, lofty::config::WriteOptions::default())
+        .map_err(|e| CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: format!("Failed to blank FLAC vendor: {e}"),
+        })?;
+    Ok(cursor.into_inner())
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for AudioHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -35,7 +162,7 @@ impl FormatHandler for AudioHandler {
             // a synthetic `EncoderSoftware` item on the generic Tag,
             // so every file ends up "having" an Encoder metadata entry
             // even after a clean. This matches a quirk of lofty's
-            // conversion layer, not a real metadata leak — mat2 (via
+            // conversion layer, not a real metadata leak - mat2 (via
             // mutagen) intentionally hides it from its reader output.
             // We do the same here.
             let skip_encoder_software = tag_type == TagType::VorbisComments;
@@ -94,77 +221,29 @@ impl FormatHandler for AudioHandler {
         // these formats because its picture-scanning surface is
         // richer than ffprobe's.
         let mime = mime_guess::from_path(path).first_or_octet_stream();
-        if matches!(
-            mime.as_ref(),
-            "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac"
-        ) {
+        if is_ffmpeg_routed(mime.as_ref()) {
             return sandbox::clean_with_ffmpeg(path, output_path);
         }
 
-        // Copy original to output first so lofty parses a file with the
-        // correct extension (see file_store::make_temp_path).
-        std::fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
+        // Everything else (MP3 / FLAC / OGG / Opus / WAV / AIFF) is
+        // cleaned via lofty over an in-memory buffer; `clean_bytes` is the
+        // single source of truth shared with the wasm build (tag-type
+        // enumeration + per-tag `remove_from`, plus the FLAC vendor /
+        // leaky-block sweeps).
+        let ext = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .map(str::to_ascii_lowercase)
+            .unwrap_or_default();
+        let data = std::fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
-            detail: format!("Failed to copy file: {e}"),
+            source: e,
         })?;
-
-        // Enumerate every tag type present in the file, then delete
-        // each via `TagType::remove_from_path`. Calling
-        // `TaggedFile::clear()` + `save_to_path` does NOT work:
-        // `save_to_path` iterates `self.tags` and returns early on an
-        // empty vec, leaving the on-disk tags intact. See lofty 0.24
-        // `TaggedFile::save_to` in tagged_file.rs line 440.
-        let tag_types: Vec<lofty::tag::TagType> = {
-            let tagged_file =
-                lofty::read_from_path(output_path).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to read audio file: {e}"),
-                })?;
-            tagged_file
-                .tags()
-                .iter()
-                .map(lofty::tag::Tag::tag_type)
-                .collect()
-        };
-
-        for tag_type in tag_types {
-            tag_type
-                .remove_from_path(output_path)
-                .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("Failed to remove {tag_type:?} tag: {e}"),
-                })?;
-        }
-
-        // For FLAC we also try to blank the VorbisComments vendor
-        // string, which lofty lets us rewrite on FLAC because the
-        // VorbisComments block is a standalone metadata block inside
-        // the FLAC container. For OGG/Vorbis/Opus lofty refuses to
-        // overwrite the vendor (see lofty/src/ogg/write.rs lines 117-
-        // 134 - the existing vendor is force-copied from disk), so the
-        // best we can do there is hide the synthetic reader-side
-        // EncoderSoftware item.
-        //
-        // We also sweep any FLAC `APPLICATION` metadata blocks (type 2).
-        // Lofty's `TagType::remove_from_path(VorbisComments)` only
-        // touches the VorbisComments block; APPLICATION blocks are a
-        // free-form producer slot where mastering tools (shntool,
-        // cuetools, Melodyne, ReplayGain scanners) stuff arbitrary
-        // identifying payloads. mat2 doesn't explicitly strip these
-        // but they are a real fingerprinting channel, so we do.
-        if matches!(
-            mime_guess::from_path(output_path)
-                .first_or_octet_stream()
-                .as_ref(),
-            "audio/flac" | "audio/x-flac"
-        ) {
-            blank_flac_vendor(output_path).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
-                detail: format!("Failed to blank FLAC vendor: {e}"),
-            })?;
-            strip_flac_leaky_blocks(output_path)?;
-        }
-
+        let cleaned = clean_bytes(&data, &ext).map_err(|e| super::repath(e, path))?;
+        std::fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("Failed to write cleaned audio: {e}"),
+        })?;
         Ok(())
     }
 
@@ -190,7 +269,10 @@ impl FormatHandler for AudioHandler {
 
 /// Take a picture's MIME type and raw bytes and, if we have a matching
 /// handler, return its metadata. Returns None on any parse error so
-/// the caller can silently skip it.
+/// the caller can silently skip it. Native-only: it stages the picture
+/// to a temp file and runs the path-based reader, which only exists in
+/// the native build.
+#[cfg(feature = "native")]
 fn probe_picture_metadata(
     mime: Option<&lofty::picture::MimeType>,
     data: &[u8],
@@ -224,21 +306,6 @@ fn probe_picture_metadata(
     if out.is_empty() { None } else { Some(out) }
 }
 
-/// Rewrite a FLAC file's VorbisComments block with an empty vendor
-/// string. FLAC stores VorbisComments as a standalone metadata block
-/// inside the FLAC container, so lofty will honor our vendor value on
-/// save (unlike for native OGG where the vendor is force-preserved).
-fn blank_flac_vendor(path: &Path) -> Result<(), String> {
-    use lofty::ogg::VorbisComments;
-    use lofty::tag::TagExt;
-
-    let mut vc = VorbisComments::default();
-    vc.set_vendor(String::new());
-    vc.save_to_path(path, lofty::config::WriteOptions::default())
-        .map_err(|e| e.to_string())?;
-    Ok(())
-}
-
 /// FLAC metadata block type constants. See the FLAC format spec
 /// <https://xiph.org/flac/format.html#metadata_block_header> -
 /// the 7-bit block type field uses these values.
@@ -261,39 +328,6 @@ const FLAC_BLOCK_PICTURE: u8 = 6;
 ///   parity suite) so the cleaner must drop the whole block, not just
 ///   strip the tag surface around it.
 const FLAC_LEAKY_BLOCK_TYPES: &[u8] = &[FLAC_BLOCK_APPLICATION, FLAC_BLOCK_PICTURE];
-
-/// Walk a FLAC file's metadata block list and drop every block whose
-/// type is in `FLAC_LEAKY_BLOCK_TYPES`. The file is only rewritten
-/// when at least one matching block is found; the common case is a
-/// cheap read-only scan.
-///
-/// A FLAC stream begins with the ASCII magic `fLaC`, followed by a
-/// sequence of metadata blocks. Each block has a 4-byte header: 1 bit
-/// "last metadata block" flag, 7-bit block type, 24-bit big-endian
-/// body length. The body of the final block is followed immediately by
-/// audio frames. The walker preserves that structure: when the block
-/// being dropped was flagged as the last one, the function promotes
-/// the new trailing kept block so decoders still know where the audio
-/// frames start.
-///
-/// On corrupted or non-FLAC input the function is a no-op rather than
-/// returning an error, so a caller that happens to mis-dispatch a
-/// non-FLAC file through this path does not corrupt it.
-fn strip_flac_leaky_blocks(path: &Path) -> Result<(), CoreError> {
-    let data = std::fs::read(path).map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("Failed to re-read FLAC for block sweep: {e}"),
-    })?;
-
-    let Some(rewritten) = rewrite_flac_without_blocks(&data, FLAC_LEAKY_BLOCK_TYPES) else {
-        return Ok(());
-    };
-
-    std::fs::write(path, rewritten).map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("Failed to rewrite FLAC after block sweep: {e}"),
-    })
-}
 
 /// Pure function: parse `data` as a FLAC stream and return a rewritten
 /// copy with every metadata block whose 7-bit type is in `drop_types`
@@ -390,6 +424,7 @@ struct BlockSlice {
     body_end: usize,
 }
 
+#[cfg(feature = "native")]
 fn item_key_to_string(key: ItemKey) -> String {
     match key {
         ItemKey::TrackTitle => "Title".to_string(),
@@ -415,7 +450,7 @@ fn item_key_to_string(key: ItemKey) -> String {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
@@ -504,16 +539,13 @@ mod tests {
         }
     }
 
-    // ---------- blank_flac_vendor: smoke test via a non-flac path ----------
+    // ---------- blank_flac_vendor_inmem: smoke test on non-flac bytes ------
 
     #[test]
-    fn blank_flac_vendor_returns_err_for_non_flac() {
-        // Feeding a plain file that isn't a FLAC must return Err
-        // rather than panic. The exact error message depends on lofty.
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("not.flac");
-        std::fs::write(&path, b"this is not flac bytes").unwrap();
-        let result = blank_flac_vendor(&path);
+    fn blank_flac_vendor_inmem_returns_err_for_non_flac() {
+        // Feeding plain bytes that aren't a FLAC must return Err rather
+        // than panic. The exact error message depends on lofty.
+        let result = blank_flac_vendor_inmem(b"this is not flac bytes".to_vec());
         assert!(result.is_err());
     }
 

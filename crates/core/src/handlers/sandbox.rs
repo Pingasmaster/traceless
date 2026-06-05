@@ -115,7 +115,7 @@ const BWRAP_BASE_ARGS: &[&str] = &[
 /// Resolve the `bwrap` binary or fail closed.
 ///
 /// Returns [`CoreError::ToolFailed`] (keyed on the wrapped `program`)
-/// when bubblewrap is missing. The log is emitted at ERROR — on this
+/// when bubblewrap is missing. The log is emitted at ERROR - on this
 /// untrusted-media path a missing sandbox is a security-relevant outage,
 /// not a benign degradation.
 fn require_bwrap(program: &str) -> Result<&'static str, CoreError> {
@@ -138,7 +138,7 @@ fn require_bwrap(program: &str) -> Result<&'static str, CoreError> {
 /// Build a `Command` that runs `program` under bubblewrap.
 ///
 /// **Fail-closed:** if `bwrap` is unavailable this returns
-/// [`CoreError::ToolFailed`] rather than spawning `program` directly —
+/// [`CoreError::ToolFailed`] rather than spawning `program` directly -
 /// the input is untrusted media and an unsandboxed decoder would expose
 /// the host.
 ///
@@ -197,7 +197,7 @@ pub fn sandboxed_probe_command(program: &str, input_path: &Path) -> Result<Comma
 /// sandbox argv (the shared [`BWRAP_BASE_ARGS`]) around `/bin/true`, so
 /// it also catches the common production failure where `bwrap` exists
 /// but the kernel forbids creating an unprivileged user namespace
-/// (`clone(CLONE_NEWUSER)` denied) — exactly the condition that makes
+/// (`clone(CLONE_NEWUSER)` denied) - exactly the condition that makes
 /// the media handlers fail closed.
 ///
 /// Intended for health checks / readiness probes so an operator learns
@@ -370,7 +370,7 @@ mod tests {
                 );
                 assert!(
                     bwrap_path().is_some(),
-                    "got Ok without bwrap available — fail-closed contract violated"
+                    "got Ok without bwrap available - fail-closed contract violated"
                 );
             }
             Err(CoreError::ToolFailed { tool, .. }) => {

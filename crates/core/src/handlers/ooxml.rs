@@ -46,7 +46,7 @@ fn parse_err(what: &'static str) -> impl Fn(quick_xml::Error) -> CoreError {
 
 /// Paths that are *always* replaced with a minimal stub, regardless of
 /// what's inside. The content of docProps/core.xml and docProps/app.xml
-/// is 100% metadata — every field there is a fingerprint.
+/// is 100% metadata - every field there is a fingerprint.
 #[must_use]
 pub fn stub_for_path(path: &str) -> Option<&'static str> {
     match path {
@@ -106,7 +106,7 @@ pub fn clean_xml_member(path: &str, xml: &str) -> Result<String, CoreError> {
     // 4. attribute ordering
     out = sort_xml_attributes(&out)?;
 
-    // 5. `mc:Ignorable` is byte-level — see mat2 office.py line 515
+    // 5. `mc:Ignorable` is byte-level - see mat2 office.py line 515
     Ok(strip_mc_ignorable(&out))
 }
 
@@ -223,7 +223,7 @@ fn rewrite_attributes(start: &BytesStart<'_>, rng: &mut impl Rng) -> BytesStart<
 }
 
 /// `word/document.xml` stores tracked changes as `<w:del>` and `<w:ins>`
-/// elements. We drop `w:del` entirely (including its children — the
+/// elements. We drop `w:del` entirely (including its children - the
 /// deleted text). For `w:ins` we promote its children so the *new* text is
 /// preserved but the authorship of the insertion is lost.
 fn strip_revisions(xml: &str) -> Result<String, CoreError> {
@@ -314,7 +314,7 @@ fn strip_comment_refs(xml: &str) -> Result<String, CoreError> {
     loop {
         match reader.read_event() {
             Ok(Event::Start(ref e)) if drop(&local_name(e)) => {
-                // paired <w:commentRangeStart>…</w:commentRangeStart> —
+                // paired <w:commentRangeStart>…</w:commentRangeStart> -
                 // swallow both ends
                 let end_name = e.to_end().into_owned();
                 let _ = reader.read_to_end(end_name.name());
@@ -402,10 +402,7 @@ fn rewrite_id_attribute(
 fn strip_mc_ignorable(xml: &str) -> String {
     let needle = b"mc:Ignorable=\"";
     let mut buf = xml.as_bytes().to_vec();
-    loop {
-        let Some(start) = find_bytes(&buf, needle) else {
-            break;
-        };
+    while let Some(start) = find_bytes(&buf, needle) {
         let after_open = start + needle.len();
         let Some(close_rel) = buf[after_open..].iter().position(|&b| b == b'"') else {
             break;
@@ -567,10 +564,8 @@ fn relationship_target_is_dropped<S: BuildHasher>(
             b"Target" => {
                 target = Some(String::from_utf8_lossy(&attr.value).into_owned());
             }
-            b"TargetMode" => {
-                if attr.value.as_ref() == b"External" {
-                    is_external = true;
-                }
+            b"TargetMode" if attr.value.as_ref() == b"External" => {
+                is_external = true;
             }
             _ => {}
         }

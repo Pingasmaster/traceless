@@ -5,16 +5,47 @@
 //! Mirrors `libmat2/harmless.py` (text/plain + BMP) and
 //! `libmat2/images.py::PPMParser` (PPM).
 
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct HarmlessHandler;
 
+/// True if the lowercase extension names a NetPBM image whose `#` comment
+/// lines we strip. The remaining harmless formats (text/plain, BMP) carry
+/// no strippable metadata and pass through verbatim.
+fn is_ppm_ext(ext: &str) -> bool {
+    matches!(ext, "ppm" | "pgm" | "pbm" | "pnm")
+}
+
+/// Clean a "harmless" file in memory. For NetPBM (PPM/PGM/PBM/PNM) this
+/// drops every `#` comment line from the header; for text/plain and BMP
+/// it is a verbatim copy. Shared by the native `clean_metadata` wrapper
+/// and the wasm `inmem` path. `ext` is the lowercase extension (no dot).
+///
+/// # Errors
+///
+/// Returns [`CoreError::FileTooLarge`] if the buffer exceeds the input
+/// cap. The PPM walk itself is infallible.
+pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    if is_ppm_ext(ext) {
+        Ok(strip_ppm_comments(input))
+    } else {
+        // text/plain + BMP: nothing strippable, byte-for-byte copy.
+        Ok(input.to_vec())
+    }
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for HarmlessHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         if !path.exists() {
@@ -41,14 +72,28 @@ impl FormatHandler for HarmlessHandler {
         let mime = mime_guess::from_path(path).first_or_octet_stream();
         let mime_str = mime.as_ref();
 
-        if is_ppm(mime_str, path) {
-            return clean_ppm(path, output_path);
-        }
+        // Preserve the native PPM-detection rule (MIME prefix OR
+        // extension): when it fires, route through `clean_bytes` with a
+        // synthetic `ppm` extension so the in-memory walker runs; the
+        // resolved extension is otherwise irrelevant for the passthrough
+        // branch.
+        let ext = if is_ppm(mime_str, path) {
+            "ppm".to_string()
+        } else {
+            path.extension()
+                .and_then(|e| e.to_str())
+                .map(str::to_ascii_lowercase)
+                .unwrap_or_default()
+        };
 
-        // Plain byte-for-byte copy for harmless formats.
-        fs::copy(path, output_path).map_err(|e| CoreError::CleanError {
+        let data = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
-            detail: format!("Failed to copy harmless file: {e}"),
+            source: e,
+        })?;
+        let cleaned = clean_bytes(&data, &ext).map_err(|e| super::repath(e, path))?;
+        fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("Failed to write cleaned harmless file: {e}"),
         })?;
         Ok(())
     }
@@ -66,6 +111,7 @@ impl FormatHandler for HarmlessHandler {
     }
 }
 
+#[cfg(feature = "native")]
 fn is_ppm(mime: &str, path: &Path) -> bool {
     if mime.starts_with("image/x-portable-") {
         return true;
@@ -80,6 +126,7 @@ fn is_ppm(mime: &str, path: &Path) -> bool {
 /// PPM/PGM/PBM metadata reader. The NetPBM formats have a text header
 /// followed by raw pixel data. The only metadata vector is the `#`
 /// comment line, which mat2 surfaces via `libmat2/images.py::PPMParser`.
+#[cfg(feature = "native")]
 fn read_ppm_metadata(path: &Path) -> Result<MetadataSet, CoreError> {
     // Read only the header (up to a few KB). The pixel data after
     // the header may be binary (non-UTF-8), so take the minimum needed.
@@ -118,22 +165,18 @@ fn read_ppm_metadata(path: &Path) -> Result<MetadataSet, CoreError> {
 
 /// PPM cleaner: drop every `#` comment line from the header. Pixel data
 /// (possibly binary) is passed through untouched. Walks bytes directly
-/// to avoid corrupting binary payloads.
-fn clean_ppm(path: &Path, output_path: &Path) -> Result<(), CoreError> {
-    let raw = fs::read(path).map_err(|e| CoreError::ReadError {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-
+/// to avoid corrupting binary payloads. Pure bytes-in/bytes-out so both
+/// the native and wasm paths share it.
+fn strip_ppm_comments(raw: &[u8]) -> Vec<u8> {
     // Scan the header token-by-token, dropping any line that starts
     // with `#`. The header ends after the 4th whitespace-separated
     // token for PPM (P6/P3), the 3rd for PGM (P5/P2), the 3rd for PBM
-    // (P4/P1) — but rather than track which format, we stop scanning
+    // (P4/P1) - but rather than track which format, we stop scanning
     // as soon as we've seen the expected number of non-comment tokens.
     let magic = raw.get(..2).unwrap_or(&[]);
     // magic + width + height (PBM) or magic + width + height + maxval
     // (PGM/PPM). If the magic is unrecognized we default to 4 tokens to
-    // be safe — this still stops before pixel data.
+    // be safe - this still stops before pixel data.
     let token_count_needed: usize = if matches!(magic, b"P1" | b"P4") { 3 } else { 4 };
 
     let mut out = Vec::with_capacity(raw.len());
@@ -169,17 +212,12 @@ fn clean_ppm(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         i += 1;
     }
 
-    // Everything after the header is pixel data — copy verbatim.
+    // Everything after the header is pixel data - copy verbatim.
     out.extend_from_slice(&raw[i..]);
-
-    fs::write(output_path, &out).map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("Failed to write cleaned PPM: {e}"),
-    })?;
-    Ok(())
+    out
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

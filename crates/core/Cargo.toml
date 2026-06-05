@@ -11,6 +11,23 @@ categories.workspace = true
 description = "Core metadata reading and cleaning library for Traceless"
 
 
+[features]
+# `native` keeps the full desktop / traceless-api behaviour: the C-backed
+# xz2 / zstd codecs, the bubblewrap+ffmpeg video/audio-mp4 paths, the
+# thread-pool, tempfile, and the path-oriented FileStore. It is the
+# default so every existing consumer (GTK / Qt frontends, traceless-api)
+# compiles byte-for-byte as before.
+#
+# `wasm-inmem` is the pure-Rust, in-memory subset used by the
+# `wasm32-wasip2` API component: no C `-sys` deps, no subprocess, no
+# filesystem. It swaps the C xz/zstd codecs for `lzma-rust2` / `ruzstd`
+# and gates out every native-only module. Build it with
+# `--no-default-features --features wasm-inmem`.
+default = ["native"]
+native = ["dep:xz2", "dep:zstd", "dep:tempfile", "dep:async-channel"]
+wasm-inmem = ["dep:lzma-rust2", "dep:ruzstd"]
+
+
 [dependencies]
 # Image metadata
 little_exif = "= 0.6.23"
@@ -30,27 +47,41 @@ quick-xml = "= 0.37.5"
 log.workspace = true
 thiserror = "= 2.0.18"
 mime_guess = "= 2.0.5"
-async-channel.workspace = true
+# `async-channel` backs the native worker pool only; the wasm build has
+# no thread pool, so it is native-gated.
+async-channel = { workspace = true, optional = true }
 rand = "= 0.10.1"
-tempfile = "= 3.27.0"
+# `tempfile` is only used by the native path-oriented handlers (embedded
+# media round-trips, archive staging); the wasm path is fully in-memory.
+tempfile = { version = "= 3.27.0", optional = true }
 
-# Plain-TAR and gzip/bzip2/xz/zstd archive handlers. These are only
-# used by the new `handlers::archive` module; office formats still
-# use `zip`.
+# Plain-TAR + the compression codecs. `tar`, `flate2` (gzip, pure-Rust
+# miniz_oxide backend), and `bzip2` (pure-Rust libbz2-rs-sys backend)
+# cross-compile to wasm and are shared by both feature sets. `xz2` and
+# `zstd` pull C `-sys` crates and are therefore native-only; the wasm
+# build substitutes the pure-Rust `lzma-rust2` / `ruzstd` below.
 tar = "= 0.4.45"
 flate2 = "= 1.1.9"
 bzip2 = "= 0.6.1"
-xz2 = "= 0.1.7"
-zstd = "= 0.13.3"
+xz2 = { version = "= 0.1.7", optional = true }
+zstd = { version = "= 0.13.3", optional = true }
+
+# Pure-Rust XZ + zstd codecs for the wasm-inmem build. `lzma-rust2` drops
+# the `optimization` (unsafe) and `lzip` default features; decode is
+# always available, `encoder` + `xz` give the XZ writer (xz pulls sha2).
+# `ruzstd` provides the streaming zstd decoder + the `encoding` encoder.
+lzma-rust2 = { version = "= 0.16.4", default-features = false, features = ["std", "encoder", "xz"], optional = true }
+ruzstd = { version = "= 0.8.3", optional = true }
 
 [lints]
 workspace = true
 
 [dev-dependencies]
-tempfile = "= 3.27.0"
 # Integration tests build synthetic "dirty" fixtures on the fly using the
 # same crates traceless-core already depends on. Repeating them here is
-# harmless: cargo unifies versions.
+# harmless: cargo unifies versions. Mirrored per feature so the suite
+# builds under each configuration.
+tempfile = "= 3.27.0"
 lopdf = { version = "= 0.40.0", default-features = false }
 little_exif = "= 0.6.23"
 lofty = "= 0.24.0"
@@ -58,6 +89,10 @@ zip = { version = "= 8.5.1", default-features = false, features = ["deflate"] }
 tar = "= 0.4.45"
 flate2 = "= 1.1.9"
 bzip2 = "= 0.6.1"
+proptest = "= 1.11.0"
+
+# Native-only test codecs. The integration tests under tests/ exercise
+# the C-backed xz/zstd archive paths and only build with `native`.
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
 xz2 = "= 0.1.7"
 zstd = "= 0.13.3"
-proptest = "= 1.11.0"

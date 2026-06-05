@@ -2,14 +2,14 @@
 //!
 //! These knobs are deliberately global (backed by atomics) rather than
 //! plumbed through every `FormatHandler::clean_metadata` call. The
-//! motivation is that every caller we currently have — the GTK frontend,
-//! the Qt frontend, the launcher — wants a single policy for the whole
+//! motivation is that every caller we currently have - the GTK frontend,
+//! the Qt frontend, the launcher - wants a single policy for the whole
 //! run, not a per-file one. Making it ambient lets every archive
 //! handler pick it up without adding a new trait parameter (which would
 //! be a breaking change for every existing handler impl).
 //!
 //! When a library consumer needs per-call control, they can set the
-//! policy, invoke `clean_metadata`, and reset it — or simply interleave
+//! policy, invoke `clean_metadata`, and reset it - or simply interleave
 //! calls with the policy changes between them.
 
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};

@@ -15,7 +15,7 @@
 use crate::metadata::MetadataItem;
 
 /// XMP namespace prefixes whose fields we surface. Anything outside
-/// this set is silently ignored — we don't want to flood the UI with
+/// this set is silently ignored - we don't want to flood the UI with
 /// `x:`/`rdf:` structural markers.
 const XMP_PREFIXES: &[&str] = &[
     "dc",
@@ -43,7 +43,7 @@ const XMP_PREFIXES: &[&str] = &[
 /// `http://ns.adobe.com/xap/1.0/\0`.
 ///
 /// Entries whose "value" is itself XML (RDF containers like `rdf:Bag`)
-/// are skipped — the caller will see their child `rdf:li` elements
+/// are skipped - the caller will see their child `rdf:li` elements
 /// instead.
 #[must_use]
 pub fn parse_xmp_fields(bytes: &[u8]) -> Vec<MetadataItem> {
@@ -59,7 +59,7 @@ pub fn parse_xmp_fields(bytes: &[u8]) -> Vec<MetadataItem> {
             continue;
         }
         if trimmed.contains('<') {
-            // This "value" contains nested elements — skip, the caller
+            // This "value" contains nested elements - skip, the caller
             // will see the inner rdf:li entries separately.
             continue;
         }
@@ -74,7 +74,7 @@ pub fn parse_xmp_fields(bytes: &[u8]) -> Vec<MetadataItem> {
 /// Walk an XMP document and return `(qualified_name, raw_inner_text)`
 /// pairs for every element whose prefix is in `XMP_PREFIXES`.
 ///
-/// Implemented without a real XML parser — see the module doc comment
+/// Implemented without a real XML parser - see the module doc comment
 /// for why this is OK.
 fn find_xmp_pairs(text: &str) -> Vec<(String, String)> {
     let bytes = text.as_bytes();
@@ -104,7 +104,7 @@ fn find_xmp_pairs(text: &str) -> Vec<(String, String)> {
             }
             continue;
         }
-        // Close tag — not an entry point
+        // Close tag - not an entry point
         if bytes[i..].starts_with(b"</") {
             if let Some(end) = bytes[i..].iter().position(|&b| b == b'>') {
                 i += end + 1;
@@ -114,7 +114,7 @@ fn find_xmp_pairs(text: &str) -> Vec<(String, String)> {
             continue;
         }
 
-        // Opening tag — extract qualified name
+        // Opening tag - extract qualified name
         let name_start = i + 1;
         let mut j = name_start;
         while j < bytes.len() && !matches!(bytes[j], b' ' | b'\t' | b'\r' | b'\n' | b'>' | b'/') {
@@ -171,7 +171,7 @@ fn find_xmp_pairs(text: &str) -> Vec<(String, String)> {
 /// IPTC IIM is a sequence of records, each prefixed with a 5-byte
 /// header: `0x1C` `<record>` `<dataset>` + 2-byte big-endian length,
 /// followed by `length` bytes of value. We only decode the record-2
-/// (application) datasets that are commonly used for fingerprinting —
+/// (application) datasets that are commonly used for fingerprinting -
 /// the others are camera-internal and not user-visible.
 #[must_use]
 pub fn parse_iptc_8bim(bytes: &[u8]) -> Vec<MetadataItem> {
