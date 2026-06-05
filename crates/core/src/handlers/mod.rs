@@ -7,6 +7,11 @@ pub mod gif;
 pub mod harmless;
 pub mod html;
 pub mod image;
+// Pure-Rust in-memory video / MP4-family-audio strippers (replace the
+// native ffmpeg path). They pull `mp4-atom`/`mkv-element`, which only
+// build under `wasm-inmem`, so the whole tree is feature-gated.
+#[cfg(feature = "wasm-inmem")]
+pub(crate) mod inmem_video;
 pub mod odf;
 pub mod ooxml;
 pub mod pdf;

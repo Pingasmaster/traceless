@@ -25,7 +25,7 @@ description = "Core metadata reading and cleaning library for Traceless"
 # `--no-default-features --features wasm-inmem`.
 default = ["native"]
 native = ["dep:xz2", "dep:zstd", "dep:tempfile", "dep:async-channel"]
-wasm-inmem = ["dep:lzma-rust2", "dep:ruzstd"]
+wasm-inmem = ["dep:lzma-rust2", "dep:ruzstd", "dep:mp4-atom", "dep:mkv-element"]
 
 
 [dependencies]
@@ -73,6 +73,14 @@ zstd = { version = "= 0.13.3", optional = true }
 lzma-rust2 = { version = "= 0.16.4", default-features = false, features = ["std", "encoder", "xz"], optional = true }
 ruzstd = { version = "= 0.8.3", optional = true }
 
+# Pure-Rust container framing for the wasm-inmem video / MP4-family-audio
+# metadata strippers. `mp4-atom` (ISO-BMFF: MP4/MOV/M4A) gives sync
+# Decode/Encode over Cursor (tokio + serde features stay OFF); `mkv-element`
+# (Matroska/WebM) gives read_from/write_to over Cursor (tokio stays OFF).
+# AVI, FLV, ASF, and Ogg are hand-rolled byte surgery with no extra crate.
+mp4-atom = { version = "= 0.11.0", optional = true }
+mkv-element = { version = "= 0.4.0", default-features = false, optional = true }
+
 [lints]
 workspace = true
 
@@ -90,6 +98,10 @@ tar = "= 0.4.45"
 flate2 = "= 1.1.9"
 bzip2 = "= 0.6.1"
 proptest = "= 1.11.0"
+# Backs the wasm-inmem MKV stripper's unit test (constructs a
+# `FileData(Bytes)` attachment fixture). `mkv-element` pins the same
+# version, so cargo unifies it.
+bytes = "= 1.11.1"
 
 # Native-only test codecs. The integration tests under tests/ exercise
 # the C-backed xz/zstd archive paths and only build with `native`.

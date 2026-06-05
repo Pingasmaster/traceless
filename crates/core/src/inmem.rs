@@ -249,12 +249,9 @@ pub fn clean_bytes_for_mime(mime: &str, name: &str, input: &[u8]) -> Result<Vec<
         | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/epub+zip" => document::clean_bytes(input, &ext),
-        "video/mp4" | "video/x-matroska" | "video/webm" | "video/x-msvideo" | "video/avi"
-        | "video/quicktime" | "video/x-ms-wmv" | "video/x-flv" | "video/ogg" => {
-            Err(CoreError::NotImplementedInWasm {
-                format: format!("video '{mime}'"),
-            })
-        }
+        m @ ("video/mp4" | "video/x-matroska" | "video/webm" | "video/x-msvideo"
+        | "video/avi" | "video/quicktime" | "video/x-ms-wmv" | "video/x-flv"
+        | "video/ogg") => strip_video(m, input),
         "text/plain"
         | "image/bmp"
         | "image/x-ms-bmp"
@@ -274,6 +271,42 @@ pub fn clean_bytes_for_mime(mime: &str, name: &str, input: &[u8]) -> Result<Vec<
             mime_type: format!("no in-memory handler for MIME '{other}'"),
         }),
     }
+}
+
+/// Strip metadata from a video container, in memory, with no subprocess.
+/// Routes each container family to its pure-Rust stripper. Mirrors the
+/// native `ffmpeg -map_metadata -1 -map_chapters -1` strip + remux.
+///
+/// # Errors
+///
+/// Propagates the per-container [`CoreError::ParseError`] /
+/// [`CoreError::CleanError`]; returns [`CoreError::UnsupportedFormat`] for a
+/// MIME no stripper owns.
+#[cfg(feature = "wasm-inmem")]
+fn strip_video(mime: &str, input: &[u8]) -> Result<Vec<u8>, CoreError> {
+    use crate::handlers::inmem_video as v;
+    match mime {
+        "video/mp4" | "video/quicktime" => v::isobmff::strip(input),
+        "video/x-matroska" | "video/webm" => v::mkv::strip(input),
+        "video/x-msvideo" | "video/avi" => v::avi::strip(input),
+        "video/x-ms-wmv" => v::asf::strip(input),
+        "video/x-flv" => v::flv::strip(input),
+        "video/ogg" => v::ogg::strip(input),
+        other => Err(CoreError::UnsupportedFormat {
+            mime_type: format!("no in-memory video stripper for MIME '{other}'"),
+        }),
+    }
+}
+
+/// Without `wasm-inmem` the pure-Rust container strippers are not compiled
+/// (they pull `mp4-atom`/`mkv-element`), and the native build reaches video
+/// through the path-based ffmpeg `FormatHandler` instead, so this arm is
+/// never hit in practice.
+#[cfg(not(feature = "wasm-inmem"))]
+fn strip_video(mime: &str, _input: &[u8]) -> Result<Vec<u8>, CoreError> {
+    Err(CoreError::NotImplementedInWasm {
+        format: format!("video '{mime}'"),
+    })
 }
 
 #[cfg(test)]

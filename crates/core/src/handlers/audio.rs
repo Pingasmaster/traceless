@@ -69,9 +69,21 @@ pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError>
     };
 
     if is_ffmpeg_routed(mime) {
-        return Err(CoreError::NotImplementedInWasm {
-            format: format!("audio container '{mime}'"),
-        });
+        // MP4-family audio (m4a/aac/audio-mp4) carries metadata in the same
+        // ISO-BMFF user-data atoms as MP4 video (moov/udta, meta/keys/ilst,
+        // freeform ©xyz GPS), so it strips through the same pure-Rust
+        // box-tree stripper the video path uses. The native build still
+        // routes these through ffmpeg in `clean_metadata`.
+        #[cfg(feature = "wasm-inmem")]
+        {
+            return super::inmem_video::isobmff::strip(input);
+        }
+        #[cfg(not(feature = "wasm-inmem"))]
+        {
+            return Err(CoreError::NotImplementedInWasm {
+                format: format!("audio container '{mime}'"),
+            });
+        }
     }
 
     // Enumerate every tag type present, then strip each from the buffer.
