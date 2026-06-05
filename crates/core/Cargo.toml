@@ -34,7 +34,7 @@ little_exif = "= 0.6.23"
 img-parts = "= 0.4.0"
 
 # PDF metadata
-lopdf = { version = "= 0.40.0", default-features = false }
+lopdf = { version = "= 0.41.0", default-features = false }
 
 # Audio metadata
 lofty = "= 0.24.0"
@@ -60,7 +60,7 @@ tempfile = { version = "= 3.27.0", optional = true }
 # cross-compile to wasm and are shared by both feature sets. `xz2` and
 # `zstd` pull C `-sys` crates and are therefore native-only; the wasm
 # build substitutes the pure-Rust `lzma-rust2` / `ruzstd` below.
-tar = "= 0.4.45"
+tar = "= 0.4.46"
 flate2 = "= 1.1.9"
 bzip2 = "= 0.6.1"
 xz2 = { version = "= 0.1.7", optional = true }
@@ -90,11 +90,11 @@ workspace = true
 # harmless: cargo unifies versions. Mirrored per feature so the suite
 # builds under each configuration.
 tempfile = "= 3.27.0"
-lopdf = { version = "= 0.40.0", default-features = false }
+lopdf = { version = "= 0.41.0", default-features = false }
 little_exif = "= 0.6.23"
 lofty = "= 0.24.0"
 zip = { version = "= 8.5.1", default-features = false, features = ["deflate"] }
-tar = "= 0.4.45"
+tar = "= 0.4.46"
 flate2 = "= 1.1.9"
 bzip2 = "= 0.6.1"
 proptest = "= 1.11.0"

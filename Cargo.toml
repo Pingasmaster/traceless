@@ -25,7 +25,7 @@ categories = ["command-line-utilities", "multimedia", "gui"]
 
 [workspace.dependencies]
 traceless-core = { path = "crates/core" }
-log = "= 0.4.29"
+log = "= 0.4.32"
 env_logger = "= 0.11.10"
 async-channel = "= 2.5.0"
 
