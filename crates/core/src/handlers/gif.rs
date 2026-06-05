@@ -8,21 +8,49 @@
 //! We walk the GIF stream and drop every Comment Extension and every
 //! Application Extension whose identifier isn't `NETSCAPE2.0` (looping
 //! animations would break without that one). Graphic Control Extensions
-//! and Plain Text Extensions — the other two types — are kept because
+//! and Plain Text Extensions - the other two types - are kept because
 //! they carry rendering state, not identifying metadata.
 //!
 //! Reference: <https://www.w3.org/Graphics/GIF/spec-gif89a.txt>
 
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct GifHandler;
 
+/// Strip every metadata-bearing GIF extension block in memory. Shared by
+/// the native `clean_metadata` wrapper and the wasm `inmem` path. `_ext`
+/// is accepted for dispatch-signature uniformity (GIF has a single
+/// extension).
+///
+/// # Errors
+///
+/// Returns [`CoreError::ParseError`] if the input is not a GIF, or
+/// [`CoreError::CleanError`] if the GIF stream cannot be rewritten.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    if !is_gif(input) {
+        return Err(CoreError::ParseError {
+            path: std::path::PathBuf::new(),
+            detail: "not a GIF file".to_string(),
+        });
+    }
+    strip_gif_metadata(input).ok_or_else(|| CoreError::CleanError {
+        path: std::path::PathBuf::new(),
+        detail: "GIF parse error during clean".to_string(),
+    })
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for GifHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -47,7 +75,7 @@ impl FormatHandler for GifHandler {
                 }
                 Extension::Application { identifier, blocks } => {
                     let id_str = String::from_utf8_lossy(&identifier).to_string();
-                    // NETSCAPE2.0 is the animation loop count — not a
+                    // NETSCAPE2.0 is the animation loop count - not a
                     // fingerprint, keep it from the report.
                     if id_str.starts_with("NETSCAPE2.0") {
                         continue;
@@ -82,16 +110,7 @@ impl FormatHandler for GifHandler {
             path: path.to_path_buf(),
             source: e,
         })?;
-        if !is_gif(&bytes) {
-            return Err(CoreError::ParseError {
-                path: path.to_path_buf(),
-                detail: "not a GIF file".to_string(),
-            });
-        }
-        let cleaned = strip_gif_metadata(&bytes).ok_or_else(|| CoreError::CleanError {
-            path: path.to_path_buf(),
-            detail: "GIF parse error during clean".to_string(),
-        })?;
+        let cleaned = clean_bytes(&bytes, "gif").map_err(|e| super::repath(e, path))?;
         fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to write cleaned GIF: {e}"),
@@ -108,6 +127,7 @@ fn is_gif(bytes: &[u8]) -> bool {
     bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")
 }
 
+#[cfg(feature = "native")]
 #[derive(Debug)]
 enum Extension {
     Comment(Vec<u8>),
@@ -119,6 +139,7 @@ enum Extension {
 
 /// Walk the GIF stream and yield every metadata-bearing extension block.
 /// Used by the reader to surface leaks to the user.
+#[cfg(feature = "native")]
 fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
     let mut out = Vec::new();
     let Some(mut i) = gif_header_size(bytes) else {
@@ -169,12 +190,12 @@ fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
                     i = next;
                 }
                 _ => {
-                    // Unknown / Graphic Control / Plain Text — skip.
+                    // Unknown / Graphic Control / Plain Text - skip.
                     i = skip_past_sub_blocks(bytes, i).unwrap_or(bytes.len());
                 }
             }
         } else if b == 0x2C {
-            // Image descriptor — read 9 header bytes, optional local
+            // Image descriptor - read 9 header bytes, optional local
             // color table, then image data (LZW min code size byte +
             // sub-blocks).
             if i + 10 > bytes.len() {
@@ -198,7 +219,7 @@ fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
             // already parsed and return them to the caller.
             i = skip_past_sub_blocks(bytes, i).unwrap_or(bytes.len());
         } else {
-            // Unknown byte — advance to avoid infinite loop
+            // Unknown byte - advance to avoid infinite loop
             i += 1;
         }
     }
@@ -207,6 +228,7 @@ fn walk_extension_blocks(bytes: &[u8]) -> Vec<Extension> {
 
 /// Given `start` pointing at the first sub-block length byte, return
 /// `(collected blocks, index just past the 0x00 terminator)`.
+#[cfg(feature = "native")]
 fn collect_sub_blocks(bytes: &[u8], start: usize) -> (Vec<Vec<u8>>, usize) {
     let mut i = start;
     let mut out = Vec::new();
@@ -307,14 +329,14 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
             let after_intro = i + 2;
             match label {
                 0xFE => {
-                    // Comment — skip entirely. A truncated sub-block
+                    // Comment - skip entirely. A truncated sub-block
                     // stream means the input is malformed; propagate
                     // `None` so the caller surfaces a parse error
                     // instead of silently clipping the output.
                     i = skip_past_sub_blocks(bytes, after_intro)?;
                 }
                 0xFF => {
-                    // Application — keep only NETSCAPE2.0
+                    // Application - keep only NETSCAPE2.0
                     if after_intro >= bytes.len() || bytes[after_intro] != 0x0B {
                         i = skip_past_sub_blocks(bytes, after_intro)?;
                         continue;
@@ -334,7 +356,7 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
                     }
                 }
                 _ => {
-                    // Graphic Control / Plain Text / unknown — keep.
+                    // Graphic Control / Plain Text / unknown - keep.
                     let end = skip_past_sub_blocks(bytes, after_intro)?;
                     out.extend_from_slice(&bytes[block_start..end]);
                     i = end;
@@ -343,7 +365,7 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
             continue;
         }
         if b == 0x2C {
-            // Image descriptor — copy header + LCT + image data
+            // Image descriptor - copy header + LCT + image data
             if i + 10 > bytes.len() {
                 return None;
             }
@@ -363,14 +385,14 @@ fn strip_gif_metadata(bytes: &[u8]) -> Option<Vec<u8>> {
             i = data_end;
             continue;
         }
-        // Unknown — pass through a single byte
+        // Unknown - pass through a single byte
         out.push(b);
         i += 1;
     }
     Some(out)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

@@ -10,7 +10,7 @@
 //!    `<head>` section of an NCX file holds metadata tags like the
 //!    book identifier; we blank them.
 //! 3. Reject archives containing `META-INF/encryption.xml` (DRM / encrypted
-//!    fonts — mat2 refuses to process these because it can't safely
+//!    fonts - mat2 refuses to process these because it can't safely
 //!    re-pack them).
 //!
 //! The archive-level drops (iTunesMetadata.plist, calibre_bookmarks.txt)
@@ -273,7 +273,7 @@ fn write_minimal_metadata(
 }
 
 /// Generate a `urn:uuid:xxxxxxxx-…` string with 128 random bits shaped
-/// into a v4 UUID. We don't pull in the `uuid` crate for this — 30
+/// into a v4 UUID. We don't pull in the `uuid` crate for this - 30
 /// lines of `rng.random()` plus a format string is plenty.
 fn generate_urn_uuid_v4(rng: &mut impl Rng) -> String {
     let mut bytes = [0u8; 16];

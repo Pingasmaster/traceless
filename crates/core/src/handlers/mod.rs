@@ -10,20 +10,31 @@ pub mod image;
 pub mod odf;
 pub mod ooxml;
 pub mod pdf;
+// bubblewrap + Command live behind the native feature: the wasm build has
+// no subprocess surface, so this whole module (and the ffmpeg paths that
+// depend on it) is compiled out.
+#[cfg(feature = "native")]
 pub mod sandbox;
 pub mod svg;
-#[cfg(test)]
+// The handler unit tests under `tests.rs` are path-oriented (they stage
+// fixtures to temp files and call the `FormatHandler` path API), so they
+// only build with `native`. The in-memory `clean_bytes` round-trips have
+// their own `#[cfg(test)]` modules inside each handler / `inmem.rs`.
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests;
 pub mod torrent;
+#[cfg(feature = "native")]
 pub mod video;
 pub mod xml_util;
 pub mod xmp;
 pub mod zip_util;
 
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::MetadataSet;
 
 /// Hard ceiling on the size of any file that can enter the cleaner.
@@ -54,6 +65,7 @@ pub const MAX_INPUT_FILE_BYTES: u64 = 10 * 1024 * 1024 * 1024;
 ///
 /// Returns [`CoreError::ReadError`] if the file cannot be stat'd,
 /// or [`CoreError::FileTooLarge`] if it exceeds the cap.
+#[cfg(feature = "native")]
 pub(crate) fn check_input_size(path: &Path) -> Result<(), CoreError> {
     if crate::config::limits_disabled() {
         return Ok(());
@@ -72,7 +84,59 @@ pub(crate) fn check_input_size(path: &Path) -> Result<(), CoreError> {
     Ok(())
 }
 
+/// In-memory equivalent of [`check_input_size`] for the wasm build:
+/// there is no path to stat, so it just bounds the already-buffered
+/// input length against [`MAX_INPUT_FILE_BYTES`]. The HTTP layer in
+/// `efrei-api` already enforces the same 10 GiB body cap one layer up,
+/// so this is defence in depth rather than the primary gate. Becomes a
+/// no-op while [`crate::limits_disabled`] is `true`.
+///
+/// # Errors
+///
+/// Returns [`CoreError::FileTooLarge`] if the buffer exceeds the cap.
+pub(crate) fn check_input_len(len: usize) -> Result<(), CoreError> {
+    if crate::config::limits_disabled() {
+        return Ok(());
+    }
+    if len as u64 > MAX_INPUT_FILE_BYTES {
+        return Err(CoreError::FileTooLarge {
+            path: std::path::PathBuf::new(),
+            size: len as u64,
+            limit: MAX_INPUT_FILE_BYTES,
+        });
+    }
+    Ok(())
+}
+
+/// Rewrite the (empty) `PathBuf` carried by a `CoreError` produced by an
+/// in-memory `clean_bytes` call with the real on-disk `path`, so the
+/// native path-API surfaces the same path-bearing error messages it did
+/// before the in-memory refactor. Variants that carry no path are
+/// returned untouched.
+#[cfg(feature = "native")]
+pub(crate) fn repath(err: CoreError, path: &Path) -> CoreError {
+    let p = || path.to_path_buf();
+    match err {
+        CoreError::ReadError { source, .. } => CoreError::ReadError { path: p(), source },
+        CoreError::ParseError { detail, .. } => CoreError::ParseError { path: p(), detail },
+        CoreError::CleanError { detail, .. } => CoreError::CleanError { path: p(), detail },
+        CoreError::NotFound { .. } => CoreError::NotFound { path: p() },
+        CoreError::FileTooLarge { size, limit, .. } => CoreError::FileTooLarge {
+            path: p(),
+            size,
+            limit,
+        },
+        other => other,
+    }
+}
+
 /// Trait implemented by each format handler (images, PDF, audio, documents, video).
+///
+/// This is the **path-oriented** native API used by `FileStore` and the
+/// desktop frontends. The wasm build does not use it; it dispatches
+/// through the in-memory `clean_bytes` free functions in each handler
+/// module (see [`crate::inmem`]).
+#[cfg(feature = "native")]
 pub trait FormatHandler: Send + Sync {
     /// Read metadata from the file. Returns the discovered metadata.
     ///

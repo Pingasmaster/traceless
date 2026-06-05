@@ -12,8 +12,11 @@
 //! archive, absolute paths, path-traversal members, device files,
 //! hardlinks, and duplicate entries. We mirror that.
 
+#[cfg(feature = "native")]
 use std::fs::File;
-use std::io::{BufReader, BufWriter, Cursor, Read, Write};
+#[cfg(feature = "native")]
+use std::io::BufReader;
+use std::io::{Cursor, Read, Write};
 use std::path::{Path, PathBuf};
 
 use flate2::Compression;
@@ -23,11 +26,142 @@ use tar::{Archive as TarArchive, Builder as TarBuilder, EntryType, Header as Tar
 
 use crate::config::{UnknownMemberPolicy, archive_unknown_policy};
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
-use super::{FormatHandler, zip_util};
+#[cfg(feature = "native")]
+use super::FormatHandler;
+use super::zip_util;
 
 pub struct ArchiveHandler;
+
+// ============================================================
+// Compression codec adapters (native C-backed vs. pure-Rust wasm)
+// ============================================================
+
+/// Decompress a (possibly compressed) tar stream fully into memory. The
+/// gzip / bzip2 codecs are pure-Rust and shared; XZ and zstd swap between
+/// the C-backed `xz2` / `zstd` crates (native) and the pure-Rust
+/// `lzma-rust2` / `ruzstd` crates (wasm). The returned `Read` is then
+/// `.take`-capped by the caller against the decompression-bomb limit.
+fn decompress_tar(input: &[u8], fmt: ArchiveFormat) -> Result<Box<dyn Read + '_>, CoreError> {
+    let reader: Box<dyn Read + '_> = match fmt {
+        ArchiveFormat::Tar => Box::new(Cursor::new(input)),
+        ArchiveFormat::TarGz => Box::new(GzDecoder::new(Cursor::new(input))),
+        ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(Cursor::new(input))),
+        ArchiveFormat::TarXz => xz_decoder(input),
+        ArchiveFormat::TarZst => zst_decoder(input)?,
+        ArchiveFormat::Zip => return Err(zip_unreachable()),
+    };
+    Ok(reader)
+}
+
+#[cfg(feature = "native")]
+fn xz_decoder(input: &[u8]) -> Box<dyn Read + '_> {
+    Box::new(xz2::read::XzDecoder::new(Cursor::new(input)))
+}
+
+#[cfg(not(feature = "native"))]
+fn xz_decoder(input: &[u8]) -> Box<dyn Read + '_> {
+    // `allow_multiple_streams = true` matches xz2's concatenated-stream
+    // handling.
+    Box::new(lzma_rust2::XzReader::new(Cursor::new(input), true))
+}
+
+#[cfg(feature = "native")]
+fn zst_decoder(input: &[u8]) -> Result<Box<dyn Read + '_>, CoreError> {
+    let dec = zstd::stream::read::Decoder::new(Cursor::new(input)).map_err(|e| {
+        CoreError::CleanError {
+            path: PathBuf::new(),
+            detail: format!("zstd decoder: {e}"),
+        }
+    })?;
+    Ok(Box::new(dec))
+}
+
+#[cfg(not(feature = "native"))]
+fn zst_decoder(input: &[u8]) -> Result<Box<dyn Read + '_>, CoreError> {
+    let dec = ruzstd::decoding::StreamingDecoder::new(Cursor::new(input)).map_err(|e| {
+        CoreError::CleanError {
+            path: PathBuf::new(),
+            detail: format!("zstd decoder: {e}"),
+        }
+    })?;
+    Ok(Box::new(dec))
+}
+
+/// Compress a raw tar byte stream with the codec named by `fmt`. The
+/// inverse of [`decompress_tar`]. Plain tar passes through unchanged.
+fn compress_tar(tar: &[u8], fmt: ArchiveFormat) -> Result<Vec<u8>, CoreError> {
+    match fmt {
+        ArchiveFormat::Tar => Ok(tar.to_vec()),
+        ArchiveFormat::TarGz => {
+            let mut enc = GzEncoder::new(Vec::new(), Compression::default());
+            enc.write_all(tar).map_err(|e| compress_err(&e))?;
+            enc.finish().map_err(|e| compress_err(&e))
+        }
+        ArchiveFormat::TarBz2 => {
+            let mut enc = bzip2::write::BzEncoder::new(Vec::new(), bzip2::Compression::default());
+            enc.write_all(tar).map_err(|e| compress_err(&e))?;
+            enc.finish().map_err(|e| compress_err(&e))
+        }
+        ArchiveFormat::TarXz => xz_encode(tar),
+        ArchiveFormat::TarZst => zst_encode(tar),
+        ArchiveFormat::Zip => Err(zip_unreachable()),
+    }
+}
+
+fn compress_err(e: &std::io::Error) -> CoreError {
+    CoreError::CleanError {
+        path: PathBuf::new(),
+        detail: format!("archive recompression: {e}"),
+    }
+}
+
+#[cfg(feature = "native")]
+fn xz_encode(tar: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let mut enc = xz2::write::XzEncoder::new(Vec::new(), 6);
+    enc.write_all(tar).map_err(|e| compress_err(&e))?;
+    enc.finish().map_err(|e| compress_err(&e))
+}
+
+#[cfg(not(feature = "native"))]
+fn xz_encode(tar: &[u8]) -> Result<Vec<u8>, CoreError> {
+    // Preset 6 matches the native xz2 encoder level.
+    let options = lzma_rust2::XzOptions::with_preset(6);
+    let mut enc = lzma_rust2::XzWriter::new(Vec::new(), options).map_err(|e| compress_err(&e))?;
+    enc.write_all(tar).map_err(|e| compress_err(&e))?;
+    enc.finish().map_err(|e| compress_err(&e))
+}
+
+#[cfg(feature = "native")]
+fn zst_encode(tar: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let mut enc = zstd::stream::write::Encoder::new(Vec::new(), 3).map_err(|e| compress_err(&e))?;
+    enc.write_all(tar).map_err(|e| compress_err(&e))?;
+    enc.finish().map_err(|e| compress_err(&e))
+}
+
+#[cfg(not(feature = "native"))]
+// The `Result` is infallible for the ruzstd encoder, but it must match the
+// native `zst_encode` signature (the C-backed zstd encoder can error) since
+// both are dispatched from the same `compress_tar` match arm.
+#[allow(clippy::unnecessary_wraps)]
+fn zst_encode(tar: &[u8]) -> Result<Vec<u8>, CoreError> {
+    // ruzstd 0.8 only implements `Uncompressed` and `Fastest`; `Fastest`
+    // (zstd level ~1) is the best implemented ratio. The output is a valid
+    // zstd frame that round-trips back to the same tar members.
+    Ok(ruzstd::encoding::compress_to_vec(
+        tar,
+        ruzstd::encoding::CompressionLevel::Fastest,
+    ))
+}
+
+fn zip_unreachable() -> CoreError {
+    CoreError::CleanError {
+        path: PathBuf::new(),
+        detail: "internal error: ZIP routed through the tar codec path".to_string(),
+    }
+}
 
 /// Classify an archive by its filename extension chain. Called from
 /// both `read_metadata` and `clean_metadata` to pick the decoder.
@@ -56,7 +190,18 @@ enum FormatProbe {
 }
 
 impl ArchiveFormat {
+    #[cfg(feature = "native")]
     fn probe(path: &Path) -> FormatProbe {
+        let Some(name) = path.file_name() else {
+            return FormatProbe::Unknown;
+        };
+        Self::probe_name(&name.to_string_lossy())
+    }
+
+    /// Filename-string variant of [`probe`], usable from the in-memory
+    /// path where there is no `Path`. The caller passes the original
+    /// filename (or just its compound extension, e.g. `archive.tar.zst`).
+    fn probe_name(name: &str) -> FormatProbe {
         // Table-driven so clippy's `case_sensitive_file_extension_comparisons`
         // lint (which only flags literal `.ends_with("...")`) stays quiet,
         // and extending the table with a new archive type is a one-line
@@ -82,10 +227,7 @@ impl ArchiveFormat {
             (".zst", "zstd"),
         ];
 
-        let Some(name) = path.file_name() else {
-            return FormatProbe::Unknown;
-        };
-        let name = name.to_string_lossy().to_ascii_lowercase();
+        let name = name.to_ascii_lowercase();
 
         for (suffix, fmt) in MATCHED_SUFFIXES {
             if name.ends_with(suffix) {
@@ -103,8 +245,18 @@ impl ArchiveFormat {
     /// Resolve a filename into an `ArchiveFormat`, or build a specific
     /// `CoreError` that distinguishes "no archive extension at all" from
     /// "plain compressed stream, which we deliberately do not support".
+    #[cfg(feature = "native")]
     fn resolve(path: &Path) -> Result<Self, CoreError> {
-        match Self::probe(path) {
+        Self::resolve_probe(&Self::probe(path))
+    }
+
+    /// Filename-string variant of [`resolve`].
+    fn resolve_name(name: &str) -> Result<Self, CoreError> {
+        Self::resolve_probe(&Self::probe_name(name))
+    }
+
+    fn resolve_probe(probe: &FormatProbe) -> Result<Self, CoreError> {
+        match *probe {
             FormatProbe::Matched(fmt) => Ok(fmt),
             FormatProbe::PlainCompressed(kind) => Err(CoreError::UnsupportedFormat {
                 mime_type: format!(
@@ -119,6 +271,27 @@ impl ArchiveFormat {
     }
 }
 
+/// Strip archive-level + per-member metadata in memory. `name` is the
+/// original filename (or compound extension, e.g. `bundle.tar.zst`); it
+/// selects the container codec. Shared by the native `clean_metadata`
+/// wrapper and the wasm `inmem` path.
+///
+/// # Errors
+///
+/// Returns [`CoreError::UnsupportedFormat`] for an unrecognised /
+/// plain-compressed name, or [`CoreError::CleanError`] /
+/// [`CoreError::ParseError`] if the archive cannot be decoded, a member
+/// trips a safety/decompression cap, or the output cannot be rebuilt.
+pub(crate) fn clean_bytes(input: &[u8], name: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let fmt = ArchiveFormat::resolve_name(name)?;
+    match fmt {
+        ArchiveFormat::Zip => clean_zip_bytes(input),
+        _ => clean_tar_bytes(input, fmt),
+    }
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for ArchiveHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -182,11 +355,24 @@ impl FormatHandler for ArchiveHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let fmt = ArchiveFormat::resolve(path)?;
-        match fmt {
-            ArchiveFormat::Zip => clean_zip(path, output_path),
-            _ => clean_tar(path, output_path, fmt),
-        }
+        // Resolve the format from the real filename first so a bad
+        // extension surfaces the same specific error as before, then run
+        // the shared in-memory cleaner.
+        let _ = ArchiveFormat::resolve(path)?;
+        let filename = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        let data = std::fs::read(path).map_err(|e| CoreError::ReadError {
+            path: path.to_path_buf(),
+            source: e,
+        })?;
+        let cleaned = clean_bytes(&data, &filename).map_err(|e| super::repath(e, path))?;
+        std::fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
+            path: path.to_path_buf(),
+            detail: format!("create output: {e}"),
+        })?;
+        Ok(())
     }
 
     fn supported_mime_types(&self) -> &[&str] {
@@ -204,11 +390,13 @@ impl FormatHandler for ArchiveHandler {
 // ZIP path
 // ============================================================
 
+#[cfg(feature = "native")]
 fn is_suspicious_zip(entry: &zip::read::ZipFile<'_, BufReader<File>>) -> bool {
     // non-Unix creator (mat2 test checks: create_system == 3 means Linux)
     entry.unix_mode().is_none() || entry.last_modified().is_some_and(|dt| dt.year() != 1980)
 }
 
+#[cfg(feature = "native")]
 fn describe_zip_meta(entry: &zip::read::ZipFile<'_, BufReader<File>>) -> String {
     let mut bits = Vec::new();
     if let Some(mode) = entry.unix_mode()
@@ -236,6 +424,7 @@ fn describe_zip_meta(entry: &zip::read::ZipFile<'_, BufReader<File>>) -> String 
     }
 }
 
+#[cfg(feature = "native")]
 fn recurse_read_zip(
     _archive_path: &Path,
     archive: &mut zip::ZipArchive<BufReader<File>>,
@@ -330,14 +519,11 @@ fn recurse_read_zip(
     Ok(())
 }
 
-fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
-    let f = File::open(path).map_err(|e| CoreError::ReadError {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
+fn clean_zip_bytes(input: &[u8]) -> Result<Vec<u8>, CoreError> {
+    let empty = PathBuf::new;
     let mut archive =
-        zip::ZipArchive::new(BufReader::new(f)).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
+        zip::ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::CleanError {
+            path: empty(),
             detail: format!("bad zip: {e}"),
         })?;
 
@@ -349,7 +535,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
     let mut names: Vec<String> = Vec::with_capacity(archive.len());
     for i in 0..archive.len() {
         let entry = archive.by_index(i).map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
+            path: empty(),
             detail: format!("bad zip entry at index {i}: {e}"),
         })?;
         names.push(entry.name().to_string());
@@ -360,29 +546,20 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
     // twice and silently drop its twin.
     names.dedup();
 
-    let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("create output: {e}"),
-    })?;
-    let mut writer = zip::ZipWriter::new(out_file);
-
-    let tmpdir = tempfile::tempdir().map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("tempdir: {e}"),
-    })?;
+    let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
 
     let mut total_decompressed: u64 = 0;
     for name in &names {
         if is_path_traversal(name) {
             return Err(CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!("path traversal: {name}"),
             });
         }
 
         let (bytes, compression) = {
             let mut entry = archive.by_name(name).map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!("read entry {name}: {e}"),
             })?;
             if entry.is_dir() {
@@ -397,12 +574,12 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
                 .take(effective_take(MAX_ENTRY_DECOMPRESSED_BYTES))
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!("read entry body {name}: {e}"),
                 })?;
             if over_cap(buf.len() as u64, MAX_ENTRY_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!(
                         "zip member '{name}' exceeds the \
                          {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
@@ -416,7 +593,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         total_decompressed = total_decompressed.saturating_add(bytes.len() as u64);
         if over_cap(total_decompressed, MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES) {
             return Err(CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!(
                     "zip archive exceeds the \
                      {MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES}-byte cumulative \
@@ -428,7 +605,7 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
 
         // Try to clean the member via format dispatch; honor the
         // process-wide UnknownMemberPolicy when no handler applies.
-        let action = dispatch_member(name, bytes, tmpdir.path(), path)?;
+        let action = dispatch_member(name, bytes)?;
         let cleaned = match action {
             ArchiveAction::Write(b) => b,
             ArchiveAction::Drop => continue,
@@ -438,65 +615,47 @@ fn clean_zip(path: &Path, output_path: &Path) -> Result<(), CoreError> {
         writer
             .start_file(name, options)
             .map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!("start entry {name}: {e}"),
             })?;
         writer
             .write_all(&cleaned)
             .map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!("write entry {name}: {e}"),
             })?;
     }
 
-    writer.finish().map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
+    let out = writer.finish().map_err(|e| CoreError::CleanError {
+        path: empty(),
         detail: format!("finalize zip: {e}"),
     })?;
-    Ok(())
+    Ok(out.into_inner())
 }
 
 // ============================================================
 // TAR path
 // ============================================================
 
-/// Produce a decompressed byte stream for a (possibly compressed) tar.
-fn open_tar(path: &Path, fmt: ArchiveFormat) -> Result<Box<dyn Read>, CoreError> {
-    let f = File::open(path).map_err(|e| CoreError::ReadError {
-        path: path.to_path_buf(),
-        source: e,
-    })?;
-    let reader: Box<dyn Read> = match fmt {
-        ArchiveFormat::Tar => Box::new(BufReader::new(f)),
-        ArchiveFormat::TarGz => Box::new(GzDecoder::new(BufReader::new(f))),
-        ArchiveFormat::TarBz2 => Box::new(bzip2::read::BzDecoder::new(BufReader::new(f))),
-        ArchiveFormat::TarXz => Box::new(xz2::read::XzDecoder::new(BufReader::new(f))),
-        ArchiveFormat::TarZst => Box::new(
-            zstd::stream::read::Decoder::new(BufReader::new(f)).map_err(|e| {
-                CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("zstd decoder: {e}"),
-                }
-            })?,
-        ),
-        ArchiveFormat::Zip => unreachable!(),
-    };
-    Ok(reader)
-}
-
 /// Open the archive once, enforce safety invariants, return each
 /// header for the reader summary.
 ///
 /// The decompressor is wrapped in `.take(MAX_TAR_DECOMPRESSED_BYTES + 1)`
 /// so a crafted `.tar.gz` / `.tar.xz` / `.tar.zst` bomb can't pin a
-/// reader worker by decompressing forever. `clean_tar` already applies
-/// the same cap on its side; the reader path was missing it, which
-/// turned `ArchiveHandler::read_metadata` into an unbounded CPU DoS.
+/// reader worker by decompressing forever. `clean_tar_bytes` already
+/// applies the same cap on its side; the reader path was missing it,
+/// which turned `ArchiveHandler::read_metadata` into an unbounded CPU
+/// DoS.
+#[cfg(feature = "native")]
 fn read_tar_entries(
     path: &Path,
     fmt: ArchiveFormat,
 ) -> Result<Vec<(String, TarHeader)>, CoreError> {
-    let reader = open_tar(path, fmt)?.take(effective_take(MAX_TAR_DECOMPRESSED_BYTES));
+    let raw = std::fs::read(path).map_err(|e| CoreError::ReadError {
+        path: path.to_path_buf(),
+        source: e,
+    })?;
+    let reader = decompress_tar(&raw, fmt)?.take(effective_take(MAX_TAR_DECOMPRESSED_BYTES));
     let mut archive = TarArchive::new(reader);
     let mut out = Vec::new();
     let mut seen_names: std::collections::HashSet<String> = std::collections::HashSet::new();
@@ -520,6 +679,7 @@ fn read_tar_entries(
     Ok(out)
 }
 
+#[cfg(feature = "native")]
 fn describe_tar_meta(header: &TarHeader) -> String {
     let mut bits = Vec::new();
     if header.mtime().unwrap_or(0) != 0 {
@@ -689,21 +849,22 @@ fn over_cap(len: u64, max: u64) -> bool {
 // the top-level body past clippy's 100-line ceiling. Splitting it further
 // just fragments one linear pipeline across four helpers for no real gain.
 #[allow(clippy::too_many_lines)]
-fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), CoreError> {
+fn clean_tar_bytes(input: &[u8], fmt: ArchiveFormat) -> Result<Vec<u8>, CoreError> {
+    let empty = PathBuf::new;
     // 1. Decompress into memory, bounded by `MAX_TAR_DECOMPRESSED_BYTES`
     //    to defeat compression bombs. We read one extra byte so we can
     //    tell "exactly at the cap" from "would have exceeded it".
     let mut decompressed = Vec::new();
-    open_tar(path, fmt)?
+    decompress_tar(input, fmt)?
         .take(effective_take(MAX_TAR_DECOMPRESSED_BYTES))
         .read_to_end(&mut decompressed)
-        .map_err(|e| CoreError::ReadError {
-            path: path.to_path_buf(),
-            source: e,
+        .map_err(|e| CoreError::CleanError {
+            path: empty(),
+            detail: format!("decompress tar: {e}"),
         })?;
     if over_cap(decompressed.len() as u64, MAX_TAR_DECOMPRESSED_BYTES) {
         return Err(CoreError::CleanError {
-            path: path.to_path_buf(),
+            path: empty(),
             detail: format!(
                 "tar archive exceeds the {MAX_TAR_DECOMPRESSED_BYTES}-byte \
                  decompression cap; refusing to clean (likely a compression bomb)"
@@ -712,10 +873,6 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     }
 
     // 2. Enumerate and clean each entry in-memory.
-    let tmpdir = tempfile::tempdir().map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("tempdir: {e}"),
-    })?;
     let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
     let mut cleaned_members: Vec<CleanedTarEntry> = Vec::new();
     let mut total_decompressed: u64 = 0;
@@ -723,11 +880,11 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
     {
         let mut archive = TarArchive::new(&decompressed[..]);
         for entry in archive.entries().map_err(|e| CoreError::CleanError {
-            path: path.to_path_buf(),
+            path: empty(),
             detail: format!("tar entries: {e}"),
         })? {
             let mut entry = entry.map_err(|e| CoreError::CleanError {
-                path: path.to_path_buf(),
+                path: empty(),
                 detail: format!("tar entry: {e}"),
             })?;
             let name = entry
@@ -747,12 +904,12 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                     .header()
                     .link_name()
                     .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
+                        path: empty(),
                         detail: format!("read symlink target for {name}: {e}"),
                     })?
                     .map(std::borrow::Cow::into_owned)
                     .ok_or_else(|| CoreError::CleanError {
-                        path: path.to_path_buf(),
+                        path: empty(),
                         detail: format!("symlink {name} has no target"),
                     })?;
                 cleaned_members.push(CleanedTarEntry::Symlink { name, target });
@@ -769,12 +926,12 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 .take(effective_take(MAX_ENTRY_DECOMPRESSED_BYTES))
                 .read_to_end(&mut buf)
                 .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!("read entry {name}: {e}"),
                 })?;
             if over_cap(buf.len() as u64, MAX_ENTRY_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!(
                         "tar member '{name}' exceeds the \
                          {MAX_ENTRY_DECOMPRESSED_BYTES}-byte decompression \
@@ -785,7 +942,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
             total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
             if over_cap(total_decompressed, MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES) {
                 return Err(CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!(
                         "tar archive exceeds the \
                          {MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES}-byte cumulative \
@@ -794,7 +951,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                     ),
                 });
             }
-            let action = dispatch_member(&name, buf, tmpdir.path(), path)?;
+            let action = dispatch_member(&name, buf)?;
             match action {
                 ArchiveAction::Write(cleaned) => {
                     cleaned_members.push(CleanedTarEntry::Regular {
@@ -807,40 +964,17 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
         }
     }
 
-    // 3. Build the output tar. Sort by name for determinism.
+    // 3. Build the output tar (uncompressed) in memory. Sort by name for
+    //    determinism, then recompress with the container codec.
     cleaned_members.sort_by(|a, b| a.name().cmp(b.name()));
 
-    let out_file = File::create(output_path).map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("create output: {e}"),
-    })?;
-    let buf_out = BufWriter::new(out_file);
-    let writer: Box<dyn Write> = match fmt {
-        ArchiveFormat::Tar => Box::new(buf_out),
-        ArchiveFormat::TarGz => Box::new(GzEncoder::new(buf_out, Compression::default())),
-        ArchiveFormat::TarBz2 => Box::new(bzip2::write::BzEncoder::new(
-            buf_out,
-            bzip2::Compression::default(),
-        )),
-        ArchiveFormat::TarXz => Box::new(xz2::write::XzEncoder::new(buf_out, 6)),
-        ArchiveFormat::TarZst => Box::new(
-            zstd::stream::write::Encoder::new(buf_out, 3)
-                .map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
-                    detail: format!("zstd encoder: {e}"),
-                })?
-                .auto_finish(),
-        ),
-        ArchiveFormat::Zip => unreachable!(),
-    };
-
-    let mut builder = TarBuilder::new(writer);
+    let mut builder = TarBuilder::new(Cursor::new(Vec::new()));
     for entry in cleaned_members {
         match entry {
             CleanedTarEntry::Regular { name, data } => {
                 let mut header = TarHeader::new_gnu();
                 header.set_path(&name).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!("set_path {name}: {e}"),
                 })?;
                 header.set_size(data.len() as u64);
@@ -855,14 +989,14 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 builder
                     .append(&header, Cursor::new(&data))
                     .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
+                        path: empty(),
                         detail: format!("append {name}: {e}"),
                     })?;
             }
             CleanedTarEntry::Symlink { name, target } => {
                 let mut header = TarHeader::new_gnu();
                 header.set_path(&name).map_err(|e| CoreError::CleanError {
-                    path: path.to_path_buf(),
+                    path: empty(),
                     detail: format!("set_path {name}: {e}"),
                 })?;
                 header.set_size(0);
@@ -874,7 +1008,7 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 header
                     .set_link_name(&target)
                     .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
+                        path: empty(),
                         detail: format!("set_link_name {name}: {e}"),
                     })?;
                 header.set_username("").ok();
@@ -883,17 +1017,21 @@ fn clean_tar(path: &Path, output_path: &Path, fmt: ArchiveFormat) -> Result<(), 
                 builder
                     .append(&header, std::io::empty())
                     .map_err(|e| CoreError::CleanError {
-                        path: path.to_path_buf(),
+                        path: empty(),
                         detail: format!("append symlink {name}: {e}"),
                     })?;
             }
         }
     }
-    builder.into_inner().map_err(|e| CoreError::CleanError {
-        path: path.to_path_buf(),
-        detail: format!("finish tar: {e}"),
-    })?;
-    Ok(())
+    let tar_bytes = builder
+        .into_inner()
+        .map_err(|e| CoreError::CleanError {
+            path: empty(),
+            detail: format!("finish tar: {e}"),
+        })?
+        .into_inner();
+
+    compress_tar(&tar_bytes, fmt)
 }
 
 // ============================================================
@@ -930,31 +1068,10 @@ enum ArchiveAction {
 ///   has no registered handler.
 /// - `Err(...)` when the policy is `Abort` and an unknown member was
 ///   found, or when the member's own handler failed to clean.
-fn dispatch_member(
-    entry_name: &str,
-    bytes: Vec<u8>,
-    tmpdir: &Path,
-    archive_path: &Path,
-) -> Result<ArchiveAction, CoreError> {
-    // Write to a temp file with the right extension so handlers' MIME
-    // detection (which is extension-based) works.
-    let safe = entry_name.replace(['/', '\\'], "_");
-    let in_path = tmpdir.join(&safe);
-    let out_path = tmpdir.join(format!("cleaned_{safe}"));
+fn dispatch_member(entry_name: &str, bytes: Vec<u8>) -> Result<ArchiveAction, CoreError> {
+    let mime = crate::inmem::mime_for_name(entry_name);
 
-    // A tempfile-write failure is an I/O error, not an unknown-member
-    // situation. Falling through to `apply_unknown_policy` would let the
-    // default `Keep` policy ship the *unstripped* original bytes into the
-    // cleaned archive, silently bypassing the handler that was already
-    // matched. Surface the error instead.
-    std::fs::write(&in_path, &bytes).map_err(|e| CoreError::CleanError {
-        path: archive_path.to_path_buf(),
-        detail: format!("failed to stage archive member '{entry_name}' for dispatch: {e}"),
-    })?;
-
-    let mime = crate::format_support::detect_mime(&in_path);
-
-    // Don't recurse into archive handlers — this module IS the archive
+    // Don't recurse into archive handlers - this module IS the archive
     // handler, and we don't want unbounded nesting. Treat nested
     // archives as opaque members: the user can clean them individually.
     let is_nested_archive = matches!(
@@ -968,74 +1085,48 @@ fn dispatch_member(
             | "application/x-bzip-compressed-tar"
             | "application/x-gtar"
             | "application/x-xz"
+            | "application/zstd"
+            | "application/x-zstd"
     );
 
-    let handler = if is_nested_archive {
-        None
-    } else {
-        crate::format_support::get_handler_for_mime(&mime)
-    };
+    if is_nested_archive || !crate::inmem::has_handler(&mime) {
+        return apply_unknown_policy(entry_name, bytes);
+    }
 
-    let Some(handler) = handler else {
-        let _ = std::fs::remove_file(&in_path);
-        return apply_unknown_policy(entry_name, bytes, archive_path);
-    };
-
-    match handler.clean_metadata(&in_path, &out_path) {
-        Ok(()) => {
-            // If reading the cleaned output fails, we must error out rather
-            // than fall back to the original bytes. The original still
-            // contains metadata that the handler claimed to have stripped,
-            // so silently shipping it would defeat the whole point.
-            let cleaned = std::fs::read(&out_path).map_err(|e| CoreError::CleanError {
-                path: archive_path.to_path_buf(),
-                detail: format!(
-                    "cleaned archive member '{entry_name}' ({mime}) could not be read back: {e}"
-                ),
-            });
-            let _ = std::fs::remove_file(&in_path);
-            let _ = std::fs::remove_file(&out_path);
-            Ok(ArchiveAction::Write(cleaned?))
-        }
-        Err(e) => {
-            let _ = std::fs::remove_file(&in_path);
-            // A *known* handler failed. Surface the error regardless of
-            // the unknown-member policy — the member was recognized,
-            // and the caller explicitly asked us to process it.
-            Err(CoreError::CleanError {
-                path: archive_path.to_path_buf(),
-                detail: format!("failed to clean archive member {entry_name} ({mime}): {e}"),
-            })
-        }
+    // Dispatch through the in-memory cleaner by MIME. A *known* handler
+    // failing is surfaced as an error regardless of the unknown-member
+    // policy: the member was recognized and the caller asked us to
+    // process it, so silently shipping the dirty original would defeat
+    // the whole point.
+    match crate::inmem::clean_bytes_for_mime(&mime, entry_name, &bytes) {
+        Ok(cleaned) => Ok(ArchiveAction::Write(cleaned)),
+        Err(e) => Err(CoreError::CleanError {
+            path: PathBuf::new(),
+            detail: format!("failed to clean archive member {entry_name} ({mime}): {e}"),
+        }),
     }
 }
 
 /// Apply `UnknownMemberPolicy` to a member with no registered handler.
-fn apply_unknown_policy(
-    entry_name: &str,
-    bytes: Vec<u8>,
-    archive_path: &Path,
-) -> Result<ArchiveAction, CoreError> {
+fn apply_unknown_policy(entry_name: &str, bytes: Vec<u8>) -> Result<ArchiveAction, CoreError> {
     match archive_unknown_policy() {
         UnknownMemberPolicy::Keep => Ok(ArchiveAction::Write(bytes)),
         UnknownMemberPolicy::Omit => {
-            log::info!(
-                "omitting unknown archive member '{entry_name}' from {}",
-                archive_path.display()
-            );
+            log::info!("omitting unknown archive member '{entry_name}'");
             Ok(ArchiveAction::Drop)
         }
         UnknownMemberPolicy::Abort => Err(CoreError::CleanError {
-            path: archive_path.to_path_buf(),
+            path: PathBuf::new(),
             detail: format!("unknown archive member '{entry_name}': aborting per policy"),
         }),
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use std::io::BufWriter;
     use tempfile::TempDir;
     use zip::write::SimpleFileOptions;
 

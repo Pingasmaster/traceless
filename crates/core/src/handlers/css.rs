@@ -8,16 +8,36 @@
 //! Single-line `//` comments are **not** valid CSS (they exist in
 //! SCSS/LESS preprocessors only), so we ignore them here.
 
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct CssHandler;
 
+/// Strip every `/* ... */` comment from a stylesheet, in memory. Shared
+/// by the native `clean_metadata` wrapper and the wasm `inmem` path. CSS
+/// is decoded as UTF-8 (lossy) before stripping, matching the native
+/// `read_to_string` behaviour.
+///
+/// # Errors
+///
+/// Returns [`CoreError::FileTooLarge`] if the buffer exceeds the input
+/// cap. Parsing itself is infallible (byte walk).
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let content = String::from_utf8_lossy(input);
+    Ok(strip_comments(&content).into_bytes())
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for CssHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -69,12 +89,11 @@ impl FormatHandler for CssHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let content = fs::read_to_string(path).map_err(|e| CoreError::ReadError {
+        let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        let cleaned = strip_comments(&content);
+        let cleaned = clean_bytes(&bytes, "css").map_err(|e| super::repath(e, path))?;
         fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to write cleaned CSS: {e}"),
@@ -90,6 +109,7 @@ impl FormatHandler for CssHandler {
 /// Walk the CSS source and return the text of every `/* … */` comment.
 /// The walker is *string-aware* so comment markers inside CSS string
 /// literals are not misinterpreted.
+#[cfg(feature = "native")]
 fn extract_comments(css: &str) -> Vec<String> {
     let bytes = css.as_bytes();
     let mut out = Vec::new();
@@ -170,7 +190,7 @@ fn strip_comments(css: &str) -> String {
             if i + 1 < bytes.len() {
                 i += 2;
             } else {
-                // Unterminated comment — drop the rest to avoid
+                // Unterminated comment - drop the rest to avoid
                 // re-emitting partial data.
                 break;
             }
@@ -182,7 +202,7 @@ fn strip_comments(css: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|_| css.to_string())
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

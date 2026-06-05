@@ -2,10 +2,10 @@
 //!
 //! HTML has two distinct metadata vectors:
 //! 1. `<meta>` elements in `<head>`. mat2's `HTMLParser` drops these
-//!    entirely (the "blocklist" approach — `tags_blocklist = {meta}`).
+//!    entirely (the "blocklist" approach - `tags_blocklist = {meta}`).
 //! 2. The contents of `<title>`. mat2 keeps the element (some readers
 //!    require it) but blanks the text inside it (the "required blocklist"
-//!    — `tags_required_blocklist = {title}`).
+//!    - `tags_required_blocklist = {title}`).
 //!
 //! We implement the same behavior at the byte level. HTML is not valid
 //! XML in the general case so we don't use quick-xml; instead we hand-
@@ -15,20 +15,40 @@
 //!
 //! Scope:
 //! - HTML5, XHTML, and hand-written mixed markup all work.
-//! - We do *not* apply entity escaping — we pass text through verbatim
+//! - We do *not* apply entity escaping - we pass text through verbatim
 //!   so hand-written entities round-trip intact.
 
 use std::borrow::Cow;
+#[cfg(feature = "native")]
 use std::fs;
+#[cfg(feature = "native")]
 use std::path::Path;
 
 use crate::error::CoreError;
+#[cfg(feature = "native")]
 use crate::metadata::{MetadataGroup, MetadataItem, MetadataSet};
 
+#[cfg(feature = "native")]
 use super::FormatHandler;
 
 pub struct HtmlHandler;
 
+/// Strip comments + metadata-bearing markup from an HTML/XHTML document,
+/// in memory. Shared by the native `clean_metadata` wrapper and the wasm
+/// `inmem` path. Decoded as UTF-8 (lossy) before cleaning, matching the
+/// native `read_to_string` behaviour.
+///
+/// # Errors
+///
+/// Returns [`CoreError::FileTooLarge`] if the buffer exceeds the input
+/// cap. The token walker itself is infallible.
+pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
+    super::check_input_len(input.len())?;
+    let src = String::from_utf8_lossy(input);
+    Ok(clean_html(&src).into_bytes())
+}
+
+#[cfg(feature = "native")]
 impl FormatHandler for HtmlHandler {
     fn read_metadata(&self, path: &Path) -> Result<MetadataSet, CoreError> {
         super::check_input_size(path)?;
@@ -53,12 +73,11 @@ impl FormatHandler for HtmlHandler {
 
     fn clean_metadata(&self, path: &Path, output_path: &Path) -> Result<(), CoreError> {
         super::check_input_size(path)?;
-        let src = fs::read_to_string(path).map_err(|e| CoreError::ReadError {
+        let bytes = fs::read(path).map_err(|e| CoreError::ReadError {
             path: path.to_path_buf(),
             source: e,
         })?;
-
-        let cleaned = clean_html(&src);
+        let cleaned = clean_bytes(&bytes, "html").map_err(|e| super::repath(e, path))?;
         fs::write(output_path, cleaned).map_err(|e| CoreError::CleanError {
             path: path.to_path_buf(),
             detail: format!("Failed to write cleaned HTML: {e}"),
@@ -116,7 +135,7 @@ fn tokenize(src: &str) -> Vec<Token<'_>> {
         // b == b'<'
         if i + 3 < len && &bytes[i..i + 4] == b"<!--" {
             // Comment: scan until `-->`. We don't need to preserve the
-            // content — the cleaner always drops comments.
+            // content - the cleaner always drops comments.
             i += 4;
             while i + 2 < len && &bytes[i..i + 3] != b"-->" {
                 i += 1;
@@ -325,6 +344,7 @@ fn local_from_close(inner: &str) -> String {
 /// The reader must stay aligned with `clean_html`: anything the
 /// cleaner drops should show up here, so the UI can warn the user
 /// before any bytes are rewritten.
+#[cfg(feature = "native")]
 fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
     let tokens = tokenize(src);
     let mut items: Vec<MetadataItem> = Vec::new();
@@ -476,12 +496,14 @@ fn extract_html_metadata(src: &str) -> Vec<MetadataItem> {
     items
 }
 
+#[cfg(feature = "native")]
 fn find_attr(attrs: &[(String, String)], name: &str) -> Option<String> {
     attrs
         .iter()
         .find_map(|(k, v)| (k == name).then(|| v.clone()))
 }
 
+#[cfg(feature = "native")]
 fn parse_attrs(tag_raw: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let bytes = tag_raw.as_bytes();
@@ -625,10 +647,8 @@ pub(crate) fn clean_html(src: &str) -> String {
                         drop_stack.push(local_name.clone());
                     }
                 }
-                Token::Close { local_name, .. } => {
-                    if *local_name == top {
-                        drop_stack.pop();
-                    }
+                Token::Close { local_name, .. } if *local_name == top => {
+                    drop_stack.pop();
                 }
                 _ => {}
             }
@@ -793,7 +813,7 @@ fn contains_on_attribute(raw: &str) -> bool {
     false
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "native"))]
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;

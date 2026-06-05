@@ -42,8 +42,7 @@ impl WorkerPool {
     fn new() -> Self {
         let (tx, rx) = async_channel::unbounded::<Job>();
         let worker_count = thread::available_parallelism()
-            .map(std::num::NonZero::get)
-            .unwrap_or(4)
+            .map_or(4, std::num::NonZero::get)
             .min(MAX_WORKERS);
         for _ in 0..worker_count {
             let rx: Receiver<Job> = rx.clone();
