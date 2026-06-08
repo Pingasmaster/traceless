@@ -52,15 +52,19 @@ enum ArchiveKind {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::CleanError`] if the input is not a valid ZIP, a
-/// member exceeds the decompression cap, or a part cannot be cleaned /
-/// re-packed.
+/// Returns [`CoreError::ParseError`] if the input is not a valid ZIP, or
+/// [`CoreError::CleanError`] if a member exceeds the decompression cap or a
+/// part cannot be cleaned / re-packed.
 pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
     super::check_input_len(input.len())?;
     let empty = std::path::PathBuf::new;
 
+    // Input is not a valid ZIP container (OOXML/ODF/EPUB are ZIP-based) ->
+    // ParseError (HTTP 422), not CleanError (500): a corrupt/truncated/non-ZIP
+    // body is a client error. The re-zip/write failures further down stay
+    // CleanError (genuine internal failures on an already-parsed archive).
     let mut archive =
-        ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::CleanError {
+        ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::ParseError {
             path: empty(),
             detail: format!("Not a valid ZIP archive: {e}"),
         })?;

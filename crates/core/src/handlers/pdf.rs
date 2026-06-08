@@ -97,12 +97,15 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::CleanError`] if the input cannot be parsed as a
-/// PDF or the rewritten document cannot be serialised.
+/// Returns [`CoreError::ParseError`] if the input cannot be parsed as a PDF,
+/// or [`CoreError::CleanError`] if the rewritten document cannot be serialised.
 pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError> {
     super::check_input_len(input.len())?;
     let empty = std::path::PathBuf::new;
-    let mut doc = Document::load_mem(input).map_err(|e| CoreError::CleanError {
+    // Input does not parse as a PDF -> ParseError (HTTP 422), not CleanError
+    // (500): a corrupt/truncated/non-PDF body is a client error. Only the
+    // post-parse save failure below stays CleanError.
+    let mut doc = Document::load_mem(input).map_err(|e| CoreError::ParseError {
         path: empty(),
         detail: format!("Failed to load PDF: {e}"),
     })?;

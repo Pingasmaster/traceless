@@ -55,8 +55,8 @@ fn is_ffmpeg_routed(mime: &str) -> bool {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::CleanError`] if the audio file cannot be parsed
-/// or a tag cannot be removed, [`CoreError::UnsupportedFormat`] for an
+/// Returns [`CoreError::ParseError`] if the audio file cannot be parsed,
+/// [`CoreError::CleanError`] if a tag cannot be removed, [`CoreError::UnsupportedFormat`] for an
 /// unknown extension, or [`CoreError::NotImplementedInWasm`] for the
 /// MP4-family containers.
 pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError> {
@@ -92,13 +92,16 @@ pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError>
     // so we mirror the native per-tag `remove_from` approach over a
     // `Cursor` instead of a `File`.
     let tag_types: Vec<TagType> = {
+        // Input does not probe/read as a supported audio file -> ParseError
+        // (HTTP 422), not CleanError (500): a malformed/wrong-format body is a
+        // client error. The per-tag remove + save failures below stay CleanError.
         let probe = lofty::probe::Probe::new(Cursor::new(input))
             .guess_file_type()
-            .map_err(|e| CoreError::CleanError {
+            .map_err(|e| CoreError::ParseError {
                 path: empty(),
                 detail: format!("Failed to probe audio file: {e}"),
             })?;
-        let tagged = probe.read().map_err(|e| CoreError::CleanError {
+        let tagged = probe.read().map_err(|e| CoreError::ParseError {
             path: empty(),
             detail: format!("Failed to read audio file: {e}"),
         })?;

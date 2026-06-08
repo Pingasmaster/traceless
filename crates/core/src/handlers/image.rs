@@ -47,8 +47,8 @@ fn ext_to_mime(ext: &str) -> Option<&'static str> {
 ///
 /// # Errors
 ///
-/// Returns [`CoreError::CleanError`] if the input cannot be parsed as a
-/// supported image or a post-strip pass fails, or
+/// Returns [`CoreError::ParseError`] if the input cannot be parsed as a
+/// supported image, [`CoreError::CleanError`] if a post-strip pass fails, or
 /// [`CoreError::UnsupportedFormat`] for an extension this handler does
 /// not own.
 pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError> {
@@ -119,11 +119,15 @@ pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError>
             };
             Ok(final_data)
         }
-        Ok(None) => Err(CoreError::CleanError {
+        // Input does not parse as an image -> ParseError (HTTP 422), not
+        // CleanError (500): a malformed/truncated/wrong-format body is a client
+        // error, mirroring the native path and the gif/svg handlers. Only the
+        // post-parse strip/encode failures above stay CleanError.
+        Ok(None) => Err(CoreError::ParseError {
             path: std::path::PathBuf::new(),
             detail: "Could not parse image".to_string(),
         }),
-        Err(e) => Err(CoreError::CleanError {
+        Err(e) => Err(CoreError::ParseError {
             path: std::path::PathBuf::new(),
             detail: format!("Image parse error: {e}"),
         }),
