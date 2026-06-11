@@ -106,6 +106,15 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
 
     let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
 
+    // Cumulative decompressed-size guard. The per-member `.take(...)` cap
+    // below bounds any single member, but a small office archive can pack
+    // several near-cap members whose summed decompressed size is unbounded
+    // (a multi-member zip-bomb that blows the wasm linear-memory ceiling
+    // while we hold each member's buffer plus the accumulating ZipWriter
+    // output). Mirror `archive.rs`: track the running total and reject past
+    // the shared aggregate cap, honouring `limits_disabled()`.
+    let mut total_decompressed: u64 = 0;
+
     for entry_name in &names {
         if should_omit(kind, entry_name) {
             continue;
@@ -145,6 +154,25 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
                          {}-byte decompression cap; refusing to clean \
                          (likely a zip bomb)",
                         super::archive::MAX_ENTRY_DECOMPRESSED_BYTES
+                    ),
+                });
+            }
+            // Aggregate cap: fold this member's decompressed size into the
+            // running total and reject once the cumulative size exceeds the
+            // shared archive cap. Done after the per-entry check so a single
+            // oversized member is still reported as such first, and while
+            // `buf` is still in scope.
+            total_decompressed = total_decompressed.saturating_add(buf.len() as u64);
+            if !crate::config::limits_disabled()
+                && total_decompressed > super::archive::MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES
+            {
+                return Err(CoreError::CleanError {
+                    path: empty(),
+                    detail: format!(
+                        "document archive exceeds the {}-byte cumulative \
+                         decompression cap; refusing to clean (likely a \
+                         multi-member zip bomb)",
+                        super::archive::MAX_ARCHIVE_TOTAL_DECOMPRESSED_BYTES
                     ),
                 });
             }
@@ -771,6 +799,78 @@ pub(crate) fn clean_xml_metadata_lightweight_for_tests(xml: &str) -> String {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    // ---------- cumulative decompression cap (multi-member zip bomb) ----------
+
+    #[test]
+    fn clean_bytes_rejects_cumulative_decompression_bomb() {
+        // Build a valid-looking OOXML zip whose individual members each stay
+        // at/under the per-entry cap (4 MiB under cfg(test)) but whose summed
+        // decompressed size exceeds the 16 MiB cumulative cap. Each `.bin`
+        // member is highly compressible (zeros) so the fixture itself is tiny.
+        const ENTRY: usize = 4 * 1024 * 1024; // == MAX_ENTRY_DECOMPRESSED_BYTES (test)
+        let zeros = vec![0u8; ENTRY];
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+
+        writer.start_file("[Content_Types].xml", opts).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+            )
+            .unwrap();
+        writer.start_file("word/document.xml", opts).unwrap();
+        writer
+            .write_all(br#"<?xml version="1.0"?><document/>"#)
+            .unwrap();
+
+        // Five 4 MiB members => 20 MiB decompressed, past the 16 MiB cap.
+        for i in 0..5 {
+            writer.start_file(format!("word/media/bomb{i}.bin"), opts).unwrap();
+            writer.write_all(&zeros).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+
+        let err = clean_bytes(&bytes, "docx").unwrap_err();
+        match err {
+            CoreError::CleanError { detail, .. } => {
+                assert!(
+                    detail.contains("cumulative"),
+                    "expected cumulative-cap error, got: {detail}"
+                );
+            }
+            other => panic!("expected CleanError, got: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn clean_bytes_accepts_within_cumulative_cap() {
+        // A legitimate office doc whose total decompressed size stays under
+        // the cumulative cap must clean successfully (regression guard so the
+        // new aggregate check does not reject normal documents).
+        const ENTRY: usize = 2 * 1024 * 1024;
+        let zeros = vec![0u8; ENTRY];
+
+        let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
+        let opts =
+            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        writer.start_file("[Content_Types].xml", opts).unwrap();
+        writer
+            .write_all(
+                br#"<?xml version="1.0"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"/>"#,
+            )
+            .unwrap();
+        // Two 2 MiB members => 4 MiB total, comfortably under the 16 MiB cap.
+        for i in 0..2 {
+            writer.start_file(format!("word/media/img{i}.bin"), opts).unwrap();
+            writer.write_all(&zeros).unwrap();
+        }
+        let bytes = writer.finish().unwrap().into_inner();
+
+        assert!(clean_bytes(&bytes, "docx").is_ok());
+    }
 
     // ---------- parse_xml_metadata ----------
 
