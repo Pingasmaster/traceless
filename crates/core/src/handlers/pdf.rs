@@ -89,6 +89,18 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
     b"B", // Beads (article threads)
 ];
 
+/// Identifying keys to strip from page-tree INTERIOR (`/Type /Pages`) nodes,
+/// including the /Pages root. `page_iter()` (step 5) yields only LEAF /Page
+/// objects, so an XMP `/Metadata` stream (or `/PieceInfo` / `/AA` /
+/// `/LastModified`) hanging off a /Pages node would otherwise survive: the
+/// node is a Dictionary (step 6 skips non-streams) and the XMP packet is a
+/// /Type /Metadata stream with no /Width (step 6 skips that too), and it
+/// stays reachable from the catalog so the final prune keeps it. ISO 32000-1
+/// §7.7.3.2 lets these hang off any node of the page tree. Mirrors the
+/// equivalent step in efrei.app's compress_pdf.rs.
+const PAGES_NODE_KEYS_TO_STRIP: &[&[u8]] =
+    &[b"Metadata", b"PieceInfo", b"AA", b"LastModified"];
+
 /// Strip every metadata-bearing key from a PDF, in memory: drops the
 /// `/Info` dict, randomises trailer `/ID`, prunes catalog / `/Names` /
 /// per-page / XObject metadata, then re-saves. Shared by the native
@@ -470,6 +482,41 @@ fn clean_document(doc: &mut Document) {
                 stream.dict.remove(b"OC"); // Optional content (layers)
                 stream.dict.remove(b"PieceInfo");
             }
+        }
+
+        // --- 6b. Page-tree INTERIOR (/Pages) nodes -------------------------
+        // page_iter() (step 5) only visits leaf /Page dicts, so strip the
+        // same identifying keys from every /Type /Pages node (root +
+        // intermediate) and orphan any indirect stream they reference so the
+        // prune below removes the XMP residue. Mirrors compress_pdf.rs.
+        let pages_node_ids: Vec<ObjectId> = doc
+            .objects
+            .iter()
+            .filter_map(|(id, obj)| match obj {
+                Object::Dictionary(d) => {
+                    matches!(d.get(b"Type"), Ok(Object::Name(n)) if n == b"Pages")
+                        .then_some(*id)
+                }
+                _ => None,
+            })
+            .collect();
+        let mut pages_refs_to_delete: Vec<ObjectId> = Vec::new();
+        for node_id in &pages_node_ids {
+            if let Some(Object::Dictionary(d)) = doc.objects.get(node_id) {
+                for key in PAGES_NODE_KEYS_TO_STRIP {
+                    if let Ok(id) = d.get(key).and_then(Object::as_reference) {
+                        pages_refs_to_delete.push(id);
+                    }
+                }
+            }
+            if let Some(Object::Dictionary(d)) = doc.objects.get_mut(node_id) {
+                for key in PAGES_NODE_KEYS_TO_STRIP {
+                    d.remove(key);
+                }
+            }
+        }
+        for id in pages_refs_to_delete {
+            doc.delete_object(id);
         }
 
     // --- 7. Prune orphaned objects after all the deletions -------------
@@ -865,6 +912,92 @@ mod tests {
                 String::from_utf8_lossy(key)
             );
         }
+    }
+
+    #[test]
+    fn clean_strips_metadata_from_pages_interior_node() {
+        // Regression for the strip-metadata leak: an XMP /Metadata stream
+        // (plus /PieceInfo and /AA) hanging off the /Pages page-tree root
+        // is not visited by page_iter() (leaf-only), so step 5 misses it.
+        // Step 6b must strip those keys and orphan the XMP stream so the
+        // final prune drops it from the serialized output.
+        let dir = TempDir::new().unwrap();
+        let src = dir.path().join("in.pdf");
+        let dst = dir.path().join("out.pdf");
+
+        let mut doc = PdfDoc::with_version("1.7");
+        // XMP packet with a recognizable creator token.
+        let xmp_stream = doc.add_object(Object::Stream(Stream::new(
+            Dictionary::new(),
+            b"<?xpacket?><rdf:RDF><dc:creator>PAGES-ROOT-LEAK</dc:creator></rdf:RDF>".to_vec(),
+        )));
+        let pages_id = doc.new_object_id();
+        let page_id = doc.new_object_id();
+        doc.objects.insert(
+            page_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Page".to_vec()),
+                "Parent" => Object::Reference(pages_id),
+                "MediaBox" => Object::Array(vec![
+                    Object::Integer(0), Object::Integer(0),
+                    Object::Integer(612), Object::Integer(792),
+                ]),
+                "Resources" => Object::Dictionary(Dictionary::new()),
+            }),
+        );
+        // The /Pages root carries /Metadata + /PieceInfo + /AA.
+        doc.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => Object::Name(b"Pages".to_vec()),
+                "Count" => Object::Integer(1),
+                "Kids" => Object::Array(vec![Object::Reference(page_id)]),
+                "Metadata" => Object::Reference(xmp_stream),
+                "PieceInfo" => dictionary! { "App" => Object::string_literal("leak") },
+                "AA" => dictionary! { "O" => Object::string_literal("leak") },
+            }),
+        );
+        let catalog_id = doc.add_object(dictionary! {
+            "Type" => Object::Name(b"Catalog".to_vec()),
+            "Pages" => Object::Reference(pages_id),
+        });
+        doc.trailer.set("Root", Object::Reference(catalog_id));
+        doc.save(&src).unwrap();
+
+        // Sanity: the dirty input carries the XMP creator token.
+        let dirty = std::fs::read(&src).unwrap();
+        assert!(
+            dirty.windows(b"PAGES-ROOT-LEAK".len()).any(|w| w == b"PAGES-ROOT-LEAK"),
+            "fixture must contain the XMP creator token before cleaning"
+        );
+
+        PdfHandler.clean_metadata(&src, &dst).unwrap();
+
+        // The /Pages node must no longer carry the identifying keys.
+        let reloaded = reload_catalog(&dst);
+        let mut found_pages = false;
+        for obj in reloaded.objects.values() {
+            if let Object::Dictionary(d) = obj
+                && matches!(d.get(b"Type"), Ok(Object::Name(n)) if n == b"Pages")
+            {
+                found_pages = true;
+                for key in PAGES_NODE_KEYS_TO_STRIP {
+                    assert!(
+                        d.get(key).is_err(),
+                        "/Pages node retained {} after clean",
+                        String::from_utf8_lossy(key)
+                    );
+                }
+            }
+        }
+        assert!(found_pages, "cleaned PDF must still have a /Pages node");
+
+        // And the orphaned XMP stream bytes must be gone from the output.
+        let cleaned = std::fs::read(&dst).unwrap();
+        assert!(
+            !cleaned.windows(b"PAGES-ROOT-LEAK".len()).any(|w| w == b"PAGES-ROOT-LEAK"),
+            "XMP creator token survived in cleaned /Pages-node PDF"
+        );
     }
 
     #[test]

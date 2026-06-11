@@ -19,8 +19,11 @@
 //
 // - `moov/udta` (the whole user-data subtree: its `meta`/`keys`/`ilst`
 //   children, the freeform `©xyz` GPS atom, encoder name, etc.).
-// - `moov/meta` (the file-level metadata box, iTunes-style).
+// - `moov/meta` (the metadata box inside moov, iTunes-style).
 // - every per-`trak` `udta` and `trak`-level `meta`.
+// - a top-level (file-level) `meta` box (ISO 14496-12 §8.11.1, an
+//   iTunes/QuickTime metadata sibling of `moov`; the native ffmpeg
+//   `-map_metadata -1` baseline drops it too).
 // - top-level `free` / `skip` / `uuid` boxes (and `free`/`skip` found
 //   anywhere we rewrite).
 //
@@ -163,6 +166,13 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut cur = Cursor::new(input);
     let mut saw_ftyp = false;
     let mut saw_moov = false;
+    // Track whether we have passed `mdat` yet, and the cumulative size of
+    // every top-level box we DROP *before* `mdat`. Chunk offsets in
+    // `stco`/`co64` are absolute into the file, so any box dropped ahead of
+    // `mdat` shifts the media payload earlier and must be compensated for
+    // (see the offset-patch block below), not just the `moov` shrink.
+    let mut saw_mdat = false;
+    let mut pre_mdat_dropped: usize = 0;
     loop {
         let pos = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
         if pos == input.len() {
@@ -193,9 +203,23 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         if &kind4 == MOOV {
             saw_moov = true;
         }
+        if &kind4 == MDAT {
+            saw_mdat = true;
+        }
 
-        // Drop top-level free/skip/uuid; everything else is recorded.
-        if matches!(&kind4, FREE | SKIP | UUID) {
+        // Drop top-level free/skip/uuid and a file-level (top-level) `meta`
+        // box (ISO 14496-12 §8.11.1, an iTunes/QuickTime metadata sibling
+        // of moov; the native ffmpeg `-map_metadata -1` baseline drops it).
+        // Everything else is recorded and passes through verbatim.
+        if matches!(&kind4, FREE | SKIP | UUID | META) {
+            // Track the size of anything dropped *before* mdat so chunk
+            // offsets (absolute into mdat) can be compensated below. A
+            // box at or after mdat does not shift mdat, so it adds nothing.
+            if !saw_mdat {
+                pre_mdat_dropped = pre_mdat_dropped
+                    .checked_add(total)
+                    .ok_or_else(|| parse_err("dropped-size overflow"))?;
+            }
             continue;
         }
         top.push(TopBox { kind: kind4, start: box_start, end: box_end });
@@ -229,12 +253,23 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     let old_moov_total = moov_box.len();
     let new_moov = rewrite_moov(moov_box)?;
     let new_moov_total = new_moov.len();
-    let delta = old_moov_total
+    let moov_delta = old_moov_total
         .checked_sub(new_moov_total)
         .ok_or_else(|| clean_err("moov grew during strip (unexpected)"))?;
 
-    let new_moov = if moov_before_mdat && delta != 0 {
-        patch_chunk_offsets(new_moov, delta)?
+    // mdat's absolute position drops by every top-level box dropped before
+    // mdat (`pre_mdat_dropped`) PLUS the moov shrink (only when moov itself
+    // precedes mdat). Patch chunk offsets whenever mdat exists and anything
+    // ahead of it shrank, not just when moov precedes mdat: a top-level
+    // `meta` dropped before an mdat-first moov still shifts mdat.
+    let mut total_shift = pre_mdat_dropped;
+    if moov_before_mdat {
+        total_shift = total_shift
+            .checked_add(moov_delta)
+            .ok_or_else(|| clean_err("offset shift overflow"))?;
+    }
+    let new_moov = if mdat_idx.is_some() && total_shift != 0 {
+        patch_chunk_offsets(new_moov, total_shift)?
     } else {
         new_moov
     };
@@ -734,11 +769,18 @@ mod tests {
         let free = boxed(b"free", &[0u8; 32]);
         let uuid = boxed(b"uuid", b"\x11\x22\x33\x44\x55\x66\x77\x88\x99\xAA\xBB\xCC\xDD\xEE\xFF\x00LEAKYUUIDPAYLOAD");
 
+        // free/skip/uuid are placed AFTER mdat so that nothing droppable
+        // precedes mdat: this keeps the test's "mdat-first, no offset patch"
+        // intent intact. (A droppable box BEFORE mdat now correctly shifts
+        // the chunk offsets; that path is covered by the faststart and
+        // top-level-meta tests.)
+        let skip = boxed(b"skip", &[0u8; 16]);
         let mut input = Vec::new();
         input.extend_from_slice(&ftyp());
-        input.extend_from_slice(&free);
         input.extend_from_slice(&mdat);
         input.extend_from_slice(&moov);
+        input.extend_from_slice(&free);
+        input.extend_from_slice(&skip);
         input.extend_from_slice(&uuid);
 
         // Sanity: the metadata IS present in the dirty input.
@@ -866,6 +908,113 @@ mod tests {
         bad.extend_from_slice(b"isom");
         let err = strip(&bad);
         assert!(err.is_err(), "truncated box should error");
+    }
+
+    /// Build a top-level (file-level) `meta` box (sibling of moov) holding
+    /// a keys/ilst tree with a recognizable secret tag.
+    fn file_level_meta() -> Vec<u8> {
+        let nam = boxed(b"\xA9nam", b"TOPLEVEL-META-SECRET");
+        let ilst = boxed(b"ilst", &nam);
+        let keys = boxed(b"keys", b"com.apple.quicktime.location=GPS-TOP-SECRET");
+        let mut m = fullbox_body(&[]);
+        m.extend_from_slice(&keys);
+        m.extend_from_slice(&ilst);
+        boxed(b"meta", &m)
+    }
+
+    /// A top-level `meta` box (sibling of moov) carrying iTunes/QuickTime
+    /// tags must be dropped, and a faststart `meta`-before-mdat layout must
+    /// shift the stco offsets by exactly (meta_size + moov_delta).
+    #[test]
+    fn drops_top_level_meta_faststart() {
+        let meta = file_level_meta();
+        let meta_size = meta.len();
+
+        // moov uses NO file-level metadata so its own delta is predictable;
+        // but build_moov already adds udta + an inner meta, giving a known
+        // shrink. We only need the offsets high enough not to underflow.
+        let orig_offsets = [1_000_000u32, 2_000_000u32];
+        let stco = stco_body(&orig_offsets);
+        let moov = build_moov(&stco);
+        let mdat_payload = b"FASTSTART-WITH-TOPLEVEL-META";
+        let mdat = boxed(b"mdat", mdat_payload);
+
+        // Layout: ftyp | meta(file-level) | moov | mdat. Both meta and moov
+        // precede mdat, so both shifts apply.
+        let mut input = Vec::new();
+        input.extend_from_slice(&ftyp());
+        input.extend_from_slice(&meta);
+        input.extend_from_slice(&moov);
+        input.extend_from_slice(&mdat);
+
+        // Sanity: the secret tags are present in the dirty input.
+        assert!(input.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"));
+        assert!(input.windows(b"GPS-TOP-SECRET".len()).any(|w| w == b"GPS-TOP-SECRET"));
+
+        let old_moov_total = moov.len();
+        let out = strip(&input).unwrap();
+
+        // The file-level meta and its tags are gone.
+        assert!(!box_present(&out, b"meta"), "top-level meta survived");
+        assert!(!out.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"),
+            "top-level meta title tag leaked");
+        assert!(!out.windows(b"GPS-TOP-SECRET".len()).any(|w| w == b"GPS-TOP-SECRET"),
+            "top-level meta GPS tag leaked");
+
+        // Top-level layout is now ftyp | moov | mdat (meta dropped).
+        let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(tl, vec![*b"ftyp", *b"moov", *b"mdat"], "top-level box set wrong");
+
+        // stco shifted by exactly (meta_size + moov_delta).
+        let new_moov_total = top_level(&out)
+            .into_iter()
+            .find(|(k, _)| k == b"moov")
+            .map(|(_, sz)| sz)
+            .expect("moov present");
+        let moov_delta = old_moov_total - new_moov_total;
+        let total_shift = (meta_size + moov_delta) as u32;
+        let patched = read_first_stco(&out);
+        let expected: Vec<u32> = orig_offsets.iter().map(|o| o - total_shift).collect();
+        assert_eq!(patched, expected, "stco not shifted by meta_size + moov_delta");
+
+        // mdat payload untouched.
+        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat altered");
+    }
+
+    /// mdat-first variant: ftyp | mdat | meta | moov. The file-level meta
+    /// sits AFTER mdat, so it must still be dropped but the stco offsets are
+    /// NOT patched (nothing ahead of mdat shrank).
+    #[test]
+    fn drops_top_level_meta_mdat_first_no_patch() {
+        let meta = file_level_meta();
+        let stco = stco_body(&[16, 40, 88]);
+        let moov = build_moov(&stco);
+        let mdat_payload = b"MDAT-FIRST-THEN-META";
+        let mdat = boxed(b"mdat", mdat_payload);
+
+        let mut input = Vec::new();
+        input.extend_from_slice(&ftyp());
+        input.extend_from_slice(&mdat);
+        input.extend_from_slice(&meta);
+        input.extend_from_slice(&moov);
+
+        assert!(input.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"));
+
+        let out = strip(&input).unwrap();
+
+        // meta and its tags gone.
+        assert!(!box_present(&out, b"meta"), "top-level meta survived (mdat-first)");
+        assert!(!out.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"),
+            "top-level meta tag leaked (mdat-first)");
+
+        // stco NOT patched: meta sits after mdat, so no shift.
+        assert_eq!(read_first_stco(&out), vec![16, 40, 88],
+            "stco changed for a meta dropped after mdat");
+
+        // mdat untouched, top-level now ftyp | mdat | moov.
+        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat altered");
+        let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
+        assert_eq!(tl, vec![*b"ftyp", *b"mdat", *b"moov"], "top-level box set wrong");
     }
 
     #[test]
