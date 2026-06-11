@@ -59,22 +59,52 @@ pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError>
         });
     };
 
-    // TIFF, HEIC/HEIF and JXL are not handled by img-parts::DynImage.
-    // little_exif clears the EXIF IFD (TIFF/HEIF) or the exif box (JXL)
-    // in place over a byte buffer without re-encoding the pixel data.
-    if matches!(mime, "image/tiff" | "image/heic" | "image/heif" | "image/jxl") {
-        let file_type = match mime {
-            "image/tiff" => FileExtension::TIFF,
-            "image/jxl" => FileExtension::JXL,
-            // both heic and heif route through HEIF
-            _ => FileExtension::HEIF,
-        };
+    // TIFF is not handled by img-parts::DynImage. little_exif clears the
+    // EXIF IFD in place over a byte buffer without re-encoding the pixel
+    // data. (TIFF carries its metadata in the EXIF IFD only, so the
+    // Exif-only clear is sufficient here.)
+    if mime == "image/tiff" {
         let mut buf = input.to_vec();
-        ExifMetadata::clear_metadata(&mut buf, file_type).map_err(|e| CoreError::CleanError {
-            path: std::path::PathBuf::new(),
-            detail: format!("Failed to clear metadata: {e}"),
+        ExifMetadata::clear_metadata(&mut buf, FileExtension::TIFF).map_err(|e| {
+            CoreError::CleanError {
+                path: std::path::PathBuf::new(),
+                detail: format!("Failed to clear metadata: {e}"),
+            }
         })?;
         return Ok(buf);
+    }
+
+    // JPEG-XL: little_exif's `clear_metadata(.., JXL)` only drops the
+    // `Exif` (and `brob`-wrapped-Exif) box, leaving the `xml ` (XMP) and
+    // `jumb`/`jumbf` (JUMBF / C2PA) boxes that carry the most identifying
+    // metadata (dc:creator, GPS, xmpMM:InstanceID). Walk the ISO-BMFF box
+    // list ourselves and drop every metadata box. A bare codestream
+    // (0xFF 0x0A) carries no metadata and is returned unchanged.
+    if mime == "image/jxl" {
+        return strip_jxl_boxes(input);
+    }
+
+    // HEIC/HEIF: little_exif's HEIF clear only blanks the Exif *item*; it
+    // never touches the separate XMP item (`infe` of content-type
+    // application/rdf+xml) nor the `colr` box that holds the embedded ICC
+    // profile. Both fingerprint the capture/edit device. We first run the
+    // little_exif Exif clear, then sweep the ISO-BMFF tree ourselves to
+    // neutralize the XMP item payload and the ICC profile in every `colr`
+    // box. Zeroing in place (rather than deleting bytes) keeps every
+    // `iloc` extent offset valid so the file still decodes.
+    if matches!(mime, "image/heic" | "image/heif") {
+        let mut buf = input.to_vec();
+        ExifMetadata::clear_metadata(&mut buf, FileExtension::HEIF).map_err(|e| {
+            CoreError::CleanError {
+                path: std::path::PathBuf::new(),
+                detail: format!("Failed to clear metadata: {e}"),
+            }
+        })?;
+        let swept = strip_heif_extra_metadata(&buf).ok_or_else(|| CoreError::CleanError {
+            path: std::path::PathBuf::new(),
+            detail: "HEIF post-strip failed; refusing to ship partially-stripped image".to_string(),
+        })?;
+        return Ok(swept);
     }
 
     match DynImage::from_bytes(input.to_vec().into()) {
@@ -386,6 +416,491 @@ fn strip_webp_extra_chunks(data: &[u8]) -> Option<Vec<u8>> {
         .write_to(&mut BufWriter::new(Cursor::new(&mut buf)))
         .ok()?;
     Some(buf)
+}
+
+// -------------------------------------------------------------------------
+// JPEG-XL ISO-BMFF metadata stripper
+// -------------------------------------------------------------------------
+
+/// JPEG-XL metadata stripper. `little_exif`'s `clear_metadata(.., JXL)`
+/// only drops the `Exif` (and `brob`-wrapped-Exif) box, leaving the
+/// `xml ` (XMP) and `jumb`/`jumbf` (JUMBF / C2PA) boxes that carry the
+/// most identifying metadata (dc:creator, GPS, xmpMM:InstanceID). We walk
+/// the ISO-BMFF box list ourselves and drop every metadata box, keeping
+/// only structural and codestream boxes. A bare codestream (`0xFF 0x0A`)
+/// carries no metadata, so it is returned unchanged.
+///
+/// JXL container boxes are flat (no internal absolute-offset references
+/// the way HEIF `iloc` has), so physically removing a metadata box is
+/// safe and does not corrupt sibling boxes.
+fn strip_jxl_boxes(input: &[u8]) -> Result<Vec<u8>, CoreError> {
+    const SIG_CODESTREAM: [u8; 2] = [0xFF, 0x0A];
+    const SIG_ISOBMFF: [u8; 12] = [
+        0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+    ];
+
+    let parse_err = |detail: &str| CoreError::ParseError {
+        path: std::path::PathBuf::new(),
+        detail: detail.to_string(),
+    };
+
+    // Bare codestream: no container, no metadata. Clean passthrough (NOT a
+    // 500). Must be checked before the ISO-BMFF branch.
+    if input.starts_with(&SIG_CODESTREAM) {
+        return Ok(input.to_vec());
+    }
+    if !input.starts_with(&SIG_ISOBMFF) {
+        return Err(parse_err("Not an ISO-BMFF JXL file"));
+    }
+
+    // Box types to DROP. `brob` payloads are inspected for their wrapped
+    // type so a brob-compressed xml/Exif/jumb is also dropped.
+    // ISO-BMFF box types are exactly 4 bytes: `xml ` (XMP), `Exif`, and
+    // `jumb` (the JUMBF superbox, which carries C2PA / JPEG-universal
+    // metadata). All four-byte fourccs.
+    const fn is_metadata_type(ty: [u8; 4]) -> bool {
+        matches!(&ty, b"xml " | b"Exif" | b"jumb")
+    }
+
+    let len = input.len();
+    let mut out: Vec<u8> = Vec::with_capacity(len);
+    let mut pos: usize = 0;
+
+    while pos + 8 <= len {
+        let box_size = u32::from_be_bytes([
+            input[pos],
+            input[pos + 1],
+            input[pos + 2],
+            input[pos + 3],
+        ]) as usize;
+        let ty = [
+            input[pos + 4],
+            input[pos + 5],
+            input[pos + 6],
+            input[pos + 7],
+        ];
+
+        // Resolve actual box extent. size==1 => 64-bit largesize in the
+        // next 8 bytes; size==0 => box runs to EOF.
+        let box_end = if box_size == 1 {
+            if pos + 16 > len {
+                return Err(parse_err("Truncated JXL extended-size box"));
+            }
+            let large = u64::from_be_bytes([
+                input[pos + 8],
+                input[pos + 9],
+                input[pos + 10],
+                input[pos + 11],
+                input[pos + 12],
+                input[pos + 13],
+                input[pos + 14],
+                input[pos + 15],
+            ]);
+            let large = usize::try_from(large).map_err(|_| parse_err("JXL box too large"))?;
+            pos.checked_add(large)
+                .ok_or_else(|| parse_err("JXL box length overflow"))?
+        } else if box_size == 0 {
+            len
+        } else {
+            pos.checked_add(box_size)
+                .ok_or_else(|| parse_err("JXL box length overflow"))?
+        };
+
+        if box_size != 0 && (box_end < pos + 8 || box_end > len) {
+            return Err(parse_err("JXL box length out of range"));
+        }
+
+        // Decide whether to drop. For `brob`, inspect the wrapped type
+        // (first 4 bytes of payload) to catch brob-compressed metadata.
+        let drop = if &ty == b"brob" {
+            let payload = pos + 8 + if box_size == 1 { 8 } else { 0 };
+            payload + 4 <= box_end
+                && is_metadata_type([
+                    input[payload],
+                    input[payload + 1],
+                    input[payload + 2],
+                    input[payload + 3],
+                ])
+        } else {
+            is_metadata_type(ty)
+        };
+
+        if !drop {
+            out.extend_from_slice(&input[pos..box_end]);
+        }
+
+        pos = box_end;
+        if box_size == 0 {
+            break;
+        }
+    }
+
+    Ok(out)
+}
+
+// -------------------------------------------------------------------------
+// HEIC / HEIF ISO-BMFF metadata stripper
+// -------------------------------------------------------------------------
+
+/// Read a big-endian `u32` at `off`, or `None` if out of range.
+fn be_u32(buf: &[u8], off: usize) -> Option<u32> {
+    let end = off.checked_add(4)?;
+    if end > buf.len() {
+        return None;
+    }
+    Some(u32::from_be_bytes([
+        buf[off],
+        buf[off + 1],
+        buf[off + 2],
+        buf[off + 3],
+    ]))
+}
+
+/// Resolve one ISO-BMFF box header at `pos`. Returns
+/// `(payload_start, box_end, fourcc)`. Handles 64-bit `largesize`
+/// (`size == 1`) and box-to-EOF (`size == 0`). Returns `None` on any
+/// truncation / overflow / out-of-range length.
+fn parse_box(buf: &[u8], pos: usize) -> Option<(usize, usize, [u8; 4])> {
+    if pos + 8 > buf.len() {
+        return None;
+    }
+    let size32 = be_u32(buf, pos)? as usize;
+    let ty = [buf[pos + 4], buf[pos + 5], buf[pos + 6], buf[pos + 7]];
+    let (payload_start, box_end) = if size32 == 1 {
+        if pos + 16 > buf.len() {
+            return None;
+        }
+        let large = u64::from_be_bytes([
+            buf[pos + 8],
+            buf[pos + 9],
+            buf[pos + 10],
+            buf[pos + 11],
+            buf[pos + 12],
+            buf[pos + 13],
+            buf[pos + 14],
+            buf[pos + 15],
+        ]);
+        let large = usize::try_from(large).ok()?;
+        (pos + 16, pos.checked_add(large)?)
+    } else if size32 == 0 {
+        (pos + 8, buf.len())
+    } else {
+        (pos + 8, pos.checked_add(size32)?)
+    };
+    if box_end < payload_start || box_end > buf.len() {
+        return None;
+    }
+    Some((payload_start, box_end, ty))
+}
+
+/// HEIF metadata sweep performed *after* the little_exif Exif clear. It
+/// (1) finds every XMP item (an `infe` of item_type `mime` whose
+/// content_type is `application/rdf+xml`) and zeroes its data extents, and
+/// (2) zeroes the ICC payload of every `colr` box of type `prof` / `rICC`.
+///
+/// Removal is done by overwriting the identifying bytes with zero rather
+/// than physically deleting them: HEIF `iloc` extents are absolute byte
+/// offsets, so shrinking the buffer would corrupt every other item's
+/// offsets. Zeroing keeps the container structurally valid and decodable
+/// while making the XMP packet and ICC profile unrecoverable.
+///
+/// Returns `None` only on a structural parse failure (so the caller can
+/// refuse to ship a partially-stripped image); a HEIF that simply has no
+/// XMP / ICC returns `Some` with the buffer unchanged.
+fn strip_heif_extra_metadata(input: &[u8]) -> Option<Vec<u8>> {
+    let mut out = input.to_vec();
+
+    // Locate the top-level `meta` box. Also note `idat`'s payload start so
+    // construction_method==1 (idat-relative) extents resolve correctly.
+    let mut meta: Option<(usize, usize)> = None; // (payload_start, end)
+    let mut pos = 0usize;
+    while pos + 8 <= out.len() {
+        let (pstart, end, ty) = parse_box(&out, pos)?;
+        if &ty == b"meta" {
+            meta = Some((pstart, end));
+        }
+        if end <= pos {
+            return None; // zero-length: refuse rather than spin
+        }
+        pos = end;
+    }
+    let Some((meta_payload, meta_end)) = meta else {
+        // No meta box: nothing item-based to strip (and no colr lives
+        // outside meta). Return unchanged.
+        return Some(out);
+    };
+
+    // `meta` is a FullBox: 4 bytes version/flags before its child boxes.
+    let meta_children = meta_payload.checked_add(4)?;
+    if meta_children > meta_end {
+        return None;
+    }
+
+    // Walk meta's children to find iinf, iloc, idat, iprp.
+    let mut iinf: Option<(usize, usize)> = None;
+    let mut iloc: Option<(usize, usize)> = None;
+    let mut idat_payload: Option<usize> = None;
+    let mut iprp: Option<(usize, usize)> = None;
+    let mut c = meta_children;
+    while c + 8 <= meta_end {
+        let (pstart, end, ty) = parse_box(&out, c)?;
+        match &ty {
+            b"iinf" => iinf = Some((pstart, end)),
+            b"iloc" => iloc = Some((pstart, end)),
+            b"idat" => idat_payload = Some(pstart),
+            b"iprp" => iprp = Some((pstart, end)),
+            _ => {}
+        }
+        if end <= c {
+            return None;
+        }
+        c = end;
+    }
+
+    // (1) Collect XMP item IDs from iinf.
+    let mut xmp_ids: Vec<u32> = Vec::new();
+    if let Some((iinf_payload, iinf_end)) = iinf {
+        // iinf FullBox: version(1)+flags(3), then entry_count
+        // (u16 for version 0, u32 for version >= 1), then `infe` children.
+        let version = *out.get(iinf_payload)?;
+        let mut ic = if version == 0 {
+            iinf_payload.checked_add(4 + 2)?
+        } else {
+            iinf_payload.checked_add(4 + 4)?
+        };
+        while ic + 8 <= iinf_end {
+            let (infe_payload, infe_end, ty) = parse_box(&out, ic)?;
+            if &ty == b"infe"
+                && let Some(id) = parse_infe_xmp_id(&out, infe_payload, infe_end)
+            {
+                xmp_ids.push(id);
+            }
+            if infe_end <= ic {
+                return None;
+            }
+            ic = infe_end;
+        }
+    }
+
+    // (2) For each XMP item, zero its data extents (from iloc).
+    if !xmp_ids.is_empty()
+        && let Some((iloc_payload, iloc_end)) = iloc
+    {
+        zero_item_extents(&mut out, iloc_payload, iloc_end, idat_payload, &xmp_ids)?;
+    }
+
+    // (3) Zero the ICC payload of every `colr` box of type prof/rICC,
+    // found under meta -> iprp -> ipco.
+    if let Some((iprp_payload, iprp_end)) = iprp {
+        let mut p = iprp_payload;
+        while p + 8 <= iprp_end {
+            let (ipco_payload, ipco_end, ty) = parse_box(&out, p)?;
+            if &ty == b"ipco" {
+                zero_colr_icc(&mut out, ipco_payload, ipco_end)?;
+            }
+            if ipco_end <= p {
+                return None;
+            }
+            p = ipco_end;
+        }
+    }
+
+    Some(out)
+}
+
+/// Parse one `infe` (FullBox) payload and return the item_ID iff this is an
+/// XMP item: item_type == `mime` and content_type == `application/rdf+xml`.
+/// Supports infe version 2 (16-bit id) and version 3 (32-bit id).
+fn parse_infe_xmp_id(buf: &[u8], payload: usize, end: usize) -> Option<u32> {
+    let version = *buf.get(payload)?;
+    // After version(1)+flags(3):
+    let mut p = payload.checked_add(4)?;
+    let item_id: u32 = match version {
+        2 => {
+            let v = u16::from_be_bytes([*buf.get(p)?, *buf.get(p + 1)?]);
+            p = p.checked_add(2)?;
+            u32::from(v)
+        }
+        3 => {
+            let v = be_u32(buf, p)?;
+            p = p.checked_add(4)?;
+            v
+        }
+        // version 0/1 use a different layout without item_type; XMP items
+        // in practice always use version >= 2. Ignore older forms.
+        _ => return None,
+    };
+    // item_protection_index (u16), then item_type (4 bytes).
+    p = p.checked_add(2)?;
+    let item_type = [*buf.get(p)?, *buf.get(p + 1)?, *buf.get(p + 2)?, *buf.get(p + 3)?];
+    p = p.checked_add(4)?;
+    if &item_type != b"mime" {
+        return None;
+    }
+    // item_name: null-terminated string, then content_type:
+    // null-terminated string. Skip item_name.
+    while p < end && *buf.get(p)? != 0 {
+        p = p.checked_add(1)?;
+    }
+    p = p.checked_add(1)?; // skip the null terminator
+    // Read content_type up to its null terminator.
+    let ct_start = p;
+    while p < end && *buf.get(p)? != 0 {
+        p = p.checked_add(1)?;
+    }
+    let content_type = buf.get(ct_start..p)?;
+    if content_type == b"application/rdf+xml" {
+        Some(item_id)
+    } else {
+        None
+    }
+}
+
+/// Parse `iloc` and zero the data bytes of every extent belonging to an
+/// item in `ids`. Returns `None` on a structural parse failure.
+fn zero_item_extents(
+    out: &mut [u8],
+    payload: usize,
+    end: usize,
+    idat_payload: Option<usize>,
+    ids: &[u32],
+) -> Option<()> {
+    // iloc FullBox: version(1)+flags(3).
+    let version = *out.get(payload)?;
+    let mut p = payload.checked_add(4)?;
+    // 1 byte: (offset_size << 4) | length_size
+    let b0 = *out.get(p)?;
+    let offset_size = usize::from(b0 >> 4);
+    let length_size = usize::from(b0 & 0x0F);
+    // 1 byte: (base_offset_size << 4) | index_size(v1/2) / reserved(v0)
+    let b1 = *out.get(p + 1)?;
+    let base_offset_size = usize::from(b1 >> 4);
+    let index_size = if version == 1 || version == 2 {
+        usize::from(b1 & 0x0F)
+    } else {
+        0
+    };
+    p = p.checked_add(2)?;
+    // item_count: u16 (version < 2) or u32 (version 2).
+    let item_count: u32 = if version < 2 {
+        let v = u16::from_be_bytes([*out.get(p)?, *out.get(p + 1)?]);
+        p = p.checked_add(2)?;
+        u32::from(v)
+    } else {
+        let v = be_u32(out, p)?;
+        p = p.checked_add(4)?;
+        v
+    };
+
+    let read_uint = |out: &[u8], at: usize, size: usize| -> Option<u64> {
+        if size == 0 {
+            return Some(0);
+        }
+        let bytes = out.get(at..at.checked_add(size)?)?;
+        let mut v: u64 = 0;
+        for &b in bytes {
+            v = (v << 8) | u64::from(b);
+        }
+        Some(v)
+    };
+
+    for _ in 0..item_count {
+        // Stop if the declared item_count over-runs the iloc box bounds.
+        if p >= end {
+            break;
+        }
+        // item_ID: u16 (version < 2) or u32 (version 2).
+        let item_id: u32 = if version < 2 {
+            let v = u16::from_be_bytes([*out.get(p)?, *out.get(p + 1)?]);
+            p = p.checked_add(2)?;
+            u32::from(v)
+        } else {
+            let v = be_u32(out, p)?;
+            p = p.checked_add(4)?;
+            v
+        };
+        // construction_method (only v1/v2): reserved(12 bits)+method(4 bits) = u16.
+        let construction_method = if version == 1 || version == 2 {
+            let v = u16::from_be_bytes([*out.get(p)?, *out.get(p + 1)?]);
+            p = p.checked_add(2)?;
+            (v & 0x0F) as u8
+        } else {
+            0
+        };
+        // data_reference_index: u16.
+        p = p.checked_add(2)?;
+        let base_offset = read_uint(out, p, base_offset_size)?;
+        p = p.checked_add(base_offset_size)?;
+        // extent_count: u16.
+        let extent_count = u16::from_be_bytes([*out.get(p)?, *out.get(p + 1)?]);
+        p = p.checked_add(2)?;
+
+        let want = ids.contains(&item_id);
+        for _ in 0..extent_count {
+            if (version == 1 || version == 2) && index_size > 0 {
+                p = p.checked_add(index_size)?;
+            }
+            let extent_offset = read_uint(out, p, offset_size)?;
+            p = p.checked_add(offset_size)?;
+            let extent_length = read_uint(out, p, length_size)?;
+            p = p.checked_add(length_size)?;
+
+            if !want {
+                continue;
+            }
+            // construction_method: 0 = file offset, 1 = idat-relative.
+            let base = if construction_method == 1 {
+                u64::try_from(idat_payload?).ok()?
+            } else {
+                0
+            };
+            let start = usize::try_from(base.checked_add(base_offset)?.checked_add(extent_offset)?)
+                .ok()?;
+            let elen = usize::try_from(extent_length).ok()?;
+            let stop = start.checked_add(elen)?;
+            // Only zero in-range extents; a malformed offset must not panic.
+            if start <= out.len() && stop <= out.len() {
+                for byte in &mut out[start..stop] {
+                    *byte = 0;
+                }
+            }
+        }
+    }
+    Some(())
+}
+
+/// Within an `ipco` box, zero the ICC payload of every `colr` box whose
+/// colour_type is `prof` (embedded ICC) or `rICC` (restricted ICC).
+fn zero_colr_icc(out: &mut [u8], ipco_payload: usize, ipco_end: usize) -> Option<()> {
+    let mut p = ipco_payload;
+    while p + 8 <= ipco_end {
+        let (cpayload, cend, ty) = parse_box(out, p)?;
+        if &ty == b"colr" {
+            // colour_type is the first 4 bytes of the colr payload.
+            if cpayload + 4 <= cend {
+                let ctype = [
+                    out[cpayload],
+                    out[cpayload + 1],
+                    out[cpayload + 2],
+                    out[cpayload + 3],
+                ];
+                if &ctype == b"prof" || &ctype == b"rICC" {
+                    // Zero everything after the 4-byte colour_type (the
+                    // embedded ICC profile bytes). The box header and
+                    // colour_type stay intact so sizes/offsets are
+                    // preserved; the ICC fingerprint is gone.
+                    for byte in &mut out[cpayload + 4..cend] {
+                        *byte = 0;
+                    }
+                }
+            }
+        }
+        if cend <= p {
+            return None;
+        }
+        p = cend;
+    }
+    Some(())
 }
 
 /// Split a Debug-formatted `ExifTag` string like `ImageDescription("Hello")`
@@ -732,5 +1247,282 @@ mod tests {
         // Valid JPEG starts with SOI and ends with EOI.
         assert_eq!(&cleaned[..2], &[0xFF, 0xD8]);
         assert_eq!(&cleaned[cleaned.len() - 2..], &[0xFF, 0xD9]);
+    }
+
+    // ---------- strip_jxl_boxes ----------
+
+    /// Build one ISO-BMFF box: 4-byte big-endian size + 4-byte type +
+    /// payload.
+    fn jxl_box(ty: [u8; 4], payload: &[u8]) -> Vec<u8> {
+        let total = (8 + payload.len()) as u32;
+        let mut b = Vec::new();
+        b.extend_from_slice(&total.to_be_bytes());
+        b.extend_from_slice(&ty);
+        b.extend_from_slice(payload);
+        b
+    }
+
+    /// A minimal ISO-BMFF JXL: signature box + ftyp + `xml ` (XMP) box
+    /// carrying a recognizable creator token + a `jxlc` codestream box.
+    fn jxl_isobmff_with_xmp() -> Vec<u8> {
+        const SIG_ISOBMFF: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+        ];
+        let mut out = Vec::new();
+        out.extend_from_slice(&SIG_ISOBMFF);
+        out.extend_from_slice(&jxl_box(*b"ftyp", b"jxl \x00\x00\x00\x00jxl "));
+        out.extend_from_slice(&jxl_box(
+            *b"xml ",
+            b"<?xpacket?><rdf:RDF>creator=Alice</rdf:RDF>",
+        ));
+        out.extend_from_slice(&jxl_box(*b"jxlc", &[0x01, 0x02, 0x03, 0x04]));
+        out
+    }
+
+    #[test]
+    fn strip_jxl_removes_xml_xmp_box_keeps_codestream() {
+        let dirty = jxl_isobmff_with_xmp();
+        // Sanity: the dirty input does carry the XMP token.
+        assert!(dirty.windows(13).any(|w| w == b"creator=Alice"));
+
+        let cleaned = strip_jxl_boxes(&dirty).expect("valid ISO-BMFF JXL must parse");
+
+        // The XMP packet must be gone, both the box type and its payload.
+        assert!(
+            !cleaned.windows(13).any(|w| w == b"creator=Alice"),
+            "XMP creator token survived JXL strip"
+        );
+        assert!(
+            !cleaned.windows(4).any(|w| w == b"xml "),
+            "`xml ` box survived JXL strip"
+        );
+        // Structural + codestream boxes must survive.
+        assert!(cleaned.windows(4).any(|w| w == b"ftyp"));
+        assert!(cleaned.windows(4).any(|w| w == b"jxlc"));
+    }
+
+    #[test]
+    fn strip_jxl_removes_exif_and_jumbf_boxes() {
+        const SIG_ISOBMFF: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+        ];
+        let mut dirty = Vec::new();
+        dirty.extend_from_slice(&SIG_ISOBMFF);
+        dirty.extend_from_slice(&jxl_box(*b"Exif", b"\x00\x00\x00\x00MM\x00\x2aSECRET-EXIF"));
+        dirty.extend_from_slice(&jxl_box(*b"jumb", b"jumbf-c2pa-SECRET"));
+        dirty.extend_from_slice(&jxl_box(*b"jxlc", &[0xDE, 0xAD]));
+
+        let cleaned = strip_jxl_boxes(&dirty).expect("valid JXL must parse");
+        assert!(!cleaned.windows(11).any(|w| w == b"SECRET-EXIF"));
+        assert!(!cleaned.windows(6).any(|w| w == b"SECRET"));
+        assert!(!cleaned.windows(4).any(|w| w == b"Exif"));
+        assert!(!cleaned.windows(4).any(|w| w == b"jumb"));
+        assert!(cleaned.windows(4).any(|w| w == b"jxlc"));
+    }
+
+    #[test]
+    fn strip_jxl_removes_brob_wrapped_xmp() {
+        const SIG_ISOBMFF: [u8; 12] = [
+            0x00, 0x00, 0x00, 0x0C, 0x4A, 0x58, 0x4C, 0x20, 0x0D, 0x0A, 0x87, 0x0A,
+        ];
+        let mut dirty = Vec::new();
+        dirty.extend_from_slice(&SIG_ISOBMFF);
+        // brob box whose first 4 payload bytes are the wrapped type `xml `.
+        dirty.extend_from_slice(&jxl_box(*b"brob", b"xml COMPRESSED-XMP-PAYLOAD"));
+        dirty.extend_from_slice(&jxl_box(*b"jxlc", &[0x00]));
+
+        let cleaned = strip_jxl_boxes(&dirty).expect("valid JXL must parse");
+        assert!(
+            !cleaned.windows(4).any(|w| w == b"brob"),
+            "brob-wrapped XMP survived"
+        );
+        assert!(!cleaned.windows(8).any(|w| w == b"COMPRESS"));
+        assert!(cleaned.windows(4).any(|w| w == b"jxlc"));
+    }
+
+    #[test]
+    fn strip_jxl_bare_codestream_is_passthrough() {
+        // 0xFF 0x0A bare codestream: no container, no metadata. Must come
+        // back byte-identical (not a 500/parse error).
+        let raw = [0xFFu8, 0x0A, 0x11, 0x22, 0x33, 0x44, 0x55];
+        let cleaned = strip_jxl_boxes(&raw).expect("bare codestream must pass through");
+        assert_eq!(cleaned, raw);
+    }
+
+    #[test]
+    fn strip_jxl_rejects_non_jxl() {
+        assert!(strip_jxl_boxes(b"not a jxl file at all").is_err());
+    }
+
+    // ---------- strip_heif_extra_metadata ----------
+
+    /// Build a synthetic HEIF carrying an Exif item, an XMP item
+    /// (`mime`/application/rdf+xml) and a `colr` box of type `prof`
+    /// (embedded ICC). The XMP and ICC payloads live in `mdat`; `iloc`
+    /// points at their absolute file offsets. Returns the bytes plus the
+    /// recognizable tokens we assert on.
+    fn heif_with_xmp_and_icc() -> Vec<u8> {
+        // ---- mdat payload: [exif][xmp] ----
+        // The ICC profile lives ONLY in the colr box (the place this sweep
+        // targets); keeping it out of mdat lets the test prove the colr
+        // copy was zeroed without a duplicate copy masking the assertion.
+        let exif_data = b"EXIF-SECRET".to_vec();
+        let xmp_data = b"<?xpacket?>rdf:RDF GPSLatitude=48.0".to_vec();
+        // ICC profile: a recognizable signature `acsp` at offset 36 + a
+        // device-description token.
+        let mut icc_data = vec![0u8; 36];
+        icc_data.extend_from_slice(b"acsp");
+        icc_data.extend_from_slice(b"ICC-DEVICE-FINGERPRINT");
+
+        // Assemble mdat payload and remember offsets (relative to mdat
+        // payload start; the absolute offset is filled in once we know
+        // where mdat lands).
+        let exif_off_in_mdat = 0usize;
+        let xmp_off_in_mdat = exif_data.len();
+        let mut mdat_payload = Vec::new();
+        mdat_payload.extend_from_slice(&exif_data);
+        mdat_payload.extend_from_slice(&xmp_data);
+
+        // ---- build a v2 infe (FullBox) ----
+        // version(1)=2, flags(3)=0, item_id(u16), protection(u16),
+        // item_type(4), item_name(null), content_type(null).
+        fn infe_mime(item_id: u16, content_type: &[u8]) -> Vec<u8> {
+            let mut p = Vec::new();
+            p.push(2); // version
+            p.extend_from_slice(&[0, 0, 0]); // flags
+            p.extend_from_slice(&item_id.to_be_bytes());
+            p.extend_from_slice(&0u16.to_be_bytes()); // protection
+            p.extend_from_slice(b"mime");
+            p.push(0); // empty item_name
+            p.extend_from_slice(content_type);
+            p.push(0); // content_type null terminator
+            jxl_box(*b"infe", &p)
+        }
+        let infe_exif = infe_mime(1, b"image/x-exif"); // not XMP -> kept
+        let infe_xmp = infe_mime(2, b"application/rdf+xml"); // XMP -> stripped
+
+        // ---- iinf (FullBox v0): entry_count u16 then infe children ----
+        let mut iinf_payload = Vec::new();
+        iinf_payload.push(0); // version 0
+        iinf_payload.extend_from_slice(&[0, 0, 0]); // flags
+        iinf_payload.extend_from_slice(&2u16.to_be_bytes()); // entry_count
+        iinf_payload.extend_from_slice(&infe_exif);
+        iinf_payload.extend_from_slice(&infe_xmp);
+        let iinf = jxl_box(*b"iinf", &iinf_payload);
+
+        // ---- colr box (prof) inside ipco inside iprp ----
+        let mut colr_payload = Vec::new();
+        colr_payload.extend_from_slice(b"prof");
+        colr_payload.extend_from_slice(&icc_data); // duplicate ICC in colr too
+        let colr = jxl_box(*b"colr", &colr_payload);
+        let ipco = jxl_box(*b"ipco", &colr);
+        let iprp = jxl_box(*b"iprp", &ipco);
+
+        // ---- iloc (FullBox v1) ----
+        // We need the absolute mdat payload offset, which depends on the
+        // sizes of ftyp + meta. Build meta with a placeholder iloc, measure,
+        // then patch the extent offsets. Simpler: compute sizes up front.
+        //
+        // iloc v1 layout per item:
+        //   item_id(u16), construction_method(u16, =0 file),
+        //   data_reference_index(u16), base_offset(0 bytes, base_offset_size=0),
+        //   extent_count(u16), then per extent:
+        //     extent_offset(offset_size=4), extent_length(length_size=4).
+        // (index_size=0 so no extent_index field.)
+        fn iloc_item(item_id: u16, abs_off: u32, len: u32) -> Vec<u8> {
+            let mut e = Vec::new();
+            e.extend_from_slice(&item_id.to_be_bytes());
+            e.extend_from_slice(&0u16.to_be_bytes()); // construction_method=0
+            e.extend_from_slice(&0u16.to_be_bytes()); // data_reference_index
+            e.extend_from_slice(&1u16.to_be_bytes()); // extent_count
+            e.extend_from_slice(&abs_off.to_be_bytes()); // extent_offset (4)
+            e.extend_from_slice(&len.to_be_bytes()); // extent_length (4)
+            e
+        }
+
+        // Compute the absolute position where mdat payload begins. The file
+        // layout is: ftyp | meta | mdat. We must know meta's total size.
+        // Build meta with the iloc using placeholder offsets first to learn
+        // its length, then rebuild with real offsets. Because offset/length
+        // field widths are fixed, meta's size is stable across the patch.
+        let build_meta = |exif_abs: u32, xmp_abs: u32| -> Vec<u8> {
+            let mut iloc_payload = Vec::new();
+            iloc_payload.push(1); // version 1
+            iloc_payload.extend_from_slice(&[0, 0, 0]); // flags
+            iloc_payload.push(0x44u8); // offset_size=4, length_size=4
+            iloc_payload.push(0x00u8); // base_offset_size=0, index_size=0
+            iloc_payload.extend_from_slice(&2u16.to_be_bytes()); // item_count
+            iloc_payload.extend_from_slice(&iloc_item(1, exif_abs, exif_data.len() as u32));
+            iloc_payload.extend_from_slice(&iloc_item(2, xmp_abs, xmp_data.len() as u32));
+            let iloc = jxl_box(*b"iloc", &iloc_payload);
+
+            // meta is a FullBox: 4 bytes version/flags then children.
+            let mut meta_payload = Vec::new();
+            meta_payload.extend_from_slice(&[0, 0, 0, 0]); // version/flags
+            meta_payload.extend_from_slice(&iinf);
+            meta_payload.extend_from_slice(&iloc);
+            meta_payload.extend_from_slice(&iprp);
+            jxl_box(*b"meta", &meta_payload)
+        };
+
+        let ftyp = jxl_box(*b"ftyp", b"heic\x00\x00\x00\x00heic");
+        // First pass with zero offsets to size meta.
+        let meta_sized = build_meta(0, 0);
+        let mdat_payload_abs = (ftyp.len() + meta_sized.len() + 8) as u32; // +8 mdat header
+        let exif_abs = mdat_payload_abs + exif_off_in_mdat as u32;
+        let xmp_abs = mdat_payload_abs + xmp_off_in_mdat as u32;
+        let meta = build_meta(exif_abs, xmp_abs);
+        assert_eq!(meta.len(), meta_sized.len(), "meta size must be stable");
+
+        let mdat = jxl_box(*b"mdat", &mdat_payload);
+
+        let mut out = Vec::new();
+        out.extend_from_slice(&ftyp);
+        out.extend_from_slice(&meta);
+        out.extend_from_slice(&mdat);
+        out
+    }
+
+    #[test]
+    fn strip_heif_removes_xmp_item_and_icc_keeps_exif() {
+        let dirty = heif_with_xmp_and_icc();
+        // Sanity: the identifying tokens are present pre-strip.
+        assert!(dirty.windows(11).any(|w| w == b"GPSLatitude"));
+        assert!(dirty.windows(22).any(|w| w == b"ICC-DEVICE-FINGERPRINT"));
+
+        let cleaned = strip_heif_extra_metadata(&dirty).expect("synthetic HEIF must parse");
+        assert_eq!(cleaned.len(), dirty.len(), "zeroing must not resize buffer");
+
+        // XMP packet bytes must be gone (zeroed in mdat).
+        assert!(
+            !cleaned.windows(11).any(|w| w == b"GPSLatitude"),
+            "XMP GPS token survived HEIF strip"
+        );
+        assert!(!cleaned.windows(9).any(|w| w == b"<?xpacket"));
+        // ICC fingerprint must be gone (zeroed in the colr box; the mdat
+        // copy isn't iloc-referenced so the colr copy is the one we test).
+        assert!(
+            !cleaned.windows(22).any(|w| w == b"ICC-DEVICE-FINGERPRINT"),
+            "ICC device fingerprint survived HEIF strip"
+        );
+        // The kept Exif item's data must survive (we only strip XMP + ICC).
+        assert!(
+            cleaned.windows(11).any(|w| w == b"EXIF-SECRET"),
+            "Exif item data must be preserved by this sweep (handled by little_exif clear in production)"
+        );
+        // Structural boxes survive.
+        assert!(cleaned.windows(4).any(|w| w == b"meta"));
+        assert!(cleaned.windows(4).any(|w| w == b"iinf"));
+    }
+
+    #[test]
+    fn strip_heif_no_meta_is_passthrough() {
+        // A file with no `meta` box: nothing item-based to strip. Returns
+        // the buffer unchanged (Some), never an error.
+        let mut buf = Vec::new();
+        buf.extend_from_slice(&jxl_box(*b"ftyp", b"heic\x00\x00\x00\x00heic"));
+        buf.extend_from_slice(&jxl_box(*b"mdat", b"pixels"));
+        let cleaned = strip_heif_extra_metadata(&buf).expect("no-meta HEIF must pass through");
+        assert_eq!(cleaned, buf);
     }
 }
