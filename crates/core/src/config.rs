@@ -153,8 +153,7 @@ impl Drop for LimitsGuard {
 /// have to instantiate their own copy for the same reason - the
 /// standard library's `OnceLock` only shares within one binary.
 #[cfg(test)]
-pub(crate) fn limits_test_lock()
--> std::sync::MutexGuard<'static, ()> {
+pub(crate) fn limits_test_lock() -> std::sync::MutexGuard<'static, ()> {
     use std::sync::{Mutex, OnceLock, PoisonError};
     static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
     LOCK.get_or_init(|| Mutex::new(()))

@@ -1,23 +1,23 @@
 // In-memory RIFF/AVI metadata stripper.
-// 
+//
 // Mirrors the native ffmpeg metadata-only strip+remux
 // (`-map_metadata -1 -map_chapters -1 -disposition 0`): it keeps every
 // audio/video stream byte-for-byte (no transcode) and drops all
 // container-level metadata, then fixes the surrounding RIFF size field
 // so the result is a valid AVI.
-// 
+//
 // RIFF layout: the file is `'RIFF' <u32 LE total-size> 'AVI '` followed
 // by a flat list of chunks, each `<4-byte fourcc> <u32 LE size>
 // <payload, padded to an even byte>`. A `LIST` chunk's payload begins
 // with a 4-byte form-type fourcc and then nested chunks.
-// 
+//
 // What we drop at the top level:
 //   * `LIST` chunks whose form-type is `INFO` (INAM/IART/ICMT/ICRD/
 //     ISFT/IGNR... author/comment/software/creation tags).
 //   * a standalone `IDIT` chunk (creation timestamp).
 //   * `JUNK` padding, `exif` (embedded EXIF), and `tdat` (timecode/date)
 //     metadata chunks.
-// 
+//
 // We also recurse INTO the `hdrl` header LIST: ffmpeg's metadata strip
 // removes metadata nested inside the header too. Inside `hdrl` (and inside
 // its `strl` stream sub-lists) we drop any nested `INFO` LIST, any `strn`
@@ -125,14 +125,21 @@ fn rebuild_list_payload(payload: &[u8], recurse_strl: bool) -> Result<Vec<u8>, C
     let mut pos = 4usize;
     let end = payload.len();
     while pos < end {
-        let hdr_end = pos.checked_add(8).ok_or_else(|| parse_err("nested offset overflow"))?;
+        let hdr_end = pos
+            .checked_add(8)
+            .ok_or_else(|| parse_err("nested offset overflow"))?;
         if hdr_end > end {
-            return Err(parse_err("nested trailing bytes shorter than a chunk header"));
+            return Err(parse_err(
+                "nested trailing bytes shorter than a chunk header",
+            ));
         }
-        let fourcc = read_fourcc(payload, pos).ok_or_else(|| parse_err("unreadable nested fourcc"))?;
-        let size_off = pos.checked_add(4).ok_or_else(|| parse_err("nested offset overflow"))?;
-        let size =
-            read_u32_le(payload, size_off).ok_or_else(|| parse_err("unreadable nested size"))? as usize;
+        let fourcc =
+            read_fourcc(payload, pos).ok_or_else(|| parse_err("unreadable nested fourcc"))?;
+        let size_off = pos
+            .checked_add(4)
+            .ok_or_else(|| parse_err("nested offset overflow"))?;
+        let size = read_u32_le(payload, size_off)
+            .ok_or_else(|| parse_err("unreadable nested size"))? as usize;
 
         let cpayload_start = hdr_end;
         let cpayload_end = cpayload_start
@@ -142,7 +149,9 @@ fn rebuild_list_payload(payload: &[u8], recurse_strl: bool) -> Result<Vec<u8>, C
             return Err(parse_err("nested chunk size overruns the LIST"));
         }
         let padded = if size & 1 == 1 {
-            cpayload_end.checked_add(1).ok_or_else(|| parse_err("nested pad overflow"))?
+            cpayload_end
+                .checked_add(1)
+                .ok_or_else(|| parse_err("nested pad overflow"))?
         } else {
             cpayload_end
         };
@@ -200,7 +209,8 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     if read_fourcc(input, 0) != Some(*b"RIFF") {
         return Err(parse_err("not a RIFF file (missing 'RIFF' magic)"));
     }
-    let riff_size = read_u32_le(input, 4).ok_or_else(|| parse_err("truncated RIFF size field"))? as usize;
+    let riff_size =
+        read_u32_le(input, 4).ok_or_else(|| parse_err("truncated RIFF size field"))? as usize;
     if read_fourcc(input, 8) != Some(*b"AVI ") {
         return Err(parse_err("not an AVI file (RIFF form-type is not 'AVI ')"));
     }
@@ -227,7 +237,9 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut pos = body_start;
     while pos < walk_end {
         // Need at least an 8-byte chunk header.
-        let hdr_end = pos.checked_add(8).ok_or_else(|| parse_err("offset overflow"))?;
+        let hdr_end = pos
+            .checked_add(8)
+            .ok_or_else(|| parse_err("offset overflow"))?;
         if hdr_end > walk_end {
             // Trailing bytes shorter than a header: stop the walk and keep
             // them as-is by not recording another chunk (they fall outside
@@ -237,9 +249,11 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
             return Err(parse_err("trailing bytes shorter than a chunk header"));
         }
         let fourcc = read_fourcc(input, pos).ok_or_else(|| parse_err("unreadable chunk fourcc"))?;
-        let size_off = pos.checked_add(4).ok_or_else(|| parse_err("offset overflow"))?;
-        let size = read_u32_le(input, size_off)
-            .ok_or_else(|| parse_err("unreadable chunk size"))? as usize;
+        let size_off = pos
+            .checked_add(4)
+            .ok_or_else(|| parse_err("offset overflow"))?;
+        let size = read_u32_le(input, size_off).ok_or_else(|| parse_err("unreadable chunk size"))?
+            as usize;
 
         let payload_start = hdr_end;
         let payload_end = payload_start
@@ -252,7 +266,9 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         // RIFF chunks are word-aligned: an odd-sized payload is followed
         // by a single pad byte (not counted in `size`).
         let padded = if size & 1 == 1 {
-            payload_end.checked_add(1).ok_or_else(|| parse_err("pad overflow"))?
+            payload_end
+                .checked_add(1)
+                .ok_or_else(|| parse_err("pad overflow"))?
         } else {
             payload_end
         };
@@ -367,8 +383,8 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         new_body.extend_from_slice(slice);
     }
 
-    let new_riff_size = u32::try_from(new_body.len())
-        .map_err(|_| parse_err("rebuilt RIFF body exceeds 4 GiB"))?;
+    let new_riff_size =
+        u32::try_from(new_body.len()).map_err(|_| parse_err("rebuilt RIFF body exceeds 4 GiB"))?;
 
     let mut out: Vec<u8> = Vec::with_capacity(new_body.len().saturating_add(8));
     out.extend_from_slice(b"RIFF");
@@ -393,23 +409,28 @@ fn idx1_is_absolute(entries: &[u8], movi_file_pos: usize) -> bool {
 /// rewritten entries. Underflow (an offset smaller than `removed`) yields
 /// `Err`, never a wrap.
 fn patch_idx1_absolute(entries: &[u8], removed: usize) -> Result<Vec<u8>, CoreError> {
-    let removed_u32 =
-        u32::try_from(removed).map_err(|_| parse_err("idx1 shift exceeds 4 GiB"))?;
+    let removed_u32 = u32::try_from(removed).map_err(|_| parse_err("idx1 shift exceeds 4 GiB"))?;
     let mut out = entries.to_vec();
     let mut pos = 0usize;
     while pos.checked_add(16).is_some_and(|e| e <= out.len()) {
-        let off_pos = pos.checked_add(8).ok_or_else(|| parse_err("idx1 offset overflow"))?;
-        let off = read_u32_le(&out, off_pos)
-            .ok_or_else(|| parse_err("unreadable idx1 dwChunkOffset"))?;
+        let off_pos = pos
+            .checked_add(8)
+            .ok_or_else(|| parse_err("idx1 offset overflow"))?;
+        let off =
+            read_u32_le(&out, off_pos).ok_or_else(|| parse_err("unreadable idx1 dwChunkOffset"))?;
         let new_off = off
             .checked_sub(removed_u32)
             .ok_or_else(|| parse_err("idx1 offset underflow shifting movi"))?;
-        let end = off_pos.checked_add(4).ok_or_else(|| parse_err("idx1 offset overflow"))?;
+        let end = off_pos
+            .checked_add(4)
+            .ok_or_else(|| parse_err("idx1 offset overflow"))?;
         let dst = out
             .get_mut(off_pos..end)
             .ok_or_else(|| parse_err("idx1 entry out of range"))?;
         dst.copy_from_slice(&new_off.to_le_bytes());
-        pos = pos.checked_add(16).ok_or_else(|| parse_err("idx1 walk overflow"))?;
+        pos = pos
+            .checked_add(16)
+            .ok_or_else(|| parse_err("idx1 walk overflow"))?;
     }
     Ok(out)
 }
@@ -497,7 +518,11 @@ mod tests {
         let movi = list_chunk(b"movi", &movi_inner);
         // idx1 index (opaque, movi-relative offsets - unaffected here).
         let mut idx1 = Vec::new();
-        push_chunk(&mut idx1, b"idx1", b"\x00\x64\x63\x30\x10\x00\x00\x00\x00\x00\x00\x00\x27\x00\x00\x00");
+        push_chunk(
+            &mut idx1,
+            b"idx1",
+            b"\x00\x64\x63\x30\x10\x00\x00\x00\x00\x00\x00\x00\x27\x00\x00\x00",
+        );
         // INFO LIST with secret metadata, placed AFTER movi (the common case).
         let mut info_inner = Vec::new();
         push_chunk(&mut info_inner, b"INAM", b"secret-title-tag\0");
@@ -581,16 +606,25 @@ mod tests {
 
         assert!(!window_contains(&cleaned, b"Tue Jan 01 2030"), "IDIT gone");
         assert!(!window_contains(&cleaned, b"padding-bytes"), "JUNK gone");
-        assert!(!window_contains(&cleaned, b"EXIF-GPS-DATA-LEAK"), "exif gone");
+        assert!(
+            !window_contains(&cleaned, b"EXIF-GPS-DATA-LEAK"),
+            "exif gone"
+        );
         assert!(!window_contains(&cleaned, b"timecode-date"), "tdat gone");
-        assert!(window_contains(&cleaned, b"AUDIO-SAMPLES-KEEP"), "movi kept");
+        assert!(
+            window_contains(&cleaned, b"AUDIO-SAMPLES-KEEP"),
+            "movi kept"
+        );
 
         let kinds = top_chunks(&cleaned);
         assert_eq!(
             kinds,
             vec![(*b"LIST", Some(*b"hdrl")), (*b"LIST", Some(*b"movi"))]
         );
-        assert_eq!(read_u32_le(&cleaned, 4).unwrap() as usize, cleaned.len() - 8);
+        assert_eq!(
+            read_u32_le(&cleaned, 4).unwrap() as usize,
+            cleaned.len() - 8
+        );
     }
 
     /// Metadata that PRECEDES movi is now DROPPED for parity with the
@@ -658,7 +692,10 @@ mod tests {
             Some(0x04),
             "movi-relative idx1 offset must be unchanged"
         );
-        assert_eq!(read_u32_le(&cleaned, 4).unwrap() as usize, cleaned.len() - 8);
+        assert_eq!(
+            read_u32_le(&cleaned, 4).unwrap() as usize,
+            cleaned.len() - 8
+        );
     }
 
     /// REGRESSION (a): INFO sub-LIST + strn NESTED inside hdrl must be
@@ -842,7 +879,10 @@ mod tests {
             "absolute idx1 offset must be decremented by bytes removed before movi"
         );
         assert!(full_reparse_ok(&cleaned));
-        assert_eq!(read_u32_le(&cleaned, 4).unwrap() as usize, cleaned.len() - 8);
+        assert_eq!(
+            read_u32_le(&cleaned, 4).unwrap() as usize,
+            cleaned.len() - 8
+        );
     }
 
     /// Full structural re-parse: walk top-level chunks (recursing one level

@@ -697,9 +697,7 @@ fn epub_container_xml_points_at_missing_opf() {
         let opts = zip::write::SimpleFileOptions::default();
         writer.start_file("mimetype", stored).unwrap();
         writer.write_all(b"application/epub+zip").unwrap();
-        writer
-            .start_file("META-INF/container.xml", opts)
-            .unwrap();
+        writer.start_file("META-INF/container.xml", opts).unwrap();
         writer.write_all(br#"<?xml version="1.0"?>
 <container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container">
   <rootfiles><rootfile full-path="missing.opf" media-type="application/oebps-package+xml"/></rootfiles>
@@ -870,10 +868,7 @@ fn tar_bz2_bzip_header_only() {
 #[test]
 fn tar_xz_header_only() {
     // xz magic: FD 37 7A 58 5A 00, then stream flags.
-    let (_g, path) = fixture(
-        &[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x00],
-        "tar.xz",
-    );
+    let (_g, path) = fixture(&[0xFD, 0x37, 0x7A, 0x58, 0x5A, 0x00, 0x00, 0x00], "tar.xz");
     exercise("application/x-xz", &path, "tarxz_header_only");
 }
 

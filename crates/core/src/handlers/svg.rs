@@ -71,12 +71,12 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
                     continue;
                 }
                 let sanitized = sanitize_attributes(e);
-                writer
-                    .write_event(Event::Start(sanitized))
-                    .map_err(|err| CoreError::CleanError {
+                writer.write_event(Event::Start(sanitized)).map_err(|err| {
+                    CoreError::CleanError {
                         path: empty(),
                         detail: format!("SVG write error: {err}"),
-                    })?;
+                    }
+                })?;
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
@@ -99,21 +99,21 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
                     continue;
                 }
                 let sanitized = sanitize_attributes(e);
-                writer
-                    .write_event(Event::Empty(sanitized))
-                    .map_err(|err| CoreError::CleanError {
+                writer.write_event(Event::Empty(sanitized)).map_err(|err| {
+                    CoreError::CleanError {
                         path: empty(),
                         detail: format!("SVG write error: {err}"),
-                    })?;
+                    }
+                })?;
             }
             Ok(Event::Text(ref t)) => {
                 if skip_depth == 0 {
-                    writer
-                        .write_event(Event::Text(t.clone()))
-                        .map_err(|err| CoreError::CleanError {
+                    writer.write_event(Event::Text(t.clone())).map_err(|err| {
+                        CoreError::CleanError {
                             path: empty(),
                             detail: format!("SVG write error: {err}"),
-                        })?;
+                        }
+                    })?;
                 }
             }
             Ok(Event::Comment(_)) => {

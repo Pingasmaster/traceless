@@ -58,12 +58,12 @@ fn strip_tracked_changes(xml: &str) -> Result<String, CoreError> {
                     skip_depth = 1;
                     continue;
                 }
-                writer
-                    .write_event(Event::Start(e.clone()))
-                    .map_err(|err| CoreError::CleanError {
+                writer.write_event(Event::Start(e.clone())).map_err(|err| {
+                    CoreError::CleanError {
                         path: std::path::PathBuf::new(),
                         detail: format!("ODF content write error: {err}"),
-                    })?;
+                    }
+                })?;
             }
             Ok(Event::End(ref e)) => {
                 if skip_depth > 0 {
@@ -84,21 +84,21 @@ fn strip_tracked_changes(xml: &str) -> Result<String, CoreError> {
                 if local_name(e) == "tracked-changes" {
                     continue;
                 }
-                writer
-                    .write_event(Event::Empty(e.clone()))
-                    .map_err(|err| CoreError::CleanError {
+                writer.write_event(Event::Empty(e.clone())).map_err(|err| {
+                    CoreError::CleanError {
                         path: std::path::PathBuf::new(),
                         detail: format!("ODF content write error: {err}"),
-                    })?;
+                    }
+                })?;
             }
             Ok(Event::Text(ref t)) => {
                 if skip_depth == 0 {
-                    writer
-                        .write_event(Event::Text(t.clone()))
-                        .map_err(|err| CoreError::CleanError {
+                    writer.write_event(Event::Text(t.clone())).map_err(|err| {
+                        CoreError::CleanError {
                             path: std::path::PathBuf::new(),
                             detail: format!("ODF content write error: {err}"),
-                        })?;
+                        }
+                    })?;
                 }
             }
             Ok(Event::Eof) => break,

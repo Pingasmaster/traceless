@@ -394,7 +394,10 @@ mod tests {
         match sandboxed_probe_command("ffprobe", &input) {
             Ok(cmd) => {
                 let prog = cmd.get_program().to_string_lossy().into_owned();
-                assert!(prog.ends_with("bwrap"), "probe must invoke bwrap, got {prog}");
+                assert!(
+                    prog.ends_with("bwrap"),
+                    "probe must invoke bwrap, got {prog}"
+                );
             }
             Err(CoreError::ToolFailed { tool, .. }) => {
                 assert_eq!(tool, "ffprobe");

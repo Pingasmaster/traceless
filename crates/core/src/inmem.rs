@@ -21,7 +21,9 @@
 //! behind this same dispatch.
 
 use crate::error::CoreError;
-use crate::handlers::{archive, audio, css, document, gif, harmless, html, image, pdf, svg, torrent};
+use crate::handlers::{
+    archive, audio, css, document, gif, harmless, html, image, pdf, svg, torrent,
+};
 
 /// Map a filename (or bare extension) to the MIME type the cleaner
 /// dispatch keys on. Mirrors the extension table in
@@ -46,7 +48,9 @@ pub fn mime_for_name(name: &str) -> String {
         }
     }
     let ext = lower.rsplit('.').next().unwrap_or("");
-    ext_to_mime(ext).unwrap_or("application/octet-stream").to_string()
+    ext_to_mime(ext)
+        .unwrap_or("application/octet-stream")
+        .to_string()
 }
 
 /// Map a bare lowercase extension (no dot) to a MIME type. Single source
@@ -226,14 +230,10 @@ pub fn clean_bytes(ext: &str, input: &[u8]) -> Result<Vec<u8>, CoreError> {
 ///
 /// See [`clean_bytes`].
 pub fn clean_bytes_for_mime(mime: &str, name: &str, input: &[u8]) -> Result<Vec<u8>, CoreError> {
-    let ext = name
-        .rsplit('.')
-        .next()
-        .unwrap_or("")
-        .to_ascii_lowercase();
+    let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
     match mime {
-        "image/jpeg" | "image/png" | "image/webp" | "image/tiff" | "image/heic"
-        | "image/heif" | "image/jxl" => image::clean_bytes(input, &ext),
+        "image/jpeg" | "image/png" | "image/webp" | "image/tiff" | "image/heic" | "image/heif"
+        | "image/jxl" => image::clean_bytes(input, &ext),
         "image/gif" => gif::clean_bytes(input, &ext),
         "application/pdf" => pdf::clean_bytes(input, &ext),
         "audio/mpeg" | "audio/flac" | "audio/ogg" | "audio/vorbis" | "audio/mp4"
@@ -249,9 +249,10 @@ pub fn clean_bytes_for_mime(mime: &str, name: &str, input: &[u8]) -> Result<Vec<
         | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
         | "application/epub+zip" => document::clean_bytes(input, &ext),
-        m @ ("video/mp4" | "video/x-matroska" | "video/webm" | "video/x-msvideo"
-        | "video/avi" | "video/quicktime" | "video/x-ms-wmv" | "video/x-flv"
-        | "video/ogg") => strip_video(m, input),
+        m @ ("video/mp4" | "video/x-matroska" | "video/webm" | "video/x-msvideo" | "video/avi"
+        | "video/quicktime" | "video/x-ms-wmv" | "video/x-flv" | "video/ogg") => {
+            strip_video(m, input)
+        }
         "text/plain"
         | "image/bmp"
         | "image/x-ms-bmp"
@@ -263,10 +264,17 @@ pub fn clean_bytes_for_mime(mime: &str, name: &str, input: &[u8]) -> Result<Vec<
         "text/css" => css::clean_bytes(input, &ext),
         "text/html" | "application/xhtml+xml" => html::clean_bytes(input, &ext),
         "application/x-bittorrent" => torrent::clean_bytes(input, &ext),
-        "application/zip" | "application/x-tar" | "application/gzip" | "application/x-gzip"
-        | "application/x-compressed" | "application/x-bzip2"
-        | "application/x-bzip-compressed-tar" | "application/x-gtar" | "application/x-xz"
-        | "application/zstd" | "application/x-zstd" => archive::clean_bytes(input, name),
+        "application/zip"
+        | "application/x-tar"
+        | "application/gzip"
+        | "application/x-gzip"
+        | "application/x-compressed"
+        | "application/x-bzip2"
+        | "application/x-bzip-compressed-tar"
+        | "application/x-gtar"
+        | "application/x-xz"
+        | "application/zstd"
+        | "application/x-zstd" => archive::clean_bytes(input, name),
         other => Err(CoreError::UnsupportedFormat {
             mime_type: format!("no in-memory handler for MIME '{other}'"),
         }),
@@ -525,7 +533,9 @@ mod tests {
         v.extend_from_slice(&[1u8; 64]);
 
         // SOF0: 8-bit precision, 1x1, 1 component (id 1, 1x1 sampling, qtable 0)
-        v.extend_from_slice(&[0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00]);
+        v.extend_from_slice(&[
+            0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01, 0x00, 0x01, 0x01, 0x01, 0x11, 0x00,
+        ]);
 
         // DHT: minimal DC table for component 0 (class 0, id 0). One code of
         // length 1 mapping to symbol 0.

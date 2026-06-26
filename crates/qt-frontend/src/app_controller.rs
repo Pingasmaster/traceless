@@ -91,9 +91,10 @@ impl ffi::AppController {
 
     #[allow(clippy::unused_self)]
     fn limit_handler_timeout(&self) -> QString {
-        QString::from(
-            &format!("{} seconds", traceless_core::HANDLER_WALL_CLOCK_CAP.as_secs()) as &str,
-        )
+        QString::from(&format!(
+            "{} seconds",
+            traceless_core::HANDLER_WALL_CLOCK_CAP.as_secs()
+        ) as &str)
     }
 
     #[allow(clippy::unused_self)]

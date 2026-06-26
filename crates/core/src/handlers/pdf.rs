@@ -98,8 +98,7 @@ const PAGE_KEYS_TO_STRIP: &[&[u8]] = &[
 /// stays reachable from the catalog so the final prune keeps it. ISO 32000-1
 /// §7.7.3.2 lets these hang off any node of the page tree. Mirrors the
 /// equivalent step in efrei.app's compress_pdf.rs.
-const PAGES_NODE_KEYS_TO_STRIP: &[&[u8]] =
-    &[b"Metadata", b"PieceInfo", b"AA", b"LastModified"];
+const PAGES_NODE_KEYS_TO_STRIP: &[&[u8]] = &[b"Metadata", b"PieceInfo", b"AA", b"LastModified"];
 
 /// Strip every metadata-bearing key from a PDF, in memory: drops the
 /// `/Info` dict, randomises trailer `/ID`, prunes catalog / `/Names` /
@@ -317,207 +316,206 @@ fn clean_document(doc: &mut Document) {
     }
     doc.trailer.remove(b"Info");
 
-        // --- 2. Trailer /ID is a per-document fingerprint. Replace it. -----
-        // ISO 32000-1 §14.4 defines /ID as a two-element array of byte
-        // strings. Some viewers require /ID to be present, so we write a
-        // fresh pair of 16-byte random strings rather than removing it
-        // or leaving zero-byte literals. Randomizing instead of zeroing
-        // matches mat2's behaviour and prevents cleaned PDFs from
-        // sharing a trivially-detectable "`/ID []`" marker across every
-        // file cleaned by traceless, which would otherwise enable batch
-        // linking attacks against a corpus of cleaned files.
-        let mut rng = rand::rng();
-        let mut id_a = [0u8; 16];
-        let mut id_b = [0u8; 16];
-        rng.fill_bytes(&mut id_a);
-        rng.fill_bytes(&mut id_b);
-        doc.trailer.set(
-            "ID",
-            Object::Array(vec![
-                Object::String(id_a.to_vec(), lopdf::StringFormat::Hexadecimal),
-                Object::String(id_b.to_vec(), lopdf::StringFormat::Hexadecimal),
-            ]),
-        );
+    // --- 2. Trailer /ID is a per-document fingerprint. Replace it. -----
+    // ISO 32000-1 §14.4 defines /ID as a two-element array of byte
+    // strings. Some viewers require /ID to be present, so we write a
+    // fresh pair of 16-byte random strings rather than removing it
+    // or leaving zero-byte literals. Randomizing instead of zeroing
+    // matches mat2's behaviour and prevents cleaned PDFs from
+    // sharing a trivially-detectable "`/ID []`" marker across every
+    // file cleaned by traceless, which would otherwise enable batch
+    // linking attacks against a corpus of cleaned files.
+    let mut rng = rand::rng();
+    let mut id_a = [0u8; 16];
+    let mut id_b = [0u8; 16];
+    rng.fill_bytes(&mut id_a);
+    rng.fill_bytes(&mut id_b);
+    doc.trailer.set(
+        "ID",
+        Object::Array(vec![
+            Object::String(id_a.to_vec(), lopdf::StringFormat::Hexadecimal),
+            Object::String(id_b.to_vec(), lopdf::StringFormat::Hexadecimal),
+        ]),
+    );
 
-        // --- 3. Walk the catalog and remove every metadata-bearing key. ----
-        // First collect the referenced object ids so we can delete those
-        // objects after releasing the catalog borrow.
-        let mut catalog_refs_to_delete: Vec<ObjectId> = Vec::new();
-        if let Ok(catalog) = doc.catalog() {
-            for key in CATALOG_KEYS_TO_STRIP {
-                if let Ok(obj) = catalog.get(key)
-                    && let Ok(id) = obj.as_reference()
-                {
-                    catalog_refs_to_delete.push(id);
+    // --- 3. Walk the catalog and remove every metadata-bearing key. ----
+    // First collect the referenced object ids so we can delete those
+    // objects after releasing the catalog borrow.
+    let mut catalog_refs_to_delete: Vec<ObjectId> = Vec::new();
+    if let Ok(catalog) = doc.catalog() {
+        for key in CATALOG_KEYS_TO_STRIP {
+            if let Ok(obj) = catalog.get(key)
+                && let Ok(id) = obj.as_reference()
+            {
+                catalog_refs_to_delete.push(id);
+            }
+        }
+    }
+    if let Ok(catalog) = doc.catalog_mut() {
+        for key in CATALOG_KEYS_TO_STRIP {
+            catalog.remove(key);
+        }
+    }
+    for id in catalog_refs_to_delete {
+        doc.delete_object(id);
+    }
+
+    // --- 4. /Names subtree: strip EmbeddedFiles, JavaScript, etc. ------
+    // ISO 32000-1 §7.11 allows /Names to be either an indirect
+    // reference OR a direct dictionary embedded in the catalog.
+    // Most producers emit an indirect ref, but a crafted fixture
+    // (or a hand-written PDF) can put the dict inline and used to
+    // slip its children past the stripper.
+    let names_loc: Option<NamesLoc> = doc.catalog().ok().and_then(|c| match c.get(b"Names") {
+        Ok(Object::Reference(id)) => Some(NamesLoc::Indirect(*id)),
+        Ok(Object::Dictionary(_)) => Some(NamesLoc::Direct),
+        _ => None,
+    });
+    if let Some(loc) = names_loc {
+        let mut child_ids_to_delete: Vec<ObjectId> = Vec::new();
+
+        // Phase 1: read-only scan for indirect children we orphan.
+        {
+            let names_dict_ref: Option<&lopdf::Dictionary> = match loc {
+                NamesLoc::Indirect(id) => doc.get_dictionary(id).ok(),
+                NamesLoc::Direct => doc.catalog().ok().and_then(|c| match c.get(b"Names") {
+                    Ok(Object::Dictionary(d)) => Some(d),
+                    _ => None,
+                }),
+            };
+            if let Some(nd) = names_dict_ref {
+                for key in NAMES_KEYS_TO_STRIP {
+                    if let Ok(obj) = nd.get(key)
+                        && let Ok(id) = obj.as_reference()
+                    {
+                        child_ids_to_delete.push(id);
+                    }
                 }
             }
         }
-        if let Ok(catalog) = doc.catalog_mut() {
-            for key in CATALOG_KEYS_TO_STRIP {
-                catalog.remove(key);
+
+        // Phase 2: prune the Names dict in place at its location.
+        match loc {
+            NamesLoc::Indirect(id) => {
+                if let Ok(nd) = doc.get_dictionary_mut(id) {
+                    for key in NAMES_KEYS_TO_STRIP {
+                        nd.remove(key);
+                    }
+                }
+            }
+            NamesLoc::Direct => {
+                if let Ok(catalog) = doc.catalog_mut()
+                    && let Ok(Object::Dictionary(nd)) = catalog.get_mut(b"Names")
+                {
+                    for key in NAMES_KEYS_TO_STRIP {
+                        nd.remove(key);
+                    }
+                }
             }
         }
-        for id in catalog_refs_to_delete {
+
+        for id in child_ids_to_delete {
             doc.delete_object(id);
         }
+    }
 
-        // --- 4. /Names subtree: strip EmbeddedFiles, JavaScript, etc. ------
-        // ISO 32000-1 §7.11 allows /Names to be either an indirect
-        // reference OR a direct dictionary embedded in the catalog.
-        // Most producers emit an indirect ref, but a crafted fixture
-        // (or a hand-written PDF) can put the dict inline and used to
-        // slip its children past the stripper.
-        let names_loc: Option<NamesLoc> = doc.catalog().ok().and_then(|c| match c.get(b"Names") {
-            Ok(Object::Reference(id)) => Some(NamesLoc::Indirect(*id)),
-            Ok(Object::Dictionary(_)) => Some(NamesLoc::Direct),
-            _ => None,
-        });
-        if let Some(loc) = names_loc {
-            let mut child_ids_to_delete: Vec<ObjectId> = Vec::new();
-
-            // Phase 1: read-only scan for indirect children we orphan.
-            {
-                let names_dict_ref: Option<&lopdf::Dictionary> = match loc {
-                    NamesLoc::Indirect(id) => doc.get_dictionary(id).ok(),
-                    NamesLoc::Direct => doc.catalog().ok().and_then(|c| match c.get(b"Names") {
-                        Ok(Object::Dictionary(d)) => Some(d),
-                        _ => None,
-                    }),
-                };
-                if let Some(nd) = names_dict_ref {
-                    for key in NAMES_KEYS_TO_STRIP {
-                        if let Ok(obj) = nd.get(key)
-                            && let Ok(id) = obj.as_reference()
-                        {
-                            child_ids_to_delete.push(id);
-                        }
-                    }
-                }
-            }
-
-            // Phase 2: prune the Names dict in place at its location.
-            match loc {
-                NamesLoc::Indirect(id) => {
-                    if let Ok(nd) = doc.get_dictionary_mut(id) {
-                        for key in NAMES_KEYS_TO_STRIP {
-                            nd.remove(key);
-                        }
-                    }
-                }
-                NamesLoc::Direct => {
-                    if let Ok(catalog) = doc.catalog_mut()
-                        && let Ok(Object::Dictionary(nd)) = catalog.get_mut(b"Names")
-                    {
-                        for key in NAMES_KEYS_TO_STRIP {
-                            nd.remove(key);
-                        }
-                    }
-                }
-            }
-
-            for id in child_ids_to_delete {
-                doc.delete_object(id);
-            }
-        }
-
-        // --- 5. Per-page cleaning ------------------------------------------
-        // Copy the list of page ids out first so we can mutate the dicts
-        // without holding an iterator into the object map.
-        let page_ids: Vec<ObjectId> = doc.page_iter().collect();
-        for page_id in page_ids {
-            let mut per_page_refs_to_delete: Vec<ObjectId> = Vec::new();
-            if let Ok(page) = doc.get_dictionary(page_id) {
-                for key in PAGE_KEYS_TO_STRIP {
-                    if let Ok(obj) = page.get(key) {
-                        match obj {
-                            Object::Reference(id) => per_page_refs_to_delete.push(*id),
-                            Object::Array(arr) => {
-                                for item in arr {
-                                    if let Ok(id) = item.as_reference() {
-                                        per_page_refs_to_delete.push(id);
-                                    }
+    // --- 5. Per-page cleaning ------------------------------------------
+    // Copy the list of page ids out first so we can mutate the dicts
+    // without holding an iterator into the object map.
+    let page_ids: Vec<ObjectId> = doc.page_iter().collect();
+    for page_id in page_ids {
+        let mut per_page_refs_to_delete: Vec<ObjectId> = Vec::new();
+        if let Ok(page) = doc.get_dictionary(page_id) {
+            for key in PAGE_KEYS_TO_STRIP {
+                if let Ok(obj) = page.get(key) {
+                    match obj {
+                        Object::Reference(id) => per_page_refs_to_delete.push(*id),
+                        Object::Array(arr) => {
+                            for item in arr {
+                                if let Ok(id) = item.as_reference() {
+                                    per_page_refs_to_delete.push(id);
                                 }
                             }
-                            _ => {}
                         }
+                        _ => {}
                     }
                 }
             }
-            if let Ok(page) = doc.get_dictionary_mut(page_id) {
-                for key in PAGE_KEYS_TO_STRIP {
-                    page.remove(key);
-                }
-            }
-            for id in per_page_refs_to_delete {
-                doc.delete_object(id);
+        }
+        if let Ok(page) = doc.get_dictionary_mut(page_id) {
+            for key in PAGE_KEYS_TO_STRIP {
+                page.remove(key);
             }
         }
-
-        // --- 6. Strip /Metadata from every XObject stream (image / form) ---
-        // Digital-camera images embedded in a PDF ship their own XMP via a
-        // /Metadata key on the image XObject. Drop that dict; we leave the
-        // pixel stream intact.
-        let xobject_ids: Vec<ObjectId> = doc
-            .objects
-            .iter()
-            .filter_map(|(id, obj)| match obj {
-                Object::Stream(s) => {
-                    if matches!(s.dict.get(b"Type"), Ok(Object::Name(n)) if n == b"XObject") {
-                        Some(*id)
-                    } else if s.dict.has(b"Subtype") && s.dict.has(b"Width") {
-                        // Image XObjects in the wild often omit /Type but
-                        // always have /Subtype /Image + /Width + /Height.
-                        Some(*id)
-                    } else {
-                        None
-                    }
-                }
-                _ => None,
-            })
-            .collect();
-        for id in xobject_ids {
-            if let Some(Object::Stream(stream)) = doc.objects.get_mut(&id) {
-                stream.dict.remove(b"Metadata");
-                stream.dict.remove(b"LastModified");
-                stream.dict.remove(b"OC"); // Optional content (layers)
-                stream.dict.remove(b"PieceInfo");
-            }
-        }
-
-        // --- 6b. Page-tree INTERIOR (/Pages) nodes -------------------------
-        // page_iter() (step 5) only visits leaf /Page dicts, so strip the
-        // same identifying keys from every /Type /Pages node (root +
-        // intermediate) and orphan any indirect stream they reference so the
-        // prune below removes the XMP residue. Mirrors compress_pdf.rs.
-        let pages_node_ids: Vec<ObjectId> = doc
-            .objects
-            .iter()
-            .filter_map(|(id, obj)| match obj {
-                Object::Dictionary(d) => {
-                    matches!(d.get(b"Type"), Ok(Object::Name(n)) if n == b"Pages")
-                        .then_some(*id)
-                }
-                _ => None,
-            })
-            .collect();
-        let mut pages_refs_to_delete: Vec<ObjectId> = Vec::new();
-        for node_id in &pages_node_ids {
-            if let Some(Object::Dictionary(d)) = doc.objects.get(node_id) {
-                for key in PAGES_NODE_KEYS_TO_STRIP {
-                    if let Ok(id) = d.get(key).and_then(Object::as_reference) {
-                        pages_refs_to_delete.push(id);
-                    }
-                }
-            }
-            if let Some(Object::Dictionary(d)) = doc.objects.get_mut(node_id) {
-                for key in PAGES_NODE_KEYS_TO_STRIP {
-                    d.remove(key);
-                }
-            }
-        }
-        for id in pages_refs_to_delete {
+        for id in per_page_refs_to_delete {
             doc.delete_object(id);
         }
+    }
+
+    // --- 6. Strip /Metadata from every XObject stream (image / form) ---
+    // Digital-camera images embedded in a PDF ship their own XMP via a
+    // /Metadata key on the image XObject. Drop that dict; we leave the
+    // pixel stream intact.
+    let xobject_ids: Vec<ObjectId> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, obj)| match obj {
+            Object::Stream(s) => {
+                if matches!(s.dict.get(b"Type"), Ok(Object::Name(n)) if n == b"XObject") {
+                    Some(*id)
+                } else if s.dict.has(b"Subtype") && s.dict.has(b"Width") {
+                    // Image XObjects in the wild often omit /Type but
+                    // always have /Subtype /Image + /Width + /Height.
+                    Some(*id)
+                } else {
+                    None
+                }
+            }
+            _ => None,
+        })
+        .collect();
+    for id in xobject_ids {
+        if let Some(Object::Stream(stream)) = doc.objects.get_mut(&id) {
+            stream.dict.remove(b"Metadata");
+            stream.dict.remove(b"LastModified");
+            stream.dict.remove(b"OC"); // Optional content (layers)
+            stream.dict.remove(b"PieceInfo");
+        }
+    }
+
+    // --- 6b. Page-tree INTERIOR (/Pages) nodes -------------------------
+    // page_iter() (step 5) only visits leaf /Page dicts, so strip the
+    // same identifying keys from every /Type /Pages node (root +
+    // intermediate) and orphan any indirect stream they reference so the
+    // prune below removes the XMP residue. Mirrors compress_pdf.rs.
+    let pages_node_ids: Vec<ObjectId> = doc
+        .objects
+        .iter()
+        .filter_map(|(id, obj)| match obj {
+            Object::Dictionary(d) => {
+                matches!(d.get(b"Type"), Ok(Object::Name(n)) if n == b"Pages").then_some(*id)
+            }
+            _ => None,
+        })
+        .collect();
+    let mut pages_refs_to_delete: Vec<ObjectId> = Vec::new();
+    for node_id in &pages_node_ids {
+        if let Some(Object::Dictionary(d)) = doc.objects.get(node_id) {
+            for key in PAGES_NODE_KEYS_TO_STRIP {
+                if let Ok(id) = d.get(key).and_then(Object::as_reference) {
+                    pages_refs_to_delete.push(id);
+                }
+            }
+        }
+        if let Some(Object::Dictionary(d)) = doc.objects.get_mut(node_id) {
+            for key in PAGES_NODE_KEYS_TO_STRIP {
+                d.remove(key);
+            }
+        }
+    }
+    for id in pages_refs_to_delete {
+        doc.delete_object(id);
+    }
 
     // --- 7. Prune orphaned objects after all the deletions -------------
     doc.prune_objects();
@@ -967,7 +965,9 @@ mod tests {
         // Sanity: the dirty input carries the XMP creator token.
         let dirty = std::fs::read(&src).unwrap();
         assert!(
-            dirty.windows(b"PAGES-ROOT-LEAK".len()).any(|w| w == b"PAGES-ROOT-LEAK"),
+            dirty
+                .windows(b"PAGES-ROOT-LEAK".len())
+                .any(|w| w == b"PAGES-ROOT-LEAK"),
             "fixture must contain the XMP creator token before cleaning"
         );
 
@@ -995,7 +995,9 @@ mod tests {
         // And the orphaned XMP stream bytes must be gone from the output.
         let cleaned = std::fs::read(&dst).unwrap();
         assert!(
-            !cleaned.windows(b"PAGES-ROOT-LEAK".len()).any(|w| w == b"PAGES-ROOT-LEAK"),
+            !cleaned
+                .windows(b"PAGES-ROOT-LEAK".len())
+                .any(|w| w == b"PAGES-ROOT-LEAK"),
             "XMP creator token survived in cleaned /Pages-node PDF"
         );
     }

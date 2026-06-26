@@ -25,8 +25,8 @@ categories = ["command-line-utilities", "multimedia", "gui"]
 
 [workspace.dependencies]
 traceless-core = { path = "crates/core" }
-log = "= 0.4.32"
-env_logger = "= 0.11.10"
+log = "= 0.4.33"
+env_logger = "= 0.11.11"
 async-channel = "= 2.5.0"
 
 # Vendored patch of `typed-path` 0.12.3 (pulled transitively by `zip` on

@@ -4,11 +4,11 @@ use std::io::{BufWriter, Cursor};
 #[cfg(feature = "native")]
 use std::path::Path;
 
+#[cfg(feature = "native")]
+use img_parts::Bytes;
 use img_parts::jpeg::Jpeg;
 use img_parts::png::Png;
 use img_parts::webp::WebP;
-#[cfg(feature = "native")]
-use img_parts::Bytes;
 use img_parts::{DynImage, ImageEXIF, ImageICC};
 use little_exif::filetype::FileExtension;
 use little_exif::metadata::Metadata as ExifMetadata;
@@ -467,12 +467,9 @@ fn strip_jxl_boxes(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut pos: usize = 0;
 
     while pos + 8 <= len {
-        let box_size = u32::from_be_bytes([
-            input[pos],
-            input[pos + 1],
-            input[pos + 2],
-            input[pos + 3],
-        ]) as usize;
+        let box_size =
+            u32::from_be_bytes([input[pos], input[pos + 1], input[pos + 2], input[pos + 3]])
+                as usize;
         let ty = [
             input[pos + 4],
             input[pos + 5],
@@ -732,7 +729,12 @@ fn parse_infe_xmp_id(buf: &[u8], payload: usize, end: usize) -> Option<u32> {
     };
     // item_protection_index (u16), then item_type (4 bytes).
     p = p.checked_add(2)?;
-    let item_type = [*buf.get(p)?, *buf.get(p + 1)?, *buf.get(p + 2)?, *buf.get(p + 3)?];
+    let item_type = [
+        *buf.get(p)?,
+        *buf.get(p + 1)?,
+        *buf.get(p + 2)?,
+        *buf.get(p + 3)?,
+    ];
     p = p.checked_add(4)?;
     if &item_type != b"mime" {
         return None;
@@ -854,8 +856,8 @@ fn zero_item_extents(
             } else {
                 0
             };
-            let start = usize::try_from(base.checked_add(base_offset)?.checked_add(extent_offset)?)
-                .ok()?;
+            let start =
+                usize::try_from(base.checked_add(base_offset)?.checked_add(extent_offset)?).ok()?;
             let elen = usize::try_from(extent_length).ok()?;
             let stop = start.checked_add(elen)?;
             // Only zero in-range extents; a malformed offset must not panic.

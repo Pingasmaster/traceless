@@ -250,7 +250,7 @@ mod tests {
                 .iter()
                 .any(|i| i.key == "title" && i.value == "My Video")
         );
-        assert!(items.iter().filter(|i| i.key == "language").count() == 2);
+        assert_eq!(items.iter().filter(|i| i.key == "language").count(), 2);
     }
 
     #[test]

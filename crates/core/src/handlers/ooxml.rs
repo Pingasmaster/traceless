@@ -358,8 +358,11 @@ fn randomize_sld_master_ids(xml: &str) -> Result<String, CoreError> {
         }
     }
 
-    String::from_utf8(writer.into_inner().into_inner())
-        .map_err(|e| clean_err(format!("OOXML randomize_sld_master_ids output not UTF-8: {e}")))
+    String::from_utf8(writer.into_inner().into_inner()).map_err(|e| {
+        clean_err(format!(
+            "OOXML randomize_sld_master_ids output not UTF-8: {e}"
+        ))
+    })
 }
 
 fn rewrite_id_attribute(

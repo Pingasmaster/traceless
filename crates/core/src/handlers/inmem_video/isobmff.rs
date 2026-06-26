@@ -114,12 +114,18 @@ struct TopBox {
 /// the *header* length in bytes (8 or 16). `None` body length means the
 /// box extends to EOF (a `size==0` box, only legal for the last box).
 fn read_header(cur: &mut Cursor<&[u8]>) -> Result<(FourCC, Option<usize>, usize), CoreError> {
-    let start = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
+    let start =
+        usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
     let header = Header::decode(cur).map_err(|e| parse_err(format!("bad box header: {e}")))?;
-    let after = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
-    let header_len = after.checked_sub(start).ok_or_else(|| parse_err("header length underflow"))?;
+    let after =
+        usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
+    let header_len = after
+        .checked_sub(start)
+        .ok_or_else(|| parse_err("header length underflow"))?;
     if header_len != 8 && header_len != 16 {
-        return Err(parse_err(format!("unexpected box header length {header_len}")));
+        return Err(parse_err(format!(
+            "unexpected box header length {header_len}"
+        )));
     }
     Ok((header.kind, header.size, header_len))
 }
@@ -141,7 +147,9 @@ fn write_header(kind: [u8; 4], body_len: usize) -> Result<Vec<u8>, CoreError> {
 
 /// Borrow `len` bytes of `data` starting at `off`, bounds-checked.
 fn slice_at(data: &[u8], off: usize, len: usize) -> Result<&[u8], CoreError> {
-    let end = off.checked_add(len).ok_or_else(|| parse_err("box extent overflow"))?;
+    let end = off
+        .checked_add(len)
+        .ok_or_else(|| parse_err("box extent overflow"))?;
     data.get(off..end)
         .ok_or_else(|| parse_err("box extends past end of input"))
 }
@@ -174,7 +182,8 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     let mut saw_mdat = false;
     let mut pre_mdat_dropped: usize = 0;
     loop {
-        let pos = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
+        let pos =
+            usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
         if pos == input.len() {
             break;
         }
@@ -185,13 +194,20 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         // Total on-disk size of this box (header + body). A `None` body
         // length means "to EOF".
         let total = match body_len {
-            Some(b) => header_len.checked_add(b).ok_or_else(|| parse_err("box size overflow"))?,
-            None => input.len().checked_sub(box_start).ok_or_else(|| parse_err("box size underflow"))?,
+            Some(b) => header_len
+                .checked_add(b)
+                .ok_or_else(|| parse_err("box size overflow"))?,
+            None => input
+                .len()
+                .checked_sub(box_start)
+                .ok_or_else(|| parse_err("box size underflow"))?,
         };
         // Bounds-check the box extent against the input, then record its
         // range (no copy). `slice_at` validates `box_start + total` fits.
         let _ = slice_at(input, box_start, total)?;
-        let box_end = box_start.checked_add(total).ok_or_else(|| parse_err("box end overflow"))?;
+        let box_end = box_start
+            .checked_add(total)
+            .ok_or_else(|| parse_err("box end overflow"))?;
         // Advance the cursor past this whole box (the header was already
         // consumed by `read_header`; jump straight to the box end).
         let new_pos = u64::try_from(box_end).map_err(|_| parse_err("cursor position overflow"))?;
@@ -222,7 +238,11 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
             }
             continue;
         }
-        top.push(TopBox { kind: kind4, start: box_start, end: box_end });
+        top.push(TopBox {
+            kind: kind4,
+            start: box_start,
+            end: box_end,
+        });
     }
 
     if !saw_ftyp {
@@ -247,8 +267,16 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
     // 3. Rewrite the moov box: drop metadata subtrees, and (if needed)
     //    patch chunk offsets by the moov shrink delta.
     let moov_box = {
-        let m = top.get(moov_idx).ok_or_else(|| clean_err("moov index out of range"))?;
-        slice_at(input, m.start, m.end.checked_sub(m.start).ok_or_else(|| clean_err("moov range underflow"))?)?
+        let m = top
+            .get(moov_idx)
+            .ok_or_else(|| clean_err("moov index out of range"))?;
+        slice_at(
+            input,
+            m.start,
+            m.end
+                .checked_sub(m.start)
+                .ok_or_else(|| clean_err("moov range underflow"))?,
+        )?
     };
     let old_moov_total = moov_box.len();
     let new_moov = rewrite_moov(moov_box)?;
@@ -282,7 +310,10 @@ pub(crate) fn strip(input: &[u8]) -> Result<Vec<u8>, CoreError> {
         if i == moov_idx {
             out.extend_from_slice(&new_moov);
         } else {
-            let span = b.end.checked_sub(b.start).ok_or_else(|| clean_err("box range underflow"))?;
+            let span = b
+                .end
+                .checked_sub(b.start)
+                .ok_or_else(|| clean_err("box range underflow"))?;
             out.extend_from_slice(slice_at(input, b.start, span)?);
         }
     }
@@ -330,12 +361,15 @@ enum ContainerKind {
 /// rewritten. Returns the new body bytes.
 fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec<u8>, CoreError> {
     if depth > MAX_BOX_DEPTH {
-        return Err(parse_err("ISO-BMFF container nesting exceeds maximum depth"));
+        return Err(parse_err(
+            "ISO-BMFF container nesting exceeds maximum depth",
+        ));
     }
     let mut out = Vec::with_capacity(body.len());
     let mut cur = Cursor::new(body);
     loop {
-        let pos = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
+        let pos =
+            usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
         if pos == body.len() {
             break;
         }
@@ -346,12 +380,21 @@ fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec
         let (ckind, cbody_len, cheader_len) = read_header(&mut cur)?;
         let ckind4: [u8; 4] = ckind.into();
         let total = match cbody_len {
-            Some(b) => cheader_len.checked_add(b).ok_or_else(|| parse_err("child box size overflow"))?,
-            None => body.len().checked_sub(child_start).ok_or_else(|| parse_err("child box size underflow"))?,
+            Some(b) => cheader_len
+                .checked_add(b)
+                .ok_or_else(|| parse_err("child box size overflow"))?,
+            None => body
+                .len()
+                .checked_sub(child_start)
+                .ok_or_else(|| parse_err("child box size underflow"))?,
         };
         let child = slice_at(body, child_start, total)?;
-        let new_pos = u64::try_from(child_start.checked_add(total).ok_or_else(|| parse_err("child box end overflow"))?)
-            .map_err(|_| parse_err("cursor position overflow"))?;
+        let new_pos = u64::try_from(
+            child_start
+                .checked_add(total)
+                .ok_or_else(|| parse_err("child box end overflow"))?,
+        )
+        .map_err(|_| parse_err("cursor position overflow"))?;
         cur.set_position(new_pos);
 
         // Drop free/skip wherever we rewrite.
@@ -365,7 +408,8 @@ fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec
                     continue; // drop file-level user-data / metadata
                 }
                 if &ckind4 == TRAK {
-                    let rewritten = rewrite_subbox(child, cheader_len, *TRAK, ContainerKind::Trak, depth)?;
+                    let rewritten =
+                        rewrite_subbox(child, cheader_len, *TRAK, ContainerKind::Trak, depth)?;
                     out.extend_from_slice(&rewritten);
                     continue;
                 }
@@ -382,7 +426,8 @@ fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec
                     continue; // drop per-track user-data / metadata
                 }
                 if &ckind4 == MDIA {
-                    let rewritten = rewrite_subbox(child, cheader_len, *MDIA, ContainerKind::Mdia, depth)?;
+                    let rewritten =
+                        rewrite_subbox(child, cheader_len, *MDIA, ContainerKind::Mdia, depth)?;
                     out.extend_from_slice(&rewritten);
                     continue;
                 }
@@ -398,7 +443,8 @@ fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec
                     continue;
                 }
                 if &ckind4 == MINF {
-                    let rewritten = rewrite_subbox(child, cheader_len, *MINF, ContainerKind::Minf, depth)?;
+                    let rewritten =
+                        rewrite_subbox(child, cheader_len, *MINF, ContainerKind::Minf, depth)?;
                     out.extend_from_slice(&rewritten);
                     continue;
                 }
@@ -411,7 +457,8 @@ fn rewrite_container(body: &[u8], kind: ContainerKind, depth: u32) -> Result<Vec
             }
             ContainerKind::Minf => {
                 if &ckind4 == STBL {
-                    let rewritten = rewrite_subbox(child, cheader_len, *STBL, ContainerKind::Stbl, depth)?;
+                    let rewritten =
+                        rewrite_subbox(child, cheader_len, *STBL, ContainerKind::Stbl, depth)?;
                     out.extend_from_slice(&rewritten);
                     continue;
                 }
@@ -440,7 +487,9 @@ fn rewrite_subbox(
     let inner = child
         .get(header_len..)
         .ok_or_else(|| parse_err("sub-box body out of range"))?;
-    let next_depth = depth.checked_add(1).ok_or_else(|| parse_err("box depth overflow"))?;
+    let next_depth = depth
+        .checked_add(1)
+        .ok_or_else(|| parse_err("box depth overflow"))?;
     let new_inner = rewrite_container(inner, container, next_depth)?;
     let mut out = write_header(kind4, new_inner.len())?;
     out.extend_from_slice(&new_inner);
@@ -503,8 +552,12 @@ fn patch_chunk_offsets(mut moov_box: Vec<u8>, delta: usize) -> Result<Vec<u8>, C
         // The table layout: version(1) + flags(3) + entry_count(4) +
         // entries. `table_start` points at the version byte (the box body
         // start). Read entry_count, then patch each entry.
-        let count_off = table_start.checked_add(4).ok_or_else(|| parse_err("offset table header overflow"))?;
-        let count_end = count_off.checked_add(4).ok_or_else(|| parse_err("offset table header overflow"))?;
+        let count_off = table_start
+            .checked_add(4)
+            .ok_or_else(|| parse_err("offset table header overflow"))?;
+        let count_end = count_off
+            .checked_add(4)
+            .ok_or_else(|| parse_err("offset table header overflow"))?;
         let count_bytes = moov_box
             .get(count_off..count_end)
             .ok_or_else(|| parse_err("offset table truncated"))?;
@@ -517,7 +570,9 @@ fn patch_chunk_offsets(mut moov_box: Vec<u8>, delta: usize) -> Result<Vec<u8>, C
         let mut entry_off = count_end;
         let entry_size = if is_co64 { 8usize } else { 4usize };
         for _ in 0..entry_count {
-            let entry_end = entry_off.checked_add(entry_size).ok_or_else(|| parse_err("offset entry overflow"))?;
+            let entry_end = entry_off
+                .checked_add(entry_size)
+                .ok_or_else(|| parse_err("offset entry overflow"))?;
             let entry = moov_box
                 .get(entry_off..entry_end)
                 .ok_or_else(|| parse_err("offset table truncated"))?;
@@ -525,18 +580,18 @@ fn patch_chunk_offsets(mut moov_box: Vec<u8>, delta: usize) -> Result<Vec<u8>, C
                 let v = u64::from_be_bytes([
                     entry[0], entry[1], entry[2], entry[3], entry[4], entry[5], entry[6], entry[7],
                 ]);
-                let nv = v.checked_sub(delta_u64).ok_or_else(|| {
-                    clean_err("co64 chunk offset underflowed when shifting moov")
-                })?;
+                let nv = v
+                    .checked_sub(delta_u64)
+                    .ok_or_else(|| clean_err("co64 chunk offset underflowed when shifting moov"))?;
                 let dst = moov_box
                     .get_mut(entry_off..entry_end)
                     .ok_or_else(|| clean_err("offset table write out of range"))?;
                 dst.copy_from_slice(&nv.to_be_bytes());
             } else {
                 let v = u32::from_be_bytes([entry[0], entry[1], entry[2], entry[3]]);
-                let nv = v.checked_sub(delta_u32).ok_or_else(|| {
-                    clean_err("stco chunk offset underflowed when shifting moov")
-                })?;
+                let nv = v
+                    .checked_sub(delta_u32)
+                    .ok_or_else(|| clean_err("stco chunk offset underflowed when shifting moov"))?;
                 let dst = moov_box
                     .get_mut(entry_off..entry_end)
                     .ok_or_else(|| clean_err("offset table write out of range"))?;
@@ -562,12 +617,17 @@ fn collect_offset_tables(
     depth: u32,
 ) -> Result<(), CoreError> {
     if depth > MAX_BOX_DEPTH {
-        return Err(parse_err("ISO-BMFF container nesting exceeds maximum depth"));
+        return Err(parse_err(
+            "ISO-BMFF container nesting exceeds maximum depth",
+        ));
     }
-    let region = data.get(start..end).ok_or_else(|| parse_err("scan region out of range"))?;
+    let region = data
+        .get(start..end)
+        .ok_or_else(|| parse_err("scan region out of range"))?;
     let mut cur = Cursor::new(region);
     loop {
-        let rel = usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
+        let rel =
+            usize::try_from(cur.position()).map_err(|_| parse_err("cursor position overflow"))?;
         if rel == region.len() {
             break;
         }
@@ -578,23 +638,42 @@ fn collect_offset_tables(
         let (kind, body_len, header_len) = read_header(&mut cur)?;
         let kind4: [u8; 4] = kind.into();
         let total = match body_len {
-            Some(b) => header_len.checked_add(b).ok_or_else(|| parse_err("box size overflow"))?,
-            None => region.len().checked_sub(box_rel_start).ok_or_else(|| parse_err("box size underflow"))?,
+            Some(b) => header_len
+                .checked_add(b)
+                .ok_or_else(|| parse_err("box size overflow"))?,
+            None => region
+                .len()
+                .checked_sub(box_rel_start)
+                .ok_or_else(|| parse_err("box size underflow"))?,
         };
-        let abs_start = start.checked_add(box_rel_start).ok_or_else(|| parse_err("offset overflow"))?;
-        let body_abs = abs_start.checked_add(header_len).ok_or_else(|| parse_err("offset overflow"))?;
-        let body_len_resolved = total.checked_sub(header_len).ok_or_else(|| parse_err("body underflow"))?;
-        let body_abs_end = body_abs.checked_add(body_len_resolved).ok_or_else(|| parse_err("offset overflow"))?;
+        let abs_start = start
+            .checked_add(box_rel_start)
+            .ok_or_else(|| parse_err("offset overflow"))?;
+        let body_abs = abs_start
+            .checked_add(header_len)
+            .ok_or_else(|| parse_err("offset overflow"))?;
+        let body_len_resolved = total
+            .checked_sub(header_len)
+            .ok_or_else(|| parse_err("body underflow"))?;
+        let body_abs_end = body_abs
+            .checked_add(body_len_resolved)
+            .ok_or_else(|| parse_err("offset overflow"))?;
 
         if matches!(&kind4, STCO | CO64) {
             out.push((body_abs, &kind4 == CO64));
         } else if matches!(&kind4, MOOV | TRAK | MDIA | MINF | STBL) {
-            let next_depth = depth.checked_add(1).ok_or_else(|| parse_err("box depth overflow"))?;
+            let next_depth = depth
+                .checked_add(1)
+                .ok_or_else(|| parse_err("box depth overflow"))?;
             collect_offset_tables(data, body_abs, body_abs_end, out, next_depth)?;
         }
 
-        let new_pos = u64::try_from(box_rel_start.checked_add(total).ok_or_else(|| parse_err("box end overflow"))?)
-            .map_err(|_| parse_err("cursor position overflow"))?;
+        let new_pos = u64::try_from(
+            box_rel_start
+                .checked_add(total)
+                .ok_or_else(|| parse_err("box end overflow"))?,
+        )
+        .map_err(|_| parse_err("cursor position overflow"))?;
         cur.set_position(new_pos);
     }
     Ok(())
@@ -604,8 +683,8 @@ fn collect_offset_tables(
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
-    use std::io::Cursor;
     use mp4_atom::{Decode, Header};
+    use std::io::Cursor;
 
     /// Build a box: 4-byte big-endian size (header+body), 4-byte FourCC,
     /// then body.
@@ -670,7 +749,9 @@ mod tests {
             let mut cur = Cursor::new(data);
             while (cur.position() as usize) < data.len() {
                 let start = cur.position() as usize;
-                let Ok(h) = Header::decode(&mut cur) else { return false };
+                let Ok(h) = Header::decode(&mut cur) else {
+                    return false;
+                };
                 let hlen = cur.position() as usize - start;
                 let total = match h.size {
                     Some(s) => hlen + s,
@@ -681,7 +762,10 @@ mod tests {
                     return true;
                 }
                 // Recurse into known container boxes.
-                if matches!(&kind4, b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"meta") {
+                if matches!(
+                    &kind4,
+                    b"moov" | b"trak" | b"mdia" | b"minf" | b"stbl" | b"udta" | b"meta"
+                ) {
                     let body = &data[start + hlen..start + total];
                     if walk(body, target) {
                         return true;
@@ -767,7 +851,10 @@ mod tests {
         let moov = build_moov(&stco);
         // top-level free + skip + uuid to drop.
         let free = boxed(b"free", &[0u8; 32]);
-        let uuid = boxed(b"uuid", b"\x11\x22\x33\x44\x55\x66\x77\x88\x99\xAA\xBB\xCC\xDD\xEE\xFF\x00LEAKYUUIDPAYLOAD");
+        let uuid = boxed(
+            b"uuid",
+            b"\x11\x22\x33\x44\x55\x66\x77\x88\x99\xAA\xBB\xCC\xDD\xEE\xFF\x00LEAKYUUIDPAYLOAD",
+        );
 
         // free/skip/uuid are placed AFTER mdat so that nothing droppable
         // precedes mdat: this keeps the test's "mdat-first, no offset patch"
@@ -784,18 +871,39 @@ mod tests {
         input.extend_from_slice(&uuid);
 
         // Sanity: the metadata IS present in the dirty input.
-        assert!(input.windows(b"GPS-SECRET".len()).any(|w| w == b"GPS-SECRET"));
-        assert!(input.windows(b"SECRET-TITLE".len()).any(|w| w == b"SECRET-TITLE"));
+        assert!(
+            input
+                .windows(b"GPS-SECRET".len())
+                .any(|w| w == b"GPS-SECRET")
+        );
+        assert!(
+            input
+                .windows(b"SECRET-TITLE".len())
+                .any(|w| w == b"SECRET-TITLE")
+        );
         assert!(input.windows(b"SECRETCAM".len()).any(|w| w == b"SECRETCAM"));
         assert!(input.windows(b"LEAKYUUID".len()).any(|w| w == b"LEAKYUUID"));
 
         let out = strip(&input).unwrap();
 
         // Metadata bytes are gone.
-        assert!(!out.windows(b"GPS-SECRET".len()).any(|w| w == b"GPS-SECRET"), "GPS tag leaked");
-        assert!(!out.windows(b"SECRET-TITLE".len()).any(|w| w == b"SECRET-TITLE"), "title tag leaked");
-        assert!(!out.windows(b"SECRETCAM".len()).any(|w| w == b"SECRETCAM"), "keys tag leaked");
-        assert!(!out.windows(b"LEAKYUUID".len()).any(|w| w == b"LEAKYUUID"), "uuid leaked");
+        assert!(
+            !out.windows(b"GPS-SECRET".len()).any(|w| w == b"GPS-SECRET"),
+            "GPS tag leaked"
+        );
+        assert!(
+            !out.windows(b"SECRET-TITLE".len())
+                .any(|w| w == b"SECRET-TITLE"),
+            "title tag leaked"
+        );
+        assert!(
+            !out.windows(b"SECRETCAM".len()).any(|w| w == b"SECRETCAM"),
+            "keys tag leaked"
+        );
+        assert!(
+            !out.windows(b"LEAKYUUID".len()).any(|w| w == b"LEAKYUUID"),
+            "uuid leaked"
+        );
 
         // The udta / meta boxes are gone from the tree.
         assert!(!box_present(&out, b"udta"), "udta survived");
@@ -806,10 +914,17 @@ mod tests {
         // Structural integrity: same number of top-level real boxes
         // (ftyp, mdat, moov) and the mdat is byte-for-byte unchanged.
         let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(tl, vec![*b"ftyp", *b"mdat", *b"moov"], "top-level box set changed");
+        assert_eq!(
+            tl,
+            vec![*b"ftyp", *b"mdat", *b"moov"],
+            "top-level box set changed"
+        );
 
         // mdat verbatim.
-        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat payload altered");
+        assert!(
+            out.windows(mdat_payload.len()).any(|w| w == mdat_payload),
+            "mdat payload altered"
+        );
 
         // Still exactly one trak, still has an stco, still has tkhd/mvhd.
         assert!(box_present(&out, b"trak"));
@@ -818,7 +933,11 @@ mod tests {
         assert!(box_present(&out, b"tkhd"));
         // The stco entries were NOT changed (mdat-first layout).
         let stco_vals = read_first_stco(&out);
-        assert_eq!(stco_vals, vec![16, 40, 88], "stco entries changed in mdat-first layout");
+        assert_eq!(
+            stco_vals,
+            vec![16, 40, 88],
+            "stco entries changed in mdat-first layout"
+        );
     }
 
     /// faststart layout: moov before mdat. stco entries must be
@@ -859,7 +978,10 @@ mod tests {
         assert_eq!(patched, expected, "stco not patched by exact moov delta");
 
         // mdat bytes unchanged.
-        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat payload altered");
+        assert!(
+            out.windows(mdat_payload.len()).any(|w| w == mdat_payload),
+            "mdat payload altered"
+        );
 
         // Metadata gone.
         assert!(!box_present(&out, b"udta"));
@@ -948,22 +1070,40 @@ mod tests {
         input.extend_from_slice(&mdat);
 
         // Sanity: the secret tags are present in the dirty input.
-        assert!(input.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"));
-        assert!(input.windows(b"GPS-TOP-SECRET".len()).any(|w| w == b"GPS-TOP-SECRET"));
+        assert!(
+            input
+                .windows(b"TOPLEVEL-META-SECRET".len())
+                .any(|w| w == b"TOPLEVEL-META-SECRET")
+        );
+        assert!(
+            input
+                .windows(b"GPS-TOP-SECRET".len())
+                .any(|w| w == b"GPS-TOP-SECRET")
+        );
 
         let old_moov_total = moov.len();
         let out = strip(&input).unwrap();
 
         // The file-level meta and its tags are gone.
         assert!(!box_present(&out, b"meta"), "top-level meta survived");
-        assert!(!out.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"),
-            "top-level meta title tag leaked");
-        assert!(!out.windows(b"GPS-TOP-SECRET".len()).any(|w| w == b"GPS-TOP-SECRET"),
-            "top-level meta GPS tag leaked");
+        assert!(
+            !out.windows(b"TOPLEVEL-META-SECRET".len())
+                .any(|w| w == b"TOPLEVEL-META-SECRET"),
+            "top-level meta title tag leaked"
+        );
+        assert!(
+            !out.windows(b"GPS-TOP-SECRET".len())
+                .any(|w| w == b"GPS-TOP-SECRET"),
+            "top-level meta GPS tag leaked"
+        );
 
         // Top-level layout is now ftyp | moov | mdat (meta dropped).
         let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(tl, vec![*b"ftyp", *b"moov", *b"mdat"], "top-level box set wrong");
+        assert_eq!(
+            tl,
+            vec![*b"ftyp", *b"moov", *b"mdat"],
+            "top-level box set wrong"
+        );
 
         // stco shifted by exactly (meta_size + moov_delta).
         let new_moov_total = top_level(&out)
@@ -975,10 +1115,16 @@ mod tests {
         let total_shift = (meta_size + moov_delta) as u32;
         let patched = read_first_stco(&out);
         let expected: Vec<u32> = orig_offsets.iter().map(|o| o - total_shift).collect();
-        assert_eq!(patched, expected, "stco not shifted by meta_size + moov_delta");
+        assert_eq!(
+            patched, expected,
+            "stco not shifted by meta_size + moov_delta"
+        );
 
         // mdat payload untouched.
-        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat altered");
+        assert!(
+            out.windows(mdat_payload.len()).any(|w| w == mdat_payload),
+            "mdat altered"
+        );
     }
 
     /// mdat-first variant: ftyp | mdat | meta | moov. The file-level meta
@@ -998,23 +1144,43 @@ mod tests {
         input.extend_from_slice(&meta);
         input.extend_from_slice(&moov);
 
-        assert!(input.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"));
+        assert!(
+            input
+                .windows(b"TOPLEVEL-META-SECRET".len())
+                .any(|w| w == b"TOPLEVEL-META-SECRET")
+        );
 
         let out = strip(&input).unwrap();
 
         // meta and its tags gone.
-        assert!(!box_present(&out, b"meta"), "top-level meta survived (mdat-first)");
-        assert!(!out.windows(b"TOPLEVEL-META-SECRET".len()).any(|w| w == b"TOPLEVEL-META-SECRET"),
-            "top-level meta tag leaked (mdat-first)");
+        assert!(
+            !box_present(&out, b"meta"),
+            "top-level meta survived (mdat-first)"
+        );
+        assert!(
+            !out.windows(b"TOPLEVEL-META-SECRET".len())
+                .any(|w| w == b"TOPLEVEL-META-SECRET"),
+            "top-level meta tag leaked (mdat-first)"
+        );
 
         // stco NOT patched: meta sits after mdat, so no shift.
-        assert_eq!(read_first_stco(&out), vec![16, 40, 88],
-            "stco changed for a meta dropped after mdat");
+        assert_eq!(
+            read_first_stco(&out),
+            vec![16, 40, 88],
+            "stco changed for a meta dropped after mdat"
+        );
 
         // mdat untouched, top-level now ftyp | mdat | moov.
-        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat altered");
+        assert!(
+            out.windows(mdat_payload.len()).any(|w| w == mdat_payload),
+            "mdat altered"
+        );
         let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(tl, vec![*b"ftyp", *b"mdat", *b"moov"], "top-level box set wrong");
+        assert_eq!(
+            tl,
+            vec![*b"ftyp", *b"mdat", *b"moov"],
+            "top-level box set wrong"
+        );
     }
 
     #[test]
@@ -1081,7 +1247,10 @@ mod tests {
         // Must be a clean Err, not a panic/abort. (cargo test catches a
         // panic as a failed test; a real SIGABRT would crash the runner.)
         let res = strip(&input);
-        assert!(res.is_err(), "deeply nested containers must return Err, not abort");
+        assert!(
+            res.is_err(),
+            "deeply nested containers must return Err, not abort"
+        );
     }
 
     // ---- regression: DEFECT 2 (mvhd/tkhd/mdhd timestamp leak) ----
@@ -1134,8 +1303,14 @@ mod tests {
         input.extend_from_slice(&moov);
 
         // Sanity: the dirty input carries the non-zero timestamps.
-        assert!(input.windows(4).any(|w| w == CREAT.to_be_bytes()), "creation ts absent from fixture");
-        assert!(input.windows(4).any(|w| w == MODIF.to_be_bytes()), "modification ts absent from fixture");
+        assert!(
+            input.windows(4).any(|w| w == CREAT.to_be_bytes()),
+            "creation ts absent from fixture"
+        );
+        assert!(
+            input.windows(4).any(|w| w == MODIF.to_be_bytes()),
+            "modification ts absent from fixture"
+        );
 
         let out = strip(&input).unwrap();
 
@@ -1152,21 +1327,43 @@ mod tests {
 
         // The raw timestamp byte patterns must not appear ANYWHERE in the
         // output (no copy survived in another box).
-        assert!(!out.windows(4).any(|w| w == CREAT.to_be_bytes()), "creation_time bytes still present");
-        assert!(!out.windows(4).any(|w| w == MODIF.to_be_bytes()), "modification_time bytes still present");
+        assert!(
+            !out.windows(4).any(|w| w == CREAT.to_be_bytes()),
+            "creation_time bytes still present"
+        );
+        assert!(
+            !out.windows(4).any(|w| w == MODIF.to_be_bytes()),
+            "modification_time bytes still present"
+        );
 
         // Everything else intact: tails survive, box count + mdat + stco.
         let mvhd_body = find_box_body(&out, b"mvhd").unwrap();
-        assert!(mvhd_body[12..].iter().all(|&b| b == 0xC1), "mvhd tail altered");
+        assert!(
+            mvhd_body[12..].iter().all(|&b| b == 0xC1),
+            "mvhd tail altered"
+        );
         let tkhd_body = find_box_body(&out, b"tkhd").unwrap();
-        assert!(tkhd_body[12..].iter().all(|&b| b == 0xA1), "tkhd tail altered");
+        assert!(
+            tkhd_body[12..].iter().all(|&b| b == 0xA1),
+            "tkhd tail altered"
+        );
         let mdhd_body = find_box_body(&out, b"mdhd").unwrap();
-        assert!(mdhd_body[12..].iter().all(|&b| b == 0xB1), "mdhd tail altered");
+        assert!(
+            mdhd_body[12..].iter().all(|&b| b == 0xB1),
+            "mdhd tail altered"
+        );
 
-        assert!(out.windows(mdat_payload.len()).any(|w| w == mdat_payload), "mdat altered");
+        assert!(
+            out.windows(mdat_payload.len()).any(|w| w == mdat_payload),
+            "mdat altered"
+        );
         assert_eq!(read_first_stco(&out), vec![16, 40], "stco entries changed");
         let tl: Vec<[u8; 4]> = top_level(&out).into_iter().map(|(k, _)| k).collect();
-        assert_eq!(tl, vec![*b"ftyp", *b"mdat", *b"moov"], "top-level box set changed");
+        assert_eq!(
+            tl,
+            vec![*b"ftyp", *b"mdat", *b"moov"],
+            "top-level box set changed"
+        );
     }
 
     /// Version-1 (64-bit) timestamps must also be zeroed at the correct
@@ -1232,7 +1429,12 @@ mod tests {
         let mut out = Vec::new();
         for i in 0..count {
             let off = 8 + i * 4;
-            out.push(u32::from_be_bytes([body[off], body[off + 1], body[off + 2], body[off + 3]]));
+            out.push(u32::from_be_bytes([
+                body[off],
+                body[off + 1],
+                body[off + 2],
+                body[off + 3],
+            ]));
         }
         out
     }

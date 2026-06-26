@@ -514,7 +514,11 @@ fn rewrite_comment_for_serial(
             .ok_or_else(|| parse_err("page index out of range"))?;
         let (off, len) = segment_body_range(pp, si)?;
         let slice = input
-            .get(off..off.checked_add(len).ok_or_else(|| parse_err("seg overflow"))?)
+            .get(
+                off..off
+                    .checked_add(len)
+                    .ok_or_else(|| parse_err("seg overflow"))?,
+            )
             .ok_or_else(|| parse_err("segment body slice"))?;
         packet.extend_from_slice(slice);
     }
@@ -609,7 +613,9 @@ fn rewrite_comment_for_serial(
     if rebuilt.len() > serial_span.len() {
         // Should never happen: stripping only shrinks the packet, so it
         // cannot need more pages than the original spanned.
-        return Err(parse_err("rewritten comment needs more pages than original"));
+        return Err(parse_err(
+            "rewritten comment needs more pages than original",
+        ));
     }
     let rebuilt_count = rebuilt.len();
     for (slot, bytes) in serial_span.iter().zip(rebuilt) {
@@ -634,20 +640,12 @@ fn rewrite_comment_for_serial(
 fn segment_body_range(pp: &ParsedPage, si: usize) -> Result<(usize, usize), CoreError> {
     let mut off = pp.page.body_start;
     for j in 0..si {
-        let l = usize::from(
-            *pp.lacing
-                .get(j)
-                .ok_or_else(|| parse_err("lacing index"))?,
-        );
+        let l = usize::from(*pp.lacing.get(j).ok_or_else(|| parse_err("lacing index"))?);
         off = off
             .checked_add(l)
             .ok_or_else(|| parse_err("segment offset overflow"))?;
     }
-    let len = usize::from(
-        *pp.lacing
-            .get(si)
-            .ok_or_else(|| parse_err("lacing index"))?,
-    );
+    let len = usize::from(*pp.lacing.get(si).ok_or_else(|| parse_err("lacing index"))?);
     Ok((off, len))
 }
 
@@ -657,9 +655,7 @@ fn page_body_prefix(input: &[u8], pp: &ParsedPage, count: usize) -> Result<Vec<u
     for j in 0..count {
         total = total
             .checked_add(usize::from(
-                *pp.lacing
-                    .get(j)
-                    .ok_or_else(|| parse_err("lacing index"))?,
+                *pp.lacing.get(j).ok_or_else(|| parse_err("lacing index"))?,
             ))
             .ok_or_else(|| parse_err("prefix len overflow"))?;
     }
@@ -680,9 +676,7 @@ fn page_body_suffix(input: &[u8], pp: &ParsedPage, start: usize) -> Result<Vec<u
     for j in 0..start {
         before = before
             .checked_add(usize::from(
-                *pp.lacing
-                    .get(j)
-                    .ok_or_else(|| parse_err("lacing index"))?,
+                *pp.lacing.get(j).ok_or_else(|| parse_err("lacing index"))?,
             ))
             .ok_or_else(|| parse_err("suffix prefix overflow"))?;
     }
@@ -879,8 +873,14 @@ fn set_page_sequence(page: &mut [u8], seq: u32) -> Result<(), CoreError> {
         *page.get_mut(slot).ok_or_else(|| parse_err("seq slot"))? = *b;
     }
     // Recompute CRC over the page with the CRC field zeroed.
-    for off in CRC_OFFSET..CRC_OFFSET.checked_add(4).ok_or_else(|| parse_err("crc range"))? {
-        *page.get_mut(off).ok_or_else(|| parse_err("crc zero slot"))? = 0;
+    for off in CRC_OFFSET
+        ..CRC_OFFSET
+            .checked_add(4)
+            .ok_or_else(|| parse_err("crc range"))?
+    {
+        *page
+            .get_mut(off)
+            .ok_or_else(|| parse_err("crc zero slot"))? = 0;
     }
     let crc = ogg_crc(page);
     let crc_bytes = crc.to_le_bytes();
@@ -888,7 +888,9 @@ fn set_page_sequence(page: &mut [u8], seq: u32) -> Result<(), CoreError> {
         let slot = CRC_OFFSET
             .checked_add(i)
             .ok_or_else(|| parse_err("crc rewrite overflow"))?;
-        *page.get_mut(slot).ok_or_else(|| parse_err("crc rewrite slot"))? = *b;
+        *page
+            .get_mut(slot)
+            .ok_or_else(|| parse_err("crc rewrite slot"))? = *b;
     }
     Ok(())
 }
@@ -1005,7 +1007,11 @@ mod tests {
                     .unwrap(),
             );
             let want = next_seq.entry(page.serial).or_insert(0);
-            assert_eq!(seq, *want, "page sequence must be gapless for serial {:#x}", page.serial);
+            assert_eq!(
+                seq, *want,
+                "page sequence must be gapless for serial {:#x}",
+                page.serial
+            );
             *want += 1;
             pos = next;
         }
@@ -1141,12 +1147,16 @@ mod tests {
         stream.extend_from_slice(&build_test_page(0x04, 100, serial, 2, &setup)); // EOS
 
         // Sanity: the dirty stream really carries the secrets and validates.
-        assert!(stream
-            .windows(secret_vendor.len())
-            .any(|w| w == secret_vendor.as_bytes()));
-        assert!(stream
-            .windows(b"ARTIST=me".len())
-            .any(|w| w == b"ARTIST=me"));
+        assert!(
+            stream
+                .windows(secret_vendor.len())
+                .any(|w| w == secret_vendor.as_bytes())
+        );
+        assert!(
+            stream
+                .windows(b"ARTIST=me".len())
+                .any(|w| w == b"ARTIST=me")
+        );
         let before = validate_stream(&stream);
 
         let cleaned = strip(&stream).expect("strip must succeed");
@@ -1199,9 +1209,11 @@ mod tests {
         assert_eq!(body_id, id.as_slice(), "id header must be untouched");
 
         // The setup header packet must survive.
-        assert!(cleaned
-            .windows(b"fake-setup-codebooks".len())
-            .any(|w| w == b"fake-setup-codebooks"));
+        assert!(
+            cleaned
+                .windows(b"fake-setup-codebooks".len())
+                .any(|w| w == b"fake-setup-codebooks")
+        );
     }
 
     #[test]
@@ -1218,22 +1230,30 @@ mod tests {
         stream.extend_from_slice(&build_test_page(0x02, 0, serial, 0, &id)); // BOS
         stream.extend_from_slice(&build_test_page(0x04, 960, serial, 1, &tags)); // EOS
 
-        assert!(stream
-            .windows(b"GPS=48.85,2.35".len())
-            .any(|w| w == b"GPS=48.85,2.35"));
+        assert!(
+            stream
+                .windows(b"GPS=48.85,2.35".len())
+                .any(|w| w == b"GPS=48.85,2.35")
+        );
         let before = validate_stream(&stream);
 
         let cleaned = strip(&stream).expect("strip opus");
 
-        assert!(!cleaned
-            .windows(b"libopus-secret".len())
-            .any(|w| w == b"libopus-secret"));
-        assert!(!cleaned
-            .windows(b"GPS=48.85,2.35".len())
-            .any(|w| w == b"GPS=48.85,2.35"));
-        assert!(!cleaned
-            .windows(b"ENCODER=evil".len())
-            .any(|w| w == b"ENCODER=evil"));
+        assert!(
+            !cleaned
+                .windows(b"libopus-secret".len())
+                .any(|w| w == b"libopus-secret")
+        );
+        assert!(
+            !cleaned
+                .windows(b"GPS=48.85,2.35".len())
+                .any(|w| w == b"GPS=48.85,2.35")
+        );
+        assert!(
+            !cleaned
+                .windows(b"ENCODER=evil".len())
+                .any(|w| w == b"ENCODER=evil")
+        );
 
         let after = validate_stream(&cleaned);
         assert_eq!(before, after);
@@ -1329,7 +1349,7 @@ mod tests {
         p.extend_from_slice(&[0u8; 4]);
         p.push(1); // one segment
         p.push(255); // claims 255 body bytes
-                     // no body
+        // no body
         let err = strip(&p).expect_err("must reject body overrun");
         assert!(matches!(err, CoreError::ParseError { .. }));
     }
@@ -1395,14 +1415,14 @@ mod tests {
         // vendor (16 bytes) lands within the first page; the 300-byte DESC
         // is split across the page boundary, so we verify its presence via
         // reassembly of packet 1 rather than a contiguous window.
-        assert!(stream
-            .windows(secret_vendor.len())
-            .any(|w| w == secret_vendor.as_bytes()));
+        assert!(
+            stream
+                .windows(secret_vendor.len())
+                .any(|w| w == secret_vendor.as_bytes())
+        );
         let dirty_pkt1 = reassemble_packet(&stream, serial, 1);
         assert!(
-            dirty_pkt1
-                .windows(desc.len())
-                .any(|w| w == desc.as_bytes()),
+            dirty_pkt1.windows(desc.len()).any(|w| w == desc.as_bytes()),
             "fixture comment packet must contain the 300-byte DESC"
         );
         let before = validate_stream(&stream);
@@ -1464,16 +1484,35 @@ mod tests {
         // with vendor_len=0, count=0, framing bit present. Reassemble packet
         // 1 from the cleaned stream to inspect it.
         let pkt1 = reassemble_packet(&cleaned, serial, 1);
-        assert!(pkt1.starts_with(b"\x03vorbis"), "still a vorbis comment header");
+        assert!(
+            pkt1.starts_with(b"\x03vorbis"),
+            "still a vorbis comment header"
+        );
         assert_eq!(&pkt1[7..11], &0u32.to_le_bytes(), "vendor_len must be 0");
-        assert_eq!(&pkt1[11..15], &0u32.to_le_bytes(), "comment count must be 0");
+        assert_eq!(
+            &pkt1[11..15],
+            &0u32.to_le_bytes(),
+            "comment count must be 0"
+        );
         assert_eq!(pkt1[15], 0x01, "vorbis framing bit must be present");
         assert_eq!(pkt1.len(), 16, "stripped vorbis comment is sig+0+0+framing");
 
         // (e) id, setup, and audio packets survive byte-for-byte.
-        assert_eq!(reassemble_packet(&cleaned, serial, 0), id, "id header intact");
-        assert_eq!(reassemble_packet(&cleaned, serial, 2), setup, "setup header intact");
-        assert_eq!(reassemble_packet(&cleaned, serial, 3), audio, "audio packet intact");
+        assert_eq!(
+            reassemble_packet(&cleaned, serial, 0),
+            id,
+            "id header intact"
+        );
+        assert_eq!(
+            reassemble_packet(&cleaned, serial, 2),
+            setup,
+            "setup header intact"
+        );
+        assert_eq!(
+            reassemble_packet(&cleaned, serial, 3),
+            audio,
+            "audio packet intact"
+        );
     }
 
     /// Reassemble the `want`-th packet (0-based) of `serial` from a stream,

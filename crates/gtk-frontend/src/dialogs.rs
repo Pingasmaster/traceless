@@ -172,7 +172,10 @@ pub fn show_preferences_dialog(parent: &impl IsA<gtk::Window>) {
         ),
     ];
     for (title, subtitle) in rows {
-        let row = adw::ActionRow::builder().title(title).subtitle(subtitle).build();
+        let row = adw::ActionRow::builder()
+            .title(title)
+            .subtitle(subtitle)
+            .build();
         detail.add(&row);
     }
 

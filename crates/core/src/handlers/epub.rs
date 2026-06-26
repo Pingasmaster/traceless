@@ -246,7 +246,9 @@ fn write_minimal_metadata(
     // <dc:identifier id="id">urn:uuid:…</dc:identifier>
     let mut ident = BytesStart::new("dc:identifier");
     ident.push_attribute(("id", "id"));
-    writer.write_event(Event::Start(ident.clone())).map_err(err)?;
+    writer
+        .write_event(Event::Start(ident.clone()))
+        .map_err(err)?;
     writer
         .write_event(Event::Text(BytesText::new(urn)))
         .map_err(err)?;

@@ -1,9 +1,9 @@
 use std::collections::HashSet;
 #[cfg(feature = "native")]
 use std::fs::File;
-use std::io::{Cursor, Read, Write};
 #[cfg(feature = "native")]
 use std::io::BufReader;
+use std::io::{Cursor, Read, Write};
 #[cfg(feature = "native")]
 use std::path::Path;
 
@@ -63,11 +63,10 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
     // ParseError (HTTP 422), not CleanError (500): a corrupt/truncated/non-ZIP
     // body is a client error. The re-zip/write failures further down stay
     // CleanError (genuine internal failures on an already-parsed archive).
-    let mut archive =
-        ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::ParseError {
-            path: empty(),
-            detail: format!("Not a valid ZIP archive: {e}"),
-        })?;
+    let mut archive = ZipArchive::new(Cursor::new(input)).map_err(|e| CoreError::ParseError {
+        path: empty(),
+        detail: format!("Not a valid ZIP archive: {e}"),
+    })?;
 
     // --- Detect archive family -----------------------------------------
     let kind = detect_kind(&mut archive);
@@ -179,13 +178,12 @@ pub(crate) fn clean_bytes(input: &[u8], _ext: &str) -> Result<Vec<u8>, CoreError
             (buf, compression)
         };
 
-        let cleaned_bytes =
-            clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(|e| {
-                CoreError::CleanError {
-                    path: empty(),
-                    detail: format!("Failed to clean entry {entry_name}: {e}"),
-                }
-            })?;
+        let cleaned_bytes = clean_entry(kind, entry_name, raw_bytes, &kept_parts).map_err(|e| {
+            CoreError::CleanError {
+                path: empty(),
+                detail: format!("Failed to clean entry {entry_name}: {e}"),
+            }
+        })?;
 
         let options = zip_util::normalized_options(compression);
         writer
@@ -812,8 +810,8 @@ mod tests {
         let zeros = vec![0u8; ENTRY];
 
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
 
         writer.start_file("[Content_Types].xml", opts).unwrap();
         writer
@@ -828,7 +826,9 @@ mod tests {
 
         // Five 4 MiB members => 20 MiB decompressed, past the 16 MiB cap.
         for i in 0..5 {
-            writer.start_file(format!("word/media/bomb{i}.bin"), opts).unwrap();
+            writer
+                .start_file(format!("word/media/bomb{i}.bin"), opts)
+                .unwrap();
             writer.write_all(&zeros).unwrap();
         }
         let bytes = writer.finish().unwrap().into_inner();
@@ -854,8 +854,8 @@ mod tests {
         let zeros = vec![0u8; ENTRY];
 
         let mut writer = zip::ZipWriter::new(Cursor::new(Vec::new()));
-        let opts =
-            zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
         writer.start_file("[Content_Types].xml", opts).unwrap();
         writer
             .write_all(
@@ -864,7 +864,9 @@ mod tests {
             .unwrap();
         // Two 2 MiB members => 4 MiB total, comfortably under the 16 MiB cap.
         for i in 0..2 {
-            writer.start_file(format!("word/media/img{i}.bin"), opts).unwrap();
+            writer
+                .start_file(format!("word/media/img{i}.bin"), opts)
+                .unwrap();
             writer.write_all(&zeros).unwrap();
         }
         let bytes = writer.finish().unwrap().into_inner();

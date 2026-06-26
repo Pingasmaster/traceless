@@ -1130,7 +1130,9 @@ fn flac_clean_strips_vorbis_comment_and_application_plus_picture_cover_exif() {
     // on top of the usual Vorbis comment. The cleaner must zero the
     // Vorbis comment AND the cover's embedded EXIF.
     if !have_ffmpeg() {
-        eprintln!("[SKIP] flac_clean_strips_vorbis_comment_and_application_plus_picture_cover_exif: ffmpeg missing");
+        eprintln!(
+            "[SKIP] flac_clean_strips_vorbis_comment_and_application_plus_picture_cover_exif: ffmpeg missing"
+        );
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -1191,7 +1193,9 @@ fn ogg_clean_removes_vorbis_user_comments_via_ffprobe() {
 #[test]
 fn wav_clean_removes_id3_tags_and_preserves_audio_via_ffprobe() {
     if !have_ffmpeg() || !have_ffprobe() {
-        eprintln!("[SKIP] wav_clean_removes_id3_tags_and_preserves_audio_via_ffprobe: tool missing");
+        eprintln!(
+            "[SKIP] wav_clean_removes_id3_tags_and_preserves_audio_via_ffprobe: tool missing"
+        );
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -1489,7 +1493,9 @@ fn flv_clean_removes_onmetadata_script_tag_via_ffprobe() {
 #[test]
 fn video_ogg_clean_removes_theora_and_vorbis_comments_via_ffprobe() {
     if !have_ffmpeg() || !have_ffprobe() {
-        eprintln!("[SKIP] video_ogg_clean_removes_theora_and_vorbis_comments_via_ffprobe: tool missing");
+        eprintln!(
+            "[SKIP] video_ogg_clean_removes_theora_and_vorbis_comments_via_ffprobe: tool missing"
+        );
         return;
     }
     let dir = tempfile::tempdir().unwrap();
@@ -1623,8 +1629,7 @@ fn deeply_nested_zip_in_tar_xz_in_zip_in_tar_bz2_outer_normalized_inner_kept() {
         let mut outer_zip_bytes = Vec::new();
         entry.read_to_end(&mut outer_zip_bytes).unwrap();
         // Unwrap outer zip to get at the bundle.tar.xz member.
-        let mut outer_archive =
-            zip::ZipArchive::new(Cursor::new(&outer_zip_bytes)).unwrap();
+        let mut outer_archive = zip::ZipArchive::new(Cursor::new(&outer_zip_bytes)).unwrap();
         let mut bundle_entry = outer_archive.by_name("bundle.tar.xz").unwrap();
         let mut bundle_bytes = Vec::new();
         bundle_entry.read_to_end(&mut bundle_bytes).unwrap();
@@ -1658,10 +1663,7 @@ fn deeply_nested_zip_in_tar_xz_in_zip_in_tar_bz2_outer_normalized_inner_kept() {
             found_inner = true;
         }
     }
-    assert!(
-        found_inner,
-        "cleaned tar.bz2 lost the innermost zip member"
-    );
+    assert!(found_inner, "cleaned tar.bz2 lost the innermost zip member");
 }
 
 // ---- User-metadata plant classifier (shared by PDF adversarial test) ----
@@ -2317,7 +2319,14 @@ fn clean_aiff_baseline_no_chunks_decodes() {
     if ffmpeg_build_clean(
         &src,
         &[
-            "-f", "lavfi", "-i", "anullsrc=cl=mono:r=8000", "-t", "0.1", "-f", "aiff",
+            "-f",
+            "lavfi",
+            "-i",
+            "anullsrc=cl=mono:r=8000",
+            "-t",
+            "0.1",
+            "-f",
+            "aiff",
         ],
     )
     .is_err()
@@ -3328,53 +3337,283 @@ fn s_jxl(p: &std::path::Path) -> std::io::Result<()> {
 
 const SCENARIOS: &[Scenario] = &[
     // Non-ffmpeg formats (always present)
-    Scenario { name: "jpeg", mime: "image/jpeg", ext: "jpg", build: s_jpeg },
-    Scenario { name: "png", mime: "image/png", ext: "png", build: s_png },
-    Scenario { name: "gif", mime: "image/gif", ext: "gif", build: s_gif },
-    Scenario { name: "bmp", mime: "image/bmp", ext: "bmp", build: s_bmp },
-    Scenario { name: "pdf", mime: "application/pdf", ext: "pdf", build: s_pdf },
-    Scenario { name: "html", mime: "text/html", ext: "html", build: s_html },
-    Scenario { name: "xhtml", mime: "application/xhtml+xml", ext: "xhtml", build: s_xhtml },
-    Scenario { name: "svg", mime: "image/svg+xml", ext: "svg", build: s_svg },
-    Scenario { name: "css", mime: "text/css", ext: "css", build: s_css },
-    Scenario { name: "txt", mime: "text/plain", ext: "txt", build: s_txt },
-    Scenario { name: "torrent", mime: "application/x-bittorrent", ext: "torrent", build: s_torrent },
-    Scenario { name: "docx", mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document", ext: "docx", build: s_docx },
-    Scenario { name: "xlsx", mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", ext: "xlsx", build: s_xlsx },
-    Scenario { name: "pptx", mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation", ext: "pptx", build: s_pptx },
-    Scenario { name: "odt", mime: "application/vnd.oasis.opendocument.text", ext: "odt", build: s_odt },
-    Scenario { name: "ods", mime: "application/vnd.oasis.opendocument.spreadsheet", ext: "ods", build: s_ods },
-    Scenario { name: "odp", mime: "application/vnd.oasis.opendocument.presentation", ext: "odp", build: s_odp },
-    Scenario { name: "odg", mime: "application/vnd.oasis.opendocument.graphics", ext: "odg", build: s_odg },
-    Scenario { name: "epub", mime: "application/epub+zip", ext: "epub", build: s_epub },
-    Scenario { name: "zip", mime: "application/zip", ext: "zip", build: s_zip },
-    Scenario { name: "tar", mime: "application/x-tar", ext: "tar", build: s_tar },
-    Scenario { name: "tar.gz", mime: "application/gzip", ext: "tar.gz", build: s_targz },
-    Scenario { name: "tar.bz2", mime: "application/x-bzip2", ext: "tar.bz2", build: s_tarbz2 },
-    Scenario { name: "tar.xz", mime: "application/x-xz", ext: "tar.xz", build: s_tarxz },
-    Scenario { name: "tar.zst", mime: "application/zstd", ext: "tar.zst", build: s_tarzst },
+    Scenario {
+        name: "jpeg",
+        mime: "image/jpeg",
+        ext: "jpg",
+        build: s_jpeg,
+    },
+    Scenario {
+        name: "png",
+        mime: "image/png",
+        ext: "png",
+        build: s_png,
+    },
+    Scenario {
+        name: "gif",
+        mime: "image/gif",
+        ext: "gif",
+        build: s_gif,
+    },
+    Scenario {
+        name: "bmp",
+        mime: "image/bmp",
+        ext: "bmp",
+        build: s_bmp,
+    },
+    Scenario {
+        name: "pdf",
+        mime: "application/pdf",
+        ext: "pdf",
+        build: s_pdf,
+    },
+    Scenario {
+        name: "html",
+        mime: "text/html",
+        ext: "html",
+        build: s_html,
+    },
+    Scenario {
+        name: "xhtml",
+        mime: "application/xhtml+xml",
+        ext: "xhtml",
+        build: s_xhtml,
+    },
+    Scenario {
+        name: "svg",
+        mime: "image/svg+xml",
+        ext: "svg",
+        build: s_svg,
+    },
+    Scenario {
+        name: "css",
+        mime: "text/css",
+        ext: "css",
+        build: s_css,
+    },
+    Scenario {
+        name: "txt",
+        mime: "text/plain",
+        ext: "txt",
+        build: s_txt,
+    },
+    Scenario {
+        name: "torrent",
+        mime: "application/x-bittorrent",
+        ext: "torrent",
+        build: s_torrent,
+    },
+    Scenario {
+        name: "docx",
+        mime: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        ext: "docx",
+        build: s_docx,
+    },
+    Scenario {
+        name: "xlsx",
+        mime: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ext: "xlsx",
+        build: s_xlsx,
+    },
+    Scenario {
+        name: "pptx",
+        mime: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ext: "pptx",
+        build: s_pptx,
+    },
+    Scenario {
+        name: "odt",
+        mime: "application/vnd.oasis.opendocument.text",
+        ext: "odt",
+        build: s_odt,
+    },
+    Scenario {
+        name: "ods",
+        mime: "application/vnd.oasis.opendocument.spreadsheet",
+        ext: "ods",
+        build: s_ods,
+    },
+    Scenario {
+        name: "odp",
+        mime: "application/vnd.oasis.opendocument.presentation",
+        ext: "odp",
+        build: s_odp,
+    },
+    Scenario {
+        name: "odg",
+        mime: "application/vnd.oasis.opendocument.graphics",
+        ext: "odg",
+        build: s_odg,
+    },
+    Scenario {
+        name: "epub",
+        mime: "application/epub+zip",
+        ext: "epub",
+        build: s_epub,
+    },
+    Scenario {
+        name: "zip",
+        mime: "application/zip",
+        ext: "zip",
+        build: s_zip,
+    },
+    Scenario {
+        name: "tar",
+        mime: "application/x-tar",
+        ext: "tar",
+        build: s_tar,
+    },
+    Scenario {
+        name: "tar.gz",
+        mime: "application/gzip",
+        ext: "tar.gz",
+        build: s_targz,
+    },
+    Scenario {
+        name: "tar.bz2",
+        mime: "application/x-bzip2",
+        ext: "tar.bz2",
+        build: s_tarbz2,
+    },
+    Scenario {
+        name: "tar.xz",
+        mime: "application/x-xz",
+        ext: "tar.xz",
+        build: s_tarxz,
+    },
+    Scenario {
+        name: "tar.zst",
+        mime: "application/zstd",
+        ext: "tar.zst",
+        build: s_tarzst,
+    },
     // ffmpeg-dependent rows (self-skipping via Err)
-    Scenario { name: "mp3", mime: "audio/mpeg", ext: "mp3", build: s_mp3 },
-    Scenario { name: "flac", mime: "audio/flac", ext: "flac", build: s_flac },
-    Scenario { name: "ogg", mime: "audio/ogg", ext: "ogg", build: s_ogg },
-    Scenario { name: "wav", mime: "audio/x-wav", ext: "wav", build: s_wav },
-    Scenario { name: "aiff", mime: "audio/x-aiff", ext: "aiff", build: s_aiff },
-    Scenario { name: "opus", mime: "audio/opus", ext: "opus", build: s_opus },
-    Scenario { name: "m4a", mime: "audio/mp4", ext: "m4a", build: s_m4a },
-    Scenario { name: "aac", mime: "audio/aac", ext: "aac", build: s_aac },
-    Scenario { name: "mp4", mime: "video/mp4", ext: "mp4", build: s_mp4 },
-    Scenario { name: "mkv", mime: "video/x-matroska", ext: "mkv", build: s_mkv },
-    Scenario { name: "webm", mime: "video/webm", ext: "webm", build: s_webm },
-    Scenario { name: "avi", mime: "video/x-msvideo", ext: "avi", build: s_avi },
-    Scenario { name: "mov", mime: "video/quicktime", ext: "mov", build: s_mov },
-    Scenario { name: "wmv", mime: "video/x-ms-wmv", ext: "wmv", build: s_wmv },
-    Scenario { name: "flv", mime: "video/x-flv", ext: "flv", build: s_flv },
-    Scenario { name: "video_ogg", mime: "video/ogg", ext: "ogv", build: s_video_ogg },
-    Scenario { name: "tiff", mime: "image/tiff", ext: "tiff", build: s_tiff },
-    Scenario { name: "webp", mime: "image/webp", ext: "webp", build: s_webp },
-    Scenario { name: "heic", mime: "image/heic", ext: "heic", build: s_heic },
-    Scenario { name: "heif", mime: "image/heif", ext: "heif", build: s_heif },
-    Scenario { name: "jxl", mime: "image/jxl", ext: "jxl", build: s_jxl },
+    Scenario {
+        name: "mp3",
+        mime: "audio/mpeg",
+        ext: "mp3",
+        build: s_mp3,
+    },
+    Scenario {
+        name: "flac",
+        mime: "audio/flac",
+        ext: "flac",
+        build: s_flac,
+    },
+    Scenario {
+        name: "ogg",
+        mime: "audio/ogg",
+        ext: "ogg",
+        build: s_ogg,
+    },
+    Scenario {
+        name: "wav",
+        mime: "audio/x-wav",
+        ext: "wav",
+        build: s_wav,
+    },
+    Scenario {
+        name: "aiff",
+        mime: "audio/x-aiff",
+        ext: "aiff",
+        build: s_aiff,
+    },
+    Scenario {
+        name: "opus",
+        mime: "audio/opus",
+        ext: "opus",
+        build: s_opus,
+    },
+    Scenario {
+        name: "m4a",
+        mime: "audio/mp4",
+        ext: "m4a",
+        build: s_m4a,
+    },
+    Scenario {
+        name: "aac",
+        mime: "audio/aac",
+        ext: "aac",
+        build: s_aac,
+    },
+    Scenario {
+        name: "mp4",
+        mime: "video/mp4",
+        ext: "mp4",
+        build: s_mp4,
+    },
+    Scenario {
+        name: "mkv",
+        mime: "video/x-matroska",
+        ext: "mkv",
+        build: s_mkv,
+    },
+    Scenario {
+        name: "webm",
+        mime: "video/webm",
+        ext: "webm",
+        build: s_webm,
+    },
+    Scenario {
+        name: "avi",
+        mime: "video/x-msvideo",
+        ext: "avi",
+        build: s_avi,
+    },
+    Scenario {
+        name: "mov",
+        mime: "video/quicktime",
+        ext: "mov",
+        build: s_mov,
+    },
+    Scenario {
+        name: "wmv",
+        mime: "video/x-ms-wmv",
+        ext: "wmv",
+        build: s_wmv,
+    },
+    Scenario {
+        name: "flv",
+        mime: "video/x-flv",
+        ext: "flv",
+        build: s_flv,
+    },
+    Scenario {
+        name: "video_ogg",
+        mime: "video/ogg",
+        ext: "ogv",
+        build: s_video_ogg,
+    },
+    Scenario {
+        name: "tiff",
+        mime: "image/tiff",
+        ext: "tiff",
+        build: s_tiff,
+    },
+    Scenario {
+        name: "webp",
+        mime: "image/webp",
+        ext: "webp",
+        build: s_webp,
+    },
+    Scenario {
+        name: "heic",
+        mime: "image/heic",
+        ext: "heic",
+        build: s_heic,
+    },
+    Scenario {
+        name: "heif",
+        mime: "image/heif",
+        ext: "heif",
+        build: s_heif,
+    },
+    Scenario {
+        name: "jxl",
+        mime: "image/jxl",
+        ext: "jxl",
+        build: s_jxl,
+    },
 ];
 
 #[test]
@@ -3443,7 +3682,10 @@ fn scenario_read_metadata_is_stable_across_repeated_calls() {
             (Err(_), Err(_), Err(_)) => {
                 // If every call errors consistently that's still stable.
             }
-            other => panic!("reader inconsistent across calls for {}: {other:?}", row.name),
+            other => panic!(
+                "reader inconsistent across calls for {}: {other:?}",
+                row.name
+            ),
         }
     }
 }

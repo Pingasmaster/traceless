@@ -187,8 +187,7 @@ impl FileStore {
                 });
                 continue;
             }
-            if !crate::config::limits_disabled()
-                && md.len() > crate::handlers::MAX_INPUT_FILE_BYTES
+            if !crate::config::limits_disabled() && md.len() > crate::handlers::MAX_INPUT_FILE_BYTES
             {
                 let id = next_file_id();
                 let entry = FileEntry::new(id, &path);

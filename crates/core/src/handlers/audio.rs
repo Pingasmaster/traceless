@@ -41,7 +41,10 @@ fn ext_to_mime(ext: &str) -> Option<&'static str> {
 /// wasm build returns [`CoreError::NotImplementedInWasm`] from
 /// `clean_bytes` because there is no in-memory MP4 atom rewriter yet.
 fn is_ffmpeg_routed(mime: &str) -> bool {
-    matches!(mime, "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac")
+    matches!(
+        mime,
+        "audio/mp4" | "audio/m4a" | "audio/x-m4a" | "audio/aac"
+    )
 }
 
 /// Strip every tag from a lofty-supported audio file, in memory. Handles
@@ -656,8 +659,8 @@ mod tests {
         // before walking into the audio frames.
         let app_body = b"XXXXsecret-producer-data";
         let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, app_body)]);
-        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
-            .expect("should rewrite");
+        let rewritten =
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).expect("should rewrite");
 
         // Magic preserved.
         assert_eq!(&rewritten[..4], b"fLaC");
@@ -685,8 +688,8 @@ mod tests {
         // non-last block and VORBIS_COMMENT as the last.
         let vc_body = b"junk-vorbis-body";
         let flac = synth_flac(&[(FLAC_BLOCK_APPLICATION, b"APP1payload"), (4, vc_body)]);
-        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
-            .expect("should rewrite");
+        let rewritten =
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).expect("should rewrite");
 
         // First kept block (STREAMINFO, type 0) has last-flag clear.
         assert_eq!(rewritten[4] & 0x80, 0);
@@ -782,8 +785,8 @@ mod tests {
             (FLAC_BLOCK_APPLICATION, app),
             (4, vc),
         ]);
-        let rewritten = rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES)
-            .expect("should rewrite");
+        let rewritten =
+            rewrite_flac_without_blocks(&flac, FLAC_LEAKY_BLOCK_TYPES).expect("should rewrite");
 
         assert!(
             !rewritten.windows(pic.len()).any(|w| w == pic),

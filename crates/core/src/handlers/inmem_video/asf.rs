@@ -149,7 +149,6 @@ fn as_usize(v: u64, what: &str) -> Result<usize, CoreError> {
     usize::try_from(v).map_err(|_| parse_err(format!("{what} exceeds addressable range")))
 }
 
-
 /// Rewrite a Header Extension Object, dropping any nested Metadata Object
 /// and Metadata Library Object from its Header Extension Data and fixing
 /// the two affected size fields (Header Extension Data Size u32, and the
@@ -168,7 +167,9 @@ fn rewrite_header_extension(obj: &[u8]) -> Result<(Vec<u8>, u64), CoreError> {
         .checked_add(HEADER_EXT_PAYLOAD_PREFIX)
         .ok_or_else(|| parse_err("header extension prefix overflow"))?;
     if data_start > obj.len() {
-        return Err(parse_err("Header Extension Object too small for its prefix"));
+        return Err(parse_err(
+            "Header Extension Object too small for its prefix",
+        ));
     }
     // Header Extension Data Size lives at payload offset 18, i.e. object
     // offset 24 + 18 = 42.
@@ -245,8 +246,8 @@ fn rewrite_header_extension(obj: &[u8]) -> Result<(Vec<u8>, u64), CoreError> {
     let new_data_size = (data_size as u64)
         .checked_sub(removed)
         .ok_or_else(|| parse_err("Header Extension Data Size underflow"))?;
-    let new_data_size_u32 =
-        u32::try_from(new_data_size).map_err(|_| parse_err("Header Extension Data Size overflow"))?;
+    let new_data_size_u32 = u32::try_from(new_data_size)
+        .map_err(|_| parse_err("Header Extension Data Size overflow"))?;
 
     // Rebuild: prefix (object header + reserved fields) with a patched
     // data-size field, then the kept nested objects.
@@ -874,9 +875,7 @@ mod tests {
         );
         // The Metadata Library GUID must be absent everywhere.
         assert!(
-            !cleaned
-                .windows(16)
-                .any(|w| w == METADATA_LIBRARY_OBJECT),
+            !cleaned.windows(16).any(|w| w == METADATA_LIBRARY_OBJECT),
             "Metadata Library Object GUID must be gone"
         );
 
