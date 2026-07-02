@@ -15,17 +15,19 @@ Inspired by [Metadata Cleaner](https://gitlab.com/rmnvgr/metadata-cleaner) by Ro
 | Category | Extensions |
 |---|---|
 | Images | `.jpg`, `.jpeg`, `.png`, `.webp`, `.tiff`, `.tif`, `.heic`, `.heif`, `.jxl`, `.gif`, `.bmp`, `.ppm`, `.pgm`, `.pbm`, `.pnm` |
-| Documents | `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, `.odp`, `.odg`, `.epub`, `.txt` |
+| Documents | `.pdf`, `.docx`, `.xlsx`, `.pptx`, `.odt`, `.ods`, `.odp`, `.odg`, `.epub` |
 | Audio | `.mp3`, `.flac`, `.ogg`, `.opus`, `.wav`, `.m4a`, `.aac`, `.aiff` |
 | Video | `.mp4`, `.mkv`, `.webm`, `.avi`, `.mov`, `.wmv`, `.flv` |
 | Markup | `.svg`, `.html`, `.htm`, `.xhtml`, `.css` |
-| Archives | `.zip`, `.tar`, `.tar.gz`, `.tar.bz2`, `.tar.xz` |
-| Other | `.torrent` |
+| Archives | `.zip`, `.tar`, `.tar.gz`, `.tgz`, `.tar.bz2`, `.tbz`, `.tar.xz`, `.txz`, `.tar.zst`, `.tzst` |
+| Other | `.torrent`, `.txt` |
+
+`.txt` is handled as a harmless passthrough (no metadata to strip).
 
 ## Features
 
 - **Read** metadata from any supported file before cleaning.
-- **Remove** all metadata thoroughly by default, no half-measures.
+- **Remove** all metadata thoroughly by default (a few exotic surfaces — PDF content streams, HEIC `uuid` boxes, video codec data — are deliberately not closed; see `CLAUDE.md`).
 - **Recursive archive cleaning**: files inside ZIPs, TARs, and office documents are cleaned too, so an embedded JPEG inside a `.docx` will not leak camera EXIF or GPS.
 - **Deterministic output**: cleaning the same file twice produces byte-identical results.
 - **Optional sandboxing**: when [bubblewrap](https://github.com/containers/bubblewrap) is installed, `ffmpeg` runs inside a locked-down namespace with no filesystem access beyond the input and output paths.
@@ -43,13 +45,18 @@ The easiest way to build and install Traceless is with the included script:
 It detects your distribution, installs any missing system packages, installs Rust via rustup if needed, builds the available frontends, and installs the binaries to `/usr/local/bin`.
 
 ```bash
-./install.sh           # auto-detect, install to /usr/local/bin
-./install.sh --user    # install to ~/.local/bin
-./install.sh --all     # build both frontends
-./install.sh --gtk     # GTK only
-./install.sh --qt      # Qt only
-./install.sh --ask     # confirm each step
+./install.sh                 # auto-detect, install to /usr/local/bin
+./install.sh --user          # install to ~/.local/bin
+./install.sh --prefix DIR    # install to DIR/bin
+./install.sh --no-ffmpeg     # skip the ffmpeg runtime dep
+./install.sh --all           # build both frontends
+./install.sh --gtk           # GTK only
+./install.sh --qt            # Qt only
+./install.sh --ask           # confirm each step
+./install.sh --help          # list all flags
 ```
+
+`install.sh` does not install `bubblewrap` — install it via your package manager for the optional sandbox.
 
 ## Manual Build
 
