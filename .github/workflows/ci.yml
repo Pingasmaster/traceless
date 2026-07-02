@@ -15,7 +15,7 @@ jobs:
     name: Test, clippy, and build
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -42,7 +42,7 @@ jobs:
           components: clippy, rustfmt
 
       - name: Cache cargo registry and build artefacts
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -79,7 +79,7 @@ jobs:
     name: Dependency advisory scan
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: cargo-deny advisories
         # Scan the dependency graph against the RustSec advisory
         # database. Bans/licenses/sources are intentionally omitted:
@@ -94,7 +94,7 @@ jobs:
     name: Fuzz target compile check
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Install system dependencies
         run: |
@@ -115,7 +115,7 @@ jobs:
         run: cargo install --locked cargo-fuzz
 
       - name: Cache fuzz target dir
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
