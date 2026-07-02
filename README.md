@@ -1,6 +1,6 @@
 # Traceless
 
-![GPLv3](gplv3.png)
+[![CI](https://github.com/Pingasmaster/traceless/actions/workflows/ci.yml/badge.svg)](https://github.com/Pingasmaster/traceless/actions/workflows/ci.yml) ![GPLv3](gplv3.png)
 
 A fast, safe metadata cleaner for Linux desktops, written in Rust.
 
