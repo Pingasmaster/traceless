@@ -34,14 +34,14 @@ little_exif = "= 0.6.23"
 img-parts = "= 0.4.0"
 
 # PDF metadata
-lopdf = { version = "= 0.42.0", default-features = false }
+lopdf = { version = "= 0.43.0", default-features = false }
 
 # Audio metadata
 lofty = "= 0.24.0"
 
 # Document metadata (ODT, DOCX, etc.)
 zip = { version = "= 8.6.0", default-features = false, features = ["deflate"] }
-quick-xml = "= 0.40.1"
+quick-xml = "= 0.41.0"
 
 # General
 log.workspace = true
@@ -50,7 +50,7 @@ mime_guess = "= 2.0.5"
 # `async-channel` backs the native worker pool only; the wasm build has
 # no thread pool, so it is native-gated.
 async-channel = { workspace = true, optional = true }
-rand = "= 0.10.1"
+rand = "= 0.10.2"
 # `tempfile` is only used by the native path-oriented handlers (embedded
 # media round-trips, archive staging); the wasm path is fully in-memory.
 tempfile = { version = "= 3.27.0", optional = true }
@@ -70,7 +70,7 @@ zstd = { version = "= 0.13.3", optional = true }
 # the `optimization` (unsafe) and `lzip` default features; decode is
 # always available, `encoder` + `xz` give the XZ writer (xz pulls sha2).
 # `ruzstd` provides the streaming zstd decoder + the `encoding` encoder.
-lzma-rust2 = { version = "= 0.16.4", default-features = false, features = ["std", "encoder", "xz"], optional = true }
+lzma-rust2 = { version = "= 0.16.5", default-features = false, features = ["std", "encoder", "xz"], optional = true }
 ruzstd = { version = "= 0.8.3", optional = true }
 
 # Pure-Rust container framing for the wasm-inmem video / MP4-family-audio
@@ -78,7 +78,7 @@ ruzstd = { version = "= 0.8.3", optional = true }
 # Decode/Encode over Cursor (tokio + serde features stay OFF); `mkv-element`
 # (Matroska/WebM) gives read_from/write_to over Cursor (tokio stays OFF).
 # AVI, FLV, ASF, and Ogg are hand-rolled byte surgery with no extra crate.
-mp4-atom = { version = "= 0.12.0", optional = true }
+mp4-atom = { version = "= 0.12.1", optional = true }
 mkv-element = { version = "= 0.4.0", default-features = false, optional = true }
 
 [lints]
@@ -90,7 +90,7 @@ workspace = true
 # harmless: cargo unifies versions. Mirrored per feature so the suite
 # builds under each configuration.
 tempfile = "= 3.27.0"
-lopdf = { version = "= 0.42.0", default-features = false }
+lopdf = { version = "= 0.43.0", default-features = false }
 little_exif = "= 0.6.23"
 lofty = "= 0.24.0"
 zip = { version = "= 8.6.0", default-features = false, features = ["deflate"] }
@@ -101,7 +101,7 @@ proptest = "= 1.11.0"
 # Backs the wasm-inmem MKV stripper's unit test (constructs a
 # `FileData(Bytes)` attachment fixture). `mkv-element` pins the same
 # version, so cargo unifies it.
-bytes = "= 1.12.0"
+bytes = "= 1.12.1"
 
 # Native-only test codecs. The integration tests under tests/ exercise
 # the C-backed xz/zstd archive paths and only build with `native`.

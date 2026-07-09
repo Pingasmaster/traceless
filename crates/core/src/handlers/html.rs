@@ -791,7 +791,7 @@ fn strip_on_handlers(raw: &str) -> Cow<'_, str> {
 /// attribute whose name starts with `on` (case-insensitive) followed
 /// by an alpha character. When this returns false we can hand the
 /// caller back a borrowed slice with no allocation.
-fn contains_on_attribute(raw: &str) -> bool {
+const fn contains_on_attribute(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     let len = bytes.len();
     if len < 4 {
