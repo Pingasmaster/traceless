@@ -93,6 +93,20 @@ pub(crate) fn clean_bytes(input: &[u8], ext: &str) -> Result<Vec<u8>, CoreError>
     // box. Zeroing in place (rather than deleting bytes) keeps every
     // `iloc` extent offset valid so the file still decodes.
     if matches!(mime, "image/heic" | "image/heif") {
+        // Pre-validate the top-level ISO-BMFF chain BEFORE handing the bytes
+        // to `little_exif`. Its HEIF reader trusts the 32-bit box-size field
+        // and allocates it outright, so an 8-byte body whose header claims
+        // 0xd743e620 makes it request 3.36 GiB (found by fuzzing, 2026-07-29;
+        // reproduced against 0.6.23). In the wasm component that request
+        // exceeds the 3 GiB linear-memory ceiling and traps the instance:
+        // a remote DoS from a 9-byte request. Our own walker (`parse_box`)
+        // already rejects out-of-bounds extents, so reuse it as the gate.
+        if !heif_top_level_boxes_fit(input) {
+            return Err(CoreError::CleanError {
+                path: std::path::PathBuf::new(),
+                detail: "HEIF: malformed box structure (a box size exceeds the file); refusing to parse".to_string(),
+            });
+        }
         let mut buf = input.to_vec();
         ExifMetadata::clear_metadata(&mut buf, FileExtension::HEIF).map_err(|e| {
             CoreError::CleanError {
@@ -604,6 +618,28 @@ fn parse_box(buf: &[u8], pos: usize) -> Option<(usize, usize, [u8; 4])> {
 /// Returns `None` only on a structural parse failure (so the caller can
 /// refuse to ship a partially-stripped image); a HEIF that simply has no
 /// XMP / ICC returns `Some` with the buffer unchanged.
+/// Walk the top-level ISO-BMFF box chain and report whether every box fits
+/// inside `input`.
+///
+/// `parse_box` returns `None` for any box whose declared extent runs past the
+/// buffer (or whose 64-bit largesize does not fit a `usize`), which is exactly
+/// the shape that makes `little_exif`'s HEIF reader allocate the declared size
+/// on trust. A trailing run shorter than a box header is tolerated: that is a
+/// truncated tail, not an amplification primitive.
+fn heif_top_level_boxes_fit(input: &[u8]) -> bool {
+    let mut pos = 0usize;
+    while pos + 8 <= input.len() {
+        let Some((_payload, end, _ty)) = parse_box(input, pos) else {
+            return false;
+        };
+        if end <= pos {
+            return false; // zero-length box: refuse rather than spin
+        }
+        pos = end;
+    }
+    true
+}
+
 fn strip_heif_extra_metadata(input: &[u8]) -> Option<Vec<u8>> {
     let mut out = input.to_vec();
 
@@ -1483,6 +1519,32 @@ mod tests {
         out.extend_from_slice(&meta);
         out.extend_from_slice(&mdat);
         out
+    }
+
+    /// Regression: a HEIF body whose first box header declares a size far
+    /// larger than the file used to reach `little_exif`, which allocates the
+    /// declared size on trust (0.6.23: an 8-byte body asking for 3.36 GiB).
+    /// In the efrei.app wasm component that request exceeds the 3 GiB linear
+    /// memory ceiling and traps the instance: a remote DoS from a 9-byte
+    /// request. Found by fuzzing 2026-07-29; the gate is now a pre-parse
+    /// bounds walk, so these must be rejected without any large allocation.
+    #[test]
+    fn heif_oversized_box_header_rejected_before_alloc() {
+        // Exact fuzz artifacts (box size 0xd743e620 and 0xffffffff).
+        for body in [
+            vec![0xd7u8, 0x43, 0xe6, 0x20, 0xd7, 0xd7, 0x12, 0x49],
+            vec![0xffu8, 0xff, 0xff, 0xff, 0xff, 0xef, 0xbb, 0x49],
+        ] {
+            assert!(
+                !heif_top_level_boxes_fit(&body),
+                "oversized top-level box must fail the fit check"
+            );
+            let err = clean_bytes(&body, "heic");
+            assert!(err.is_err(), "malformed HEIF must be rejected, not parsed");
+        }
+        // A well-formed file still passes the gate (guards against the check
+        // being too strict and rejecting real images).
+        assert!(heif_top_level_boxes_fit(&heif_with_xmp_and_icc()));
     }
 
     #[test]
