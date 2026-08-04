@@ -217,15 +217,37 @@ common_packages() {
     esac
 }
 
+# ── Privilege escalation ─────────────────────────────────────────────────────
+
+# Use whichever escalation tool the system actually has, rather than assuming
+# sudo. doas (OpenBSD's, packaged as opendoas) is checked first: a machine that
+# has it installed generally intends to use it, and some hardened systems ship
+# doas *instead of* sudo. Falls back to sudo, and to nothing when already root.
+ESCALATE=""
+detect_escalation() {
+    if [[ "${EUID:-$(id -u)}" -eq 0 ]]; then
+        ESCALATE=""                       # already root, nothing to prepend
+    elif command -v doas >/dev/null 2>&1; then
+        ESCALATE="doas"
+    elif command -v sudo >/dev/null 2>&1; then
+        ESCALATE="sudo"
+    else
+        ESCALATE=""
+        warn "Neither doas nor sudo found, and not running as root."
+        warn "Package installation and installing outside \$HOME will likely fail."
+    fi
+}
+detect_escalation
+
 install_cmd() {
     case "$1" in
-        arch)     echo "sudo pacman -S --needed --noconfirm" ;;
-        fedora)   echo "sudo dnf install -y" ;;
-        ubuntu|debian) echo "sudo apt install -y" ;;
-        opensuse) echo "sudo zypper install -y" ;;
-        void)     echo "sudo xbps-install -y" ;;
-        alpine)   echo "sudo apk add" ;;
-        gentoo)   echo "sudo emerge --noreplace" ;;
+        arch)     echo "$ESCALATE pacman -S --needed --noconfirm" ;;
+        fedora)   echo "$ESCALATE dnf install -y" ;;
+        ubuntu|debian) echo "$ESCALATE apt install -y" ;;
+        opensuse) echo "$ESCALATE zypper install -y" ;;
+        void)     echo "$ESCALATE xbps-install -y" ;;
+        alpine)   echo "$ESCALATE apk add" ;;
+        gentoo)   echo "$ESCALATE emerge --noreplace" ;;
         nix)      echo "nix-env -iA nixpkgs." ;;
         *)        echo "" ;;
     esac
@@ -424,7 +446,7 @@ main() {
 
     local SUDO=""
     if [[ "$PREFIX" == "/usr/local" || "$PREFIX" == "/usr" ]]; then
-        SUDO="sudo"
+        SUDO="$ESCALATE"                  # doas, sudo, or empty when already root
     fi
 
     $SUDO mkdir -p "$BINDIR"
